@@ -42,6 +42,7 @@ jobs:
   test:
     name: Gate on pytest
     runs-on: ubuntu-latest
+    needs: [build-ui]
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +51,14 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+
+      # pip install requires the built UI (wheel force-include); pull the
+      # artifact produced by build-ui rather than rebuilding it here.
+      - name: Download built UI into src/grag/api/static
+        uses: actions/download-artifact@v4
+        with:
+          name: grag-ui-static
+          path: src/grag/api/static
 
       - name: Install and test
         run: |
