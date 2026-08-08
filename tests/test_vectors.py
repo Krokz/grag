@@ -119,7 +119,7 @@ def test_fastembed_missing_raises_with_hint(tmp_path):
     )
     with pytest.raises(ConfigurationError) as exc_info:
         vectors.get_embedder(cfg)
-    assert "grag[embed-local]" in str(exc_info.value)
+    assert "gragdb[embed-local]" in str(exc_info.value)
 
 
 def test_remote_embedder_payload_and_key(tmp_path, monkeypatch):
