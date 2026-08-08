@@ -500,3 +500,54 @@ def test_service_delegates_to_mutate(tmp_path):
         assert summary.nodes == 1
     finally:
         svc.close()
+
+
+# --- extension loading on the write path ----------------------------------------------
+
+
+def test_write_after_search_fresh_engine(tmp_path):
+    """Regression: a table with an FTS/HNSW index rejects writes unless the
+    extension is LOADed in-process. The search path loads extensions lazily, so
+    same-session writes masked this; a fresh engine writing first always failed
+    with "extension is not loaded". upsert_* must ensure extensions themselves.
+
+    Simulates a fresh process by building an indexed table on one engine, then
+    writing through a brand-new Engine on the same file (fresh extension state).
+    """
+    from grag.config import GragConfig
+    from grag.retrieval.search import search_knowledge
+    from grag.core.types import SearchRequest
+
+    db = tmp_path / "ext.lbdb"
+    cfg = GragConfig(db_path=db)
+
+    # Engine 1: define a searchable table, insert a row, run a search so the
+    # retrieval layer builds the FTS index.
+    eng1 = Engine(cfg)
+    try:
+        define_schema(eng1, cfg, DefineSchemaRequest(node_tables=[_doc_spec()]))
+        upsert_nodes(
+            eng1, cfg,
+            UpsertNodesRequest(
+                nodes=[UpsertNode(label="Doc", key="d1", properties={"title": "graph"})]
+            ),
+        )
+        search_knowledge(eng1, cfg, SearchRequest(query="graph", top_k=1, hops=0))
+    finally:
+        eng1.close()
+
+    # Engine 2 (fresh process state): write without any prior search. Must not
+    # raise "Trying to insert into an index ... but its extension is not loaded."
+    eng2 = Engine(cfg)
+    try:
+        summary = upsert_nodes(
+            eng2, cfg,
+            UpsertNodesRequest(
+                nodes=[UpsertNode(label="Doc", key="d2", properties={"title": "fresh write"})]
+            ),
+        )
+        assert summary.nodes == 1
+        rows = eng2.execute("MATCH (d:Doc) RETURN count(d)").rows
+        assert rows == [[2]]
+    finally:
+        eng2.close()

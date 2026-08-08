@@ -68,6 +68,28 @@ class Engine:
         self._readers_created = 0
         self._readers_lock = threading.Lock()
         self._set_timeout(self._write_conn)
+        self._preload_extensions()
+
+    def _preload_extensions(self) -> None:
+        """LOAD FTS and VECTOR once at startup so no operation path has to.
+
+        Any table that has an FTS or HNSW index rejects reads, writes, and
+        index maintenance while its extension is unloaded in the process
+        ("Trying to insert into an index ... but its extension is not loaded").
+        Loading per-path (search/write/vector) leaves gaps that only surface
+        when a fresh process takes a different first path. Loading here covers
+        every path uniformly.
+
+        Tolerant by design: an extension that was never INSTALLed (fully
+        offline) cannot have built an index, so a failed LOAD is safe to skip.
+        Extensions are scoped to the Database, so the write connection's LOAD
+        covers the pooled read connections too.
+        """
+        for name in ("FTS", "VECTOR"):
+            try:
+                self._run(self._write_conn, f"LOAD EXTENSION {name}", None)
+            except GragError:
+                pass
 
     # -- execution -------------------------------------------------------------
 

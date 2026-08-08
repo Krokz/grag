@@ -42,6 +42,10 @@ _META_DDL = (
     "from_label STRING, to_label STRING)"
 )
 
+# NOTE: writes to FTS/HNSW-indexed tables require those extensions to be LOADed
+# in-process. Engine.__init__ preloads both (see _preload_extensions), so the
+# write path needs no per-call handling here.
+
 
 # --- introspection helpers -------------------------------------------------------
 

@@ -22,6 +22,18 @@ pip install -e ".[embed-remote]"  # optional: OpenAI-compatible remote embedding
 
 Without an embedder, everything works FTS-only (BM25 is native to the engine).
 
+**Enabling semantic search:** install `embed-local`, then set `GRAG_EMBED_PROVIDER=fastembed`
+when serving. This uses ONNX Runtime — **no PyTorch** — so grag stays light (~50-100MB,
+model downloads once then works offline). Nodes are (re)embedded lazily on the next
+search whenever their embedding is NULL. First query downloads the model + embeds all
+nodes (seconds); steady state is ~300ms/query on CPU.
+
+```bash
+pip install -e ".[embed-local]"
+GRAG_EMBED_PROVIDER=fastembed grag --db knowledge.lbdb serve
+# optional: GRAG_EMBED_MODEL=BAAI/bge-base-en-v1.5 GRAG_EMBED_DIM=768
+```
+
 ## Quickstart
 
 ```bash
