@@ -1,5 +1,6 @@
 import type {
   ApiFailure,
+  DbsResponse,
   GraphSample,
   HealthResponse,
   QueryResponse,
@@ -18,10 +19,24 @@ export class ApiError extends Error implements ApiFailure {
   }
 }
 
+// Selected database for multi-db servers; null means "server default".
+// App sets this once /api/dbs has been fetched and on every selector change.
+let currentDb: string | null = null;
+
+export function setDb(name: string | null): void {
+  currentDb = name;
+}
+
+function apiUrl(path: string): string {
+  if (!currentDb) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}db=${encodeURIComponent(currentDb)}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(path, {
+    res = await fetch(apiUrl(path), {
       headers: { 'Content-Type': 'application/json' },
       ...init,
     });
@@ -55,6 +70,8 @@ export function toFailure(e: unknown): ApiFailure {
 
 export const api = {
   health: () => request<HealthResponse>('/api/health'),
+
+  dbs: () => request<DbsResponse>('/api/dbs'),
 
   schema: () => request<SchemaDocument>('/api/schema'),
 

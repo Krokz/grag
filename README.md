@@ -83,6 +83,37 @@ Any MCP client gets these 7 tools:
 
 Errors are returned as `ERROR: ... HINT: ...` tool output so the model self-corrects in-loop.
 
+## Multiple projects / shared server
+
+One `.lbdb` = one isolated universe — no shared entities, no cross-db queries. Per-project DBs is the default pattern; multi-db serving is opt-in via `--db-dir` (single-db is unchanged).
+
+```bash
+grag --db-dir ~/kb serve    # one process serves every .lbdb in ~/kb
+```
+
+Every `/api/*` endpoint accepts `?db=<name>` or an `x-grag-db: <name>` header (query param wins). `GET /api/dbs` returns `{"dbs": ["alpha","beta"], "default": "alpha"}` (`{"dbs": [], "default": null}` in single-db mode). Without a selector the server prefers the file matching `db_path`'s name, else a lone `.lbdb`, else 400 with a hint; unknown name → 404 listing available DBs.
+
+For MCP, several IDE windows on one DB collide: stdio spawns a `grag mcp` process per client and LadybugDB allows only ONE process to write a given `.lbdb` ("Could not set lock"). One shared HTTP server avoids it — each window sends its project name via `x-grag-db`:
+
+```bash
+grag --db-dir ~/kb mcp --transport streamable-http --host 127.0.0.1 --port 8472
+```
+
+Cursor / `.cursor/mcp.json` (per window, one header per project):
+
+```json
+{
+  "mcpServers": {
+    "grag": {
+      "url": "http://127.0.0.1:8472/mcp",
+      "headers": { "x-grag-db": "project-a" }
+    }
+  }
+}
+```
+
+The server is localhost-only by default, and db names are routing hints, not auth — resolution rejects absolute paths and `..`. Single-db stdio (`grag --db knowledge.lbdb mcp`) remains the simple default.
+
 ## Python API
 
 ```python

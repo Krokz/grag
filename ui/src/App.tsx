@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, toFailure } from './api';
+import { api, setDb, toFailure } from './api';
 import type {
   ApiFailure,
   GraphStats,
@@ -21,6 +21,9 @@ const EMPTY_GRAPH: Subgraph = { nodes: [], edges: [] };
 
 export default function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [dbs, setDbs] = useState<string[]>([]);
+  const [db, setDbState] = useState<string | null>(null);
+  const [dbsLoaded, setDbsLoaded] = useState(false);
   const [schema, setSchema] = useState<SchemaDocument | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [graph, setGraph] = useState<Subgraph>(EMPTY_GRAPH);
@@ -66,9 +69,39 @@ export default function App() {
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth(null));
+    api
+      .dbs()
+      .then((res) => {
+        setDbs(res.dbs);
+        const initial = res.default ?? res.dbs[0] ?? null;
+        setDb(initial);
+        setDbState(initial);
+      })
+      .catch(() => {
+        // older server without /api/dbs — stay in single-db mode
+      })
+      .finally(() => setDbsLoaded(true));
+  }, []);
+
+  const selectDb = useCallback((name: string) => {
+    setDb(name);
+    setDbState(name);
+  }, []);
+
+  // (Re)load everything db-scoped; on a db switch the old canvas is stale.
+  useEffect(() => {
+    if (!dbsLoaded) return;
+    setGraph(EMPTY_GRAPH);
+    setStats(null);
+    setSeeds(new Map());
+    setSelectedId(null);
+    setResult(null);
+    setQueryError(null);
+    setSearchResult(null);
+    setSearchError(null);
     loadSchema();
     loadSample();
-  }, [loadSchema, loadSample]);
+  }, [dbsLoaded, db, loadSchema, loadSample]);
 
   const runQuery = useCallback(
     async (cypher: string, mode?: ApplyMode) => {
@@ -141,6 +174,20 @@ export default function App() {
           g<span>rag</span> · graph explorer
         </span>
         <SearchBar searching={searching} onSearch={runSearch} />
+        {dbs.length > 1 && db != null && (
+          <select
+            className="db-select"
+            value={db}
+            onChange={(e) => selectDb(e.target.value)}
+            title="database"
+          >
+            {dbs.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        )}
         <span className="health">
           <span className={health ? 'dot ok' : 'dot'} />
           {health ? `v${health.version}` : 'offline'}

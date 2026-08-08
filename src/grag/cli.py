@@ -13,6 +13,10 @@ def _config(args: argparse.Namespace) -> GragConfig:
     cfg = GragConfig.from_env()
     if getattr(args, "db", None):
         cfg.db_path = Path(args.db)
+    if getattr(args, "db_dir", None):
+        # Leave cfg.db_path at its default: its name picks the preferred
+        # default db inside db_dir.
+        cfg.db_dir = Path(args.db_dir)
     return cfg
 
 
@@ -20,8 +24,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="grag", description="LLM-first graph knowledgebase"
     )
-    parser.add_argument(
+    db_sel = parser.add_mutually_exclusive_group()
+    db_sel.add_argument(
         "--db", default=None, help="path to the .lbdb database file (env: GRAG_DB_PATH)"
+    )
+    db_sel.add_argument(
+        "--db-dir",
+        default=None,
+        help="directory of .lbdb files for multi-db serving (env: GRAG_DB_DIR)",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -29,7 +39,19 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8471)
 
-    sub.add_parser("mcp", help="run the MCP stdio server")
+    mcp = sub.add_parser("mcp", help="run the MCP server (stdio or streamable-http)")
+    mcp.add_argument(
+        "--transport",
+        default="stdio",
+        choices=["stdio", "streamable-http"],
+        help="MCP transport: stdio (default, one process per client) or "
+        "streamable-http (one shared server many clients connect to)",
+    )
+    mcp.add_argument("--host", default="127.0.0.1")
+    mcp.add_argument("--port", type=int, default=8472)
+    mcp.add_argument(
+        "--path", default="/mcp", help="HTTP endpoint path (streamable-http)"
+    )
 
     ingest = sub.add_parser("ingest", help="ingest files into the graph")
     ingest.add_argument("paths", nargs="+")
@@ -49,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "mcp":
         from grag.mcp_server.server import run
 
-        run(cfg)
+        run(cfg, transport=args.transport, host=args.host, port=args.port, path=args.path)
     elif args.cmd == "ingest":
         from grag.ingest.loaders import ingest_paths
 

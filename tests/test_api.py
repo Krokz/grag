@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -10,13 +12,16 @@ from grag.api.main import _STATIC_DIR, create_app
 from grag.config import GragConfig
 from grag.core.types import (
     ContextResponse,
+    DefineSchemaRequest,
     GraphSample,
     IngestResponse,
     MutationSummary,
     QueryResponse,
     SchemaDocument,
     SearchResponse,
+    UpsertNodesRequest,
 )
+from grag.service import GragService
 
 
 def _static_built() -> bool:
@@ -298,3 +303,180 @@ def test_root_fallback(client):
         body = res.json()
         assert body["service"] == "grag"
         assert body["version"] == grag.__version__
+
+
+# -- multi-db routing ----------------------------------------------------------
+
+
+def test_list_dbs_single_db_mode(client):
+    res = client.get("/api/dbs")
+    assert res.status_code == 200
+    assert res.json() == {"dbs": [], "default": None}
+
+
+def test_single_db_mode_ignores_db_selector(client):
+    """A ?db= / x-grag-db selector in single-db mode is ignored, not an error."""
+    res = client.post(
+        "/api/schema/define?db=anything",
+        json={
+            "node_tables": [
+                {
+                    "name": "Doc",
+                    "primary_key": "id",
+                    "properties": [{"name": "id", "type": "STRING"}],
+                }
+            ]
+        },
+    )
+    assert res.status_code == 200
+    got = client.get("/api/schema", headers={"x-grag-db": "anything"})
+    assert got.status_code == 200
+    doc = SchemaDocument.model_validate(got.json())
+    assert any(t.name == "Doc" for t in doc.node_tables)
+
+
+def _make_db(path: Path, row_key: str, row_name: str) -> None:
+    svc = GragService(
+        GragConfig(db_path=path, buffer_pool_size=128 * 1024 * 1024)
+    )
+    try:
+        svc.define_schema(
+            DefineSchemaRequest(
+                node_tables=[
+                    {
+                        "name": "Item",
+                        "primary_key": "id",
+                        "properties": [
+                            {"name": "id", "type": "STRING"},
+                            {"name": "name", "type": "STRING"},
+                        ],
+                    }
+                ]
+            )
+        )
+        svc.upsert_nodes(
+            UpsertNodesRequest(
+                nodes=[
+                    {
+                        "label": "Item",
+                        "key": row_key,
+                        "properties": {"name": row_name},
+                    }
+                ]
+            )
+        )
+    finally:
+        svc.close()
+
+
+@pytest.fixture()
+def multi_client(tmp_path):
+    """Two dbs (alpha, beta) in a db_dir; alpha is the preferred default."""
+    db_dir = tmp_path / "dbs"
+    db_dir.mkdir()
+    _make_db(db_dir / "alpha.lbdb", "a1", "alpha-thing")
+    _make_db(db_dir / "beta.lbdb", "b1", "beta-thing")
+    app = create_app(
+        GragConfig(
+            db_dir=db_dir,
+            db_path=Path("alpha.lbdb"),
+            buffer_pool_size=128 * 1024 * 1024,
+        )
+    )
+    with TestClient(app) as c:
+        yield c
+
+
+def _item_names(res) -> list[str]:
+    assert res.status_code == 200
+    q = QueryResponse.model_validate(res.json())
+    return [row[0] for row in q.rows]
+
+
+def test_list_dbs_multi_db_mode(multi_client):
+    res = multi_client.get("/api/dbs")
+    assert res.status_code == 200
+    assert res.json() == {"dbs": ["alpha", "beta"], "default": "alpha"}
+
+
+def test_query_routes_per_db(multi_client):
+    cypher = "MATCH (i:Item) RETURN i.name"
+    alpha = multi_client.post("/api/query?db=alpha", json={"cypher": cypher})
+    beta = multi_client.post("/api/query?db=beta", json={"cypher": cypher})
+    assert _item_names(alpha) == ["alpha-thing"]
+    assert _item_names(beta) == ["beta-thing"]
+
+
+def test_header_routes_like_query_param(multi_client):
+    cypher = "MATCH (i:Item) RETURN i.name"
+    res = multi_client.post(
+        "/api/query", json={"cypher": cypher}, headers={"x-grag-db": "beta"}
+    )
+    assert _item_names(res) == ["beta-thing"]
+
+
+def test_query_param_wins_over_header(multi_client):
+    cypher = "MATCH (i:Item) RETURN i.name"
+    res = multi_client.post(
+        "/api/query?db=alpha", json={"cypher": cypher}, headers={"x-grag-db": "beta"}
+    )
+    assert _item_names(res) == ["alpha-thing"]
+
+
+def test_unknown_db_returns_404_with_hint(multi_client):
+    res = multi_client.post(
+        "/api/query?db=nope", json={"cypher": "MATCH (i:Item) RETURN i.name"}
+    )
+    assert res.status_code == 404
+    body = res.json()
+    assert "nope" in body["error"]
+    assert "alpha" in body["hint"]
+    assert "beta" in body["hint"]
+
+
+def test_default_db_resolves_without_selector(multi_client):
+    cypher = "MATCH (i:Item) RETURN i.name"
+    res = multi_client.post("/api/query", json={"cypher": cypher})
+    assert _item_names(res) == ["alpha-thing"]
+
+    sample = GraphSample.model_validate(multi_client.get("/api/graph/sample").json())
+    assert {n.id for n in sample.subgraph.nodes} == {"Item:a1"}
+
+
+@pytest.fixture()
+def no_default_client(tmp_path):
+    """Two dbs but db_path names NEITHER, so no default is determinable."""
+    db_dir = tmp_path / "dbs"
+    db_dir.mkdir()
+    _make_db(db_dir / "alpha.lbdb", "a1", "alpha-thing")
+    _make_db(db_dir / "beta.lbdb", "b1", "beta-thing")
+    app = create_app(
+        GragConfig(
+            db_dir=db_dir,
+            db_path=Path("knowledge.lbdb"),  # not present -> no preferred default
+            buffer_pool_size=128 * 1024 * 1024,
+        )
+    )
+    with TestClient(app) as c:
+        yield c
+
+
+def test_server_starts_and_dbs_listable_without_default(no_default_client):
+    """Regression: with 2+ DBs and no preferred default, registry.get() raises,
+    which used to crash create_app at startup (the server never came up, taking
+    /api/dbs discovery down with it). The app must start and serve discovery;
+    only selector-less data requests should 400 with the available-db hint."""
+    res = no_default_client.get("/api/dbs")
+    assert res.status_code == 200
+    assert res.json() == {"dbs": ["alpha", "beta"], "default": None}
+
+
+def test_selectorless_request_400s_but_selected_request_works(no_default_client):
+    cypher = "MATCH (i:Item) RETURN i.name"
+    # No selector and no default -> 400 with the available-dbs hint.
+    res = no_default_client.post("/api/query", json={"cypher": cypher})
+    assert res.status_code == 400
+    assert "alpha" in res.json()["hint"]
+    # Explicit selector still works against the same app.
+    ok = no_default_client.post("/api/query?db=beta", json={"cypher": cypher})
+    assert _item_names(ok) == ["beta-thing"]

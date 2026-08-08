@@ -1,10 +1,12 @@
-"""grag MCP server: the frozen 7-tool contract over stdio.
+"""grag MCP server: the frozen 7-tool contract over stdio or streamable-http.
 
 Tool logic lives in plain module-level functions (a GragService is the first
 argument) so tests exercise them without any MCP machinery. `create_server`
-registers thin closures over a single GragService on an MCPServer (the mcp
-2.0.0 API surface; pre-2.0 this class was called FastMCP), and `run` serves
-the stdio transport.
+registers thin closures on an MCPServer (the mcp 2.0.0 API surface; pre-2.0
+this class was called FastMCP) that resolve a per-call GragService from a
+ServiceRegistry: the "x-grag-db" HTTP header names the database in multi-db
+mode, stdio calls always get the default. `run` serves stdio, or the
+streamable-http Starlette app via uvicorn.
 
 Error contract: expected failures (GragError, pydantic ValidationError) are
 RETURNED as "ERROR: <message>\\nHINT: <hint>" strings so the LLM receives the
@@ -19,11 +21,12 @@ import inspect
 import json
 from typing import Any, Callable, TypeVar
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from pydantic import ValidationError
 
 from grag.config import GragConfig
 from grag.core.errors import GragError
+from grag.registry import ServiceRegistry
 from grag.core.types import (
     ContextRequest,
     DefineSchemaRequest,
@@ -323,62 +326,121 @@ def _doc(fn: Callable[..., Any]) -> str:
     return inspect.cleandoc(fn.__doc__ or "")
 
 
+def _resolve_service(registry: ServiceRegistry, ctx: Context | None) -> GragService:
+    """Pick the GragService for one tool call. The "x-grag-db" HTTP request
+    header names the database in multi-db mode; stdio has no headers, so the
+    registry default is used. ctx.headers raises ValueError outside a request
+    (e.g. direct call_tool in tests), hence the broad guard."""
+    db = None
+    if ctx is not None:
+        try:
+            headers = ctx.headers
+        except Exception:
+            headers = None
+        if headers:
+            db = headers.get("x-grag-db")
+    return registry.get(db)
+
+
 def create_server(config: GragConfig) -> MCPServer:
-    """Build the MCP server: one GragService from config, and the 7 frozen
-    tools registered as thin closures over it."""
-    service = GragService(config)
+    """Build the MCP server: a ServiceRegistry from config, and the 7 frozen
+    tools registered as thin closures that resolve their GragService per call
+    (x-grag-db header on HTTP transports, the default database otherwise)."""
+    registry = ServiceRegistry(config)
     server = MCPServer("grag", instructions=_INSTRUCTIONS)
 
     @server.tool(name="describe_schema", description=_doc(describe_schema))
-    def describe_schema_tool() -> str:
-        return describe_schema(service)
+    @_return_errors
+    def describe_schema_tool(ctx: Context = None) -> str:
+        return describe_schema(_resolve_service(registry, ctx))
 
     @server.tool(name="define_schema", description=_doc(define_schema))
+    @_return_errors
     def define_schema_tool(
-        node_tables: list[dict], rel_tables: list[dict], if_not_exists: bool = True
+        node_tables: list[dict],
+        rel_tables: list[dict],
+        if_not_exists: bool = True,
+        ctx: Context = None,
     ) -> str:
-        return define_schema(service, node_tables, rel_tables, if_not_exists)
+        return define_schema(
+            _resolve_service(registry, ctx), node_tables, rel_tables, if_not_exists
+        )
 
     @server.tool(name="upsert_nodes", description=_doc(upsert_nodes))
-    def upsert_nodes_tool(nodes: list[dict]) -> str:
-        return upsert_nodes(service, nodes)
+    @_return_errors
+    def upsert_nodes_tool(nodes: list[dict], ctx: Context = None) -> str:
+        return upsert_nodes(_resolve_service(registry, ctx), nodes)
 
     @server.tool(name="upsert_edges", description=_doc(upsert_edges))
-    def upsert_edges_tool(edges: list[dict]) -> str:
-        return upsert_edges(service, edges)
+    @_return_errors
+    def upsert_edges_tool(edges: list[dict], ctx: Context = None) -> str:
+        return upsert_edges(_resolve_service(registry, ctx), edges)
 
     @server.tool(name="cypher_query", description=_doc(cypher_query))
-    def cypher_query_tool(cypher: str, limit: int | None = None) -> str:
-        return cypher_query(service, cypher, limit)
+    @_return_errors
+    def cypher_query_tool(
+        cypher: str, limit: int | None = None, ctx: Context = None
+    ) -> str:
+        return cypher_query(_resolve_service(registry, ctx), cypher, limit)
 
     @server.tool(name="search_knowledge", description=_doc(search_knowledge))
+    @_return_errors
     def search_knowledge_tool(
         query: str,
         top_k: int = 8,
         hops: int = 1,
         labels: list[str] | None = None,
         token_budget: int | None = None,
+        ctx: Context = None,
     ) -> str:
-        return search_knowledge(service, query, top_k, hops, labels, token_budget)
+        return search_knowledge(
+            _resolve_service(registry, ctx), query, top_k, hops, labels, token_budget
+        )
 
     @server.tool(name="get_context", description=_doc(get_context))
+    @_return_errors
     def get_context_tool(
-        node_ids: list[str], hops: int = 1, token_budget: int | None = None
+        node_ids: list[str],
+        hops: int = 1,
+        token_budget: int | None = None,
+        ctx: Context = None,
     ) -> str:
-        return get_context(service, node_ids, hops, token_budget)
+        return get_context(_resolve_service(registry, ctx), node_ids, hops, token_budget)
 
-    # Handle for lifecycle management (run closes it) and for tests.
-    server.grag_service = service  # type: ignore[attr-defined]
+    # Handles for lifecycle management (run closes the registry) and for
+    # tests. grag_service is the default service for back-compat; in multi-db
+    # mode with no determinable default there isn't one, so it is None.
+    try:
+        server.grag_service = registry.get()  # type: ignore[attr-defined]
+    except GragError:
+        server.grag_service = None  # type: ignore[attr-defined]
+    server.grag_registry = registry  # type: ignore[attr-defined]
     return server
 
 
-def run(config: GragConfig) -> None:
-    """Serve the grag tool contract over stdio (blocks until disconnect)."""
+def run(
+    config: GragConfig,
+    transport: str = "stdio",
+    host: str = "127.0.0.1",
+    port: int = 8472,
+    path: str = "/mcp",
+) -> None:
+    """Serve the grag tool contract (blocks until shutdown). transport is
+    "stdio" (default) or "streamable-http" (uvicorn serving the stateless
+    Starlette app at `path` on host:port)."""
     server = create_server(config)
     try:
-        server.run(transport="stdio")
+        if transport == "streamable-http":
+            import uvicorn
+
+            app = server.streamable_http_app(
+                streamable_http_path=path, stateless_http=True
+            )
+            uvicorn.run(app, host=host, port=port)
+        else:
+            server.run(transport=transport)
     finally:
-        server.grag_service.close()  # type: ignore[attr-defined]
+        server.grag_registry.close()  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

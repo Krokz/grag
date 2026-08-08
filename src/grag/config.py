@@ -21,6 +21,9 @@ class EmbedderConfig(BaseModel):
 
 class GragConfig(BaseModel):
     db_path: Path = Path("knowledge.lbdb")
+    # Multi-db root: when set, ServiceRegistry resolves short names to
+    # db_dir / "<name>.lbdb" instead of serving only db_path.
+    db_dir: Path | None = None
     buffer_pool_size: int = 256 * 1024 * 1024
     max_read_conns: int = 4
     default_query_limit: int = 100
@@ -36,6 +39,8 @@ class GragConfig(BaseModel):
         cfg = cls()
         if p := os.environ.get("GRAG_DB_PATH"):
             cfg.db_path = Path(p)
+        if d := os.environ.get("GRAG_DB_DIR"):
+            cfg.db_dir = Path(d)
         if mb := os.environ.get("GRAG_BUFFER_POOL_MB"):
             cfg.buffer_pool_size = int(mb) * 1024 * 1024
         if codec := os.environ.get("GRAG_VECTOR_CODEC"):

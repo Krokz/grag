@@ -83,6 +83,11 @@ export interface HealthResponse {
   version: string;
 }
 
+export interface DbsResponse {
+  dbs: string[];
+  default: string | null;
+}
+
 export interface ApiFailure {
   message: string;
   hint: string | null;

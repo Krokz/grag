@@ -35,9 +35,12 @@ from grag.core.types import (
     UpsertEdgesRequest,
     UpsertNodesRequest,
 )
+from grag.registry import ServiceRegistry
 from grag.service import GragService
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+DB_HEADER = "x-grag-db"
 
 
 def _error_body(message: str, hint: str | None) -> dict:
@@ -48,10 +51,19 @@ def create_app(config: GragConfig) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
-        app.state.service.close()
+        app.state.registry.close()
 
     app = FastAPI(title="grag", version=grag.__version__, lifespan=lifespan)
-    app.state.service = GragService(config)
+    app.state.registry = ServiceRegistry(config)
+    # Resolve the default lazily and tolerate failure: in multi-db mode with no
+    # determinable default (2+ DBs, none named after db_path), registry.get()
+    # raises at startup and the server would never come up — taking /api/dbs
+    # (discovery) and all explicitly-selected requests down with it. Startup must
+    # not depend on a default existing; only a request with no selector does.
+    try:
+        app.state.service = app.state.registry.get()
+    except GragError:
+        app.state.service = None
 
     app.add_middleware(
         CORSMiddleware,
@@ -61,8 +73,18 @@ def create_app(config: GragConfig) -> FastAPI:
         allow_headers=["*"],
     )
 
-    def service() -> GragService:
-        return app.state.service
+    def resolve(request: Request) -> GragService:
+        # Single-db mode: db selectors are ignored, never an error.
+        if config.db_dir is None:
+            return app.state.registry.get()
+        name = request.query_params.get("db") or request.headers.get(DB_HEADER)
+        if name:
+            return app.state.registry.get(name)
+        # No selector: use the pre-resolved default if one exists, else surface
+        # the registry's ConfigurationError (400) listing available DBs.
+        if app.state.service is not None:
+            return app.state.service
+        return app.state.registry.get()
 
     # -- error mapping ---------------------------------------------------------
 
@@ -90,46 +112,58 @@ def create_app(config: GragConfig) -> FastAPI:
     def health() -> dict:
         return {"status": "ok", "version": grag.__version__}
 
+    @app.get("/api/dbs")
+    def list_dbs() -> dict:
+        default = None
+        if config.db_dir is not None and app.state.service is not None:
+            # The default service was resolved by the registry at startup, so
+            # its db_path is the resolved default .lbdb file. None when no
+            # default could be determined (2+ DBs, none preferred).
+            default = app.state.service.config.db_path.stem
+        return {"dbs": app.state.registry.list_dbs(), "default": default}
+
     @app.get("/api/schema")
-    def describe_schema(format: str | None = Query(default=None)):
-        doc = service().describe_schema()
+    def describe_schema(request: Request, format: str | None = Query(default=None)):
+        doc = resolve(request).describe_schema()
         if format == "text":
             return PlainTextResponse(doc.text)
         return doc
 
     @app.post("/api/schema/define", response_model=SchemaDocument)
-    def define_schema(req: DefineSchemaRequest) -> SchemaDocument:
-        return service().define_schema(req)
+    def define_schema(request: Request, req: DefineSchemaRequest) -> SchemaDocument:
+        return resolve(request).define_schema(req)
 
     @app.post("/api/nodes/upsert", response_model=MutationSummary)
-    def upsert_nodes(req: UpsertNodesRequest) -> MutationSummary:
-        return service().upsert_nodes(req)
+    def upsert_nodes(request: Request, req: UpsertNodesRequest) -> MutationSummary:
+        return resolve(request).upsert_nodes(req)
 
     @app.post("/api/edges/upsert", response_model=MutationSummary)
-    def upsert_edges(req: UpsertEdgesRequest) -> MutationSummary:
-        return service().upsert_edges(req)
+    def upsert_edges(request: Request, req: UpsertEdgesRequest) -> MutationSummary:
+        return resolve(request).upsert_edges(req)
 
     @app.post("/api/query", response_model=QueryResponse)
-    def cypher_query(req: QueryRequest) -> QueryResponse:
-        return service().cypher_query(req)
+    def cypher_query(request: Request, req: QueryRequest) -> QueryResponse:
+        return resolve(request).cypher_query(req)
 
     @app.post("/api/search", response_model=SearchResponse)
-    def search_knowledge(req: SearchRequest) -> SearchResponse:
-        return service().search_knowledge(req)
+    def search_knowledge(request: Request, req: SearchRequest) -> SearchResponse:
+        return resolve(request).search_knowledge(req)
 
     @app.post("/api/context", response_model=ContextResponse)
-    def get_context(req: ContextRequest) -> ContextResponse:
-        return service().get_context(req)
+    def get_context(request: Request, req: ContextRequest) -> ContextResponse:
+        return resolve(request).get_context(req)
 
     @app.post("/api/ingest", response_model=IngestResponse)
-    def ingest(req: IngestRequest) -> IngestResponse:
-        return service().ingest(req)
+    def ingest(request: Request, req: IngestRequest) -> IngestResponse:
+        return resolve(request).ingest(req)
 
     @app.get("/api/graph/sample", response_model=GraphSample)
     def graph_sample(
-        limit: int = Query(default=200), label: str | None = Query(default=None)
+        request: Request,
+        limit: int = Query(default=200),
+        label: str | None = Query(default=None),
     ) -> GraphSample:
-        return service().graph_sample(limit=limit, label=label)
+        return resolve(request).graph_sample(limit=limit, label=label)
 
     # -- UI statics --------------------------------------------------------------
 

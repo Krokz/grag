@@ -1,17 +1,21 @@
 """Tests for grag.mcp_server.server — plain tool functions (full LLM workflow
 simulation, error contract) plus FastMCP/MCPServer registration of the 7
-frozen tool names."""
+frozen tool names, multi-db per-call routing, and the streamable-http app."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
 from grag.config import GragConfig
+from grag.core.errors import ConfigurationError, NotFoundError
 from grag.mcp_server import server as mcp_server
 from grag.service import GragService
+
+POOL_128MB = 128 * 1024 * 1024
 
 FROZEN_TOOLS = {
     "describe_schema",
@@ -349,3 +353,143 @@ def test_mcp_end_to_end_tool_calls(tmp_path):
         assert "Person:ada" in res.content[0].text
     finally:
         server.grag_service.close()
+
+
+# --- multi-db routing -----------------------------------------------------------------
+
+
+class _StubCtx:
+    """Minimal ctx stand-in: _resolve_service only reads ctx.headers."""
+
+    def __init__(self, headers):
+        self._headers = headers
+
+    @property
+    def headers(self):
+        return self._headers
+
+
+def _make_db(path: Path, table_name: str) -> None:
+    svc = GragService(GragConfig(db_path=path, buffer_pool_size=POOL_128MB))
+    try:
+        out = mcp_server.define_schema(
+            svc, [{"name": table_name, "primary_key": "id"}], []
+        )
+        assert not out.startswith("ERROR"), out
+    finally:
+        svc.close()
+
+
+@pytest.fixture()
+def multi_db_dir(tmp_path):
+    db_dir = tmp_path / "dbs"
+    db_dir.mkdir()
+    _make_db(db_dir / "alpha.lbdb", "AlphaThing")
+    _make_db(db_dir / "beta.lbdb", "BetaThing")
+    return db_dir
+
+
+def _multi_db_config(multi_db_dir: Path) -> GragConfig:
+    # db_path names the default database resolved when no header is present
+    return GragConfig(
+        db_dir=multi_db_dir, db_path=Path("alpha.lbdb"), buffer_pool_size=POOL_128MB
+    )
+
+
+def test_resolve_service_routes_by_x_grag_db_header(multi_db_dir):
+    server = mcp_server.create_server(_multi_db_config(multi_db_dir))
+    try:
+        registry = server.grag_registry
+
+        # no ctx -> default database (alpha, via db_path name)
+        default_svc = mcp_server._resolve_service(registry, None)
+        alpha_schema = mcp_server.describe_schema(default_svc)
+        assert "AlphaThing" in alpha_schema
+        assert "BetaThing" not in alpha_schema
+
+        # the x-grag-db header routes to the named database
+        beta_svc = mcp_server._resolve_service(
+            registry, _StubCtx({"x-grag-db": "beta"})
+        )
+        assert beta_svc is not default_svc
+        beta_schema = mcp_server.describe_schema(beta_svc)
+        assert "BetaThing" in beta_schema
+        assert "AlphaThing" not in beta_schema
+
+        # empty/absent headers behave like no ctx
+        assert mcp_server._resolve_service(registry, _StubCtx({})) is default_svc
+        assert mcp_server._resolve_service(registry, _StubCtx(None)) is default_svc
+
+        # unknown db name -> NotFoundError listing the available databases
+        with pytest.raises(NotFoundError):
+            mcp_server._resolve_service(registry, _StubCtx({"x-grag-db": "ghost"}))
+    finally:
+        server.grag_registry.close()
+
+
+def test_tool_closure_applies_error_contract_to_routing(multi_db_dir):
+    server = mcp_server.create_server(_multi_db_config(multi_db_dir))
+    try:
+        # the registered describe_schema closure, driven with a stub ctx
+        tool_fn = server._tool_manager._tools["describe_schema"].fn
+
+        beta_out = tool_fn(ctx=_StubCtx({"x-grag-db": "beta"}))
+        assert not beta_out.startswith("ERROR")
+        assert "BetaThing" in beta_out
+
+        # routing failures arrive as readable ERROR/HINT output, not raises
+        ghost_out = tool_fn(ctx=_StubCtx({"x-grag-db": "ghost"}))
+        assert ghost_out.startswith("ERROR:")
+        assert "ghost" in ghost_out
+        assert "HINT:" in ghost_out
+        assert "alpha" in ghost_out and "beta" in ghost_out
+    finally:
+        server.grag_registry.close()
+
+
+def test_mcp_call_tool_multi_db_uses_default_without_headers(multi_db_dir):
+    # call_tool outside a request injects a Context whose .headers is
+    # unavailable; the guard must fall back to the default database.
+    server = mcp_server.create_server(_multi_db_config(multi_db_dir))
+    try:
+        res = asyncio.run(server.call_tool("describe_schema", {}))
+        assert not res.is_error
+        assert "AlphaThing" in res.content[0].text
+        assert "BetaThing" not in res.content[0].text
+    finally:
+        server.grag_registry.close()
+
+
+def test_resolve_service_single_db_mode(tmp_path):
+    server = mcp_server.create_server(
+        GragConfig(db_path=tmp_path / "single.lbdb", buffer_pool_size=POOL_128MB)
+    )
+    try:
+        # no ctx -> the one service, same object as the back-compat handle
+        svc = mcp_server._resolve_service(server.grag_registry, None)
+        assert svc is server.grag_service
+        # passing a db name in single-db mode is a ConfigurationError
+        with pytest.raises(ConfigurationError):
+            mcp_server._resolve_service(
+                server.grag_registry, _StubCtx({"x-grag-db": "other"})
+            )
+    finally:
+        server.grag_registry.close()
+
+
+# --- streamable-http transport ---------------------------------------------------------
+
+
+def test_streamable_http_app_builds_without_serving(tmp_path):
+    from starlette.applications import Starlette
+
+    server = mcp_server.create_server(
+        GragConfig(db_path=tmp_path / "http.lbdb", buffer_pool_size=POOL_128MB)
+    )
+    try:
+        app = server.streamable_http_app(
+            streamable_http_path="/mcp", stateless_http=True
+        )
+        assert isinstance(app, Starlette)
+    finally:
+        server.grag_registry.close()
