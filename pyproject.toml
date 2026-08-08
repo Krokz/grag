@@ -31,18 +31,21 @@ packages = ["src/grag"]
 
 # The built web UI lives in src/grag/api/static but is gitignored (it's a build
 # artifact of ui/), so the default wheel omits it. Force-include it so a
-# `pip install gragdb` ships the working UI. The dir must exist at build time —
-# the publish workflow builds the UI (npm run build) before `python -m build`.
+# `pip install gragdb` ships the working UI. NOTE: force-include makes the dir
+# REQUIRED at build time — so build the UI first (cd ui && npm ci && npm run
+# build) before `pip install .` / `pip install -e .` / `python -m build`. CI and
+# the publish workflow both do this; an editable install only *serves* the UI if
+# it's been built.
 [tool.hatch.build.targets.wheel.force-include]
 "src/grag/api/static" = "grag/api/static"
 
 [tool.hatch.build.targets.sdist]
 # Don't let .gitignore exclude files from the sdist: src/grag/api/static is a
-# gitignored *build artifact* that we DO ship. include (below) governs instead.
+# gitignored *build artifact* that we DO ship when present. include (below)
+# governs instead. The sdist lists it WITHOUT a trailing slash so it's an
+# optional prefix (tolerated when absent); the wheel's force-include above is
+# what *requires* it for distribution builds.
 ignore-vcs = true
-# Include the UI source (ui/) AND the built bundle (src/grag/api/static). The
-# wheel is built from the sdist by `python -m build`, so the static dir must be
-# in the sdist for the wheel's force-include (above) to find it.
 include = [
     "src/grag",
     "src/grag/api/static",

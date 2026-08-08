@@ -21,9 +21,11 @@ pip install gragdb
 Python 3.10–3.14; **3.13 recommended** (faster interpreter for the Python-side
 packing/serialization paths, and 3.10 reaches end-of-life in October 2026).
 
-**From source** (for development):
+**From source** (for development). Build the UI **first** — `pip install` needs the
+built bundle at `src/grag/api/static` (the wheel's force-include; see `pyproject.toml`):
 
 ```bash
+cd ui && npm ci && npm run build && cd ..   # builds the UI into src/grag/api/static/
 pip install -e .            # core: engine, REST, MCP, FTS — no torch, no GPU stack
 pip install -e ".[dev]"     # tests
 pip install -e ".[embed-local]"   # optional: local embeddings (fastembed/ONNX, still no torch)

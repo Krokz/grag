@@ -49,12 +49,13 @@ flowchart LR
 ## Development setup
 
 ```bash
+# Build the UI FIRST — pip install (editable or not) requires the built bundle
+# to exist at src/grag/api/static (the wheel's force-include; see pyproject.toml).
+cd ui && npm ci && npm run build && cd ..
+
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest                      # run the test suite
-
-# UI (optional — only needed to change/preview the web UI)
-cd ui && npm ci && npm run build
 ```
 
 grag targets **Python 3.10+** (CI tests 3.10–3.13). LadybugDB downloads its FTS
