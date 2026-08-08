@@ -2,7 +2,7 @@
 
 **LLM-first graph knowledgebase.** One embedded Cypher engine ([LadybugDB](https://ladybugdb.com), the Kuzu successor), one file per database, zero daemons — wrapped in the tool contract LLMs actually need: schema introspection that anchors text-to-Cypher, idempotent upserts with provenance, hybrid FTS/vector search, and token-budgeted subgraph context for grounded, low-hallucination answers.
 
-*(The name is a pun: **G**(raph)**RAG** — retrieval-augmented generation grounded in a graph.)*
+*(**G**(raph)**RAG** — retrieval-augmented generation grounded in a graph.)*
 
 Not an enterprise platform. `pip install`, point an MCP client at it, done.
 
