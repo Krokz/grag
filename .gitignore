@@ -1,0 +1,13 @@
+.venv/
+.tools/
+__pycache__/
+*.pyc
+*.lbdb
+*.wal
+dist/
+build/
+*.egg-info/
+node_modules/
+ui/dist/
+src/grag/api/static/
+.pytest_cache/
