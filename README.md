@@ -12,8 +12,16 @@ LLM answers hallucinate when retrieval returns isolated chunks. grag stores know
 
 ## Install
 
+**From PyPI** (ships the web UI):
+
+```bash
+pip install gragdb
+```
+
 Python 3.10–3.14; **3.13 recommended** (faster interpreter for the Python-side
 packing/serialization paths, and 3.10 reaches end-of-life in October 2026).
+
+**From source** (for development):
 
 ```bash
 pip install -e .            # core: engine, REST, MCP, FTS — no torch, no GPU stack
@@ -169,5 +177,9 @@ python -m pytest tests/          # 160+ tests, ~10s
 grag bench                        # codec recall/latency/RSS table
 cd ui && npm run build            # rebuilds the UI into src/grag/api/static/
 ```
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the branching model (Gitflow-lite:
+`main` + `develop` + `feature`/`release`/`hotfix`), PR rules, and how releases are
+cut and published to PyPI.
 
 Known limits: embedded engine = single-writer; LadybugDB reserves a large *virtual* address space per open database (actual RSS stays within the buffer pool) — close `Engine`s you create; polar codec encode is Python-speed (fine at query time, slower at write time).

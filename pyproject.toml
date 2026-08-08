@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "grag"
+name = "gragdb"
 version = "0.1.0"
 description = "LLM-first graph knowledgebase: embedded Cypher engine, MCP tool contract, GraphRAG retrieval"
 readme = "README.md"
@@ -28,6 +28,29 @@ grag = "grag.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/grag"]
+
+# The built web UI lives in src/grag/api/static but is gitignored (it's a build
+# artifact of ui/), so the default wheel omits it. Force-include it so a
+# `pip install gragdb` ships the working UI. The dir must exist at build time —
+# the publish workflow builds the UI (npm run build) before `python -m build`.
+[tool.hatch.build.targets.wheel.force-include]
+"src/grag/api/static" = "grag/api/static"
+
+[tool.hatch.build.targets.sdist]
+# Don't let .gitignore exclude files from the sdist: src/grag/api/static is a
+# gitignored *build artifact* that we DO ship. include (below) governs instead.
+ignore-vcs = true
+# Include the UI source (ui/) AND the built bundle (src/grag/api/static). The
+# wheel is built from the sdist by `python -m build`, so the static dir must be
+# in the sdist for the wheel's force-include (above) to find it.
+include = [
+    "src/grag",
+    "src/grag/api/static",
+    "ui",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

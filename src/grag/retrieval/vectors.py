@@ -78,7 +78,7 @@ class FastembedEmbedder:
         except ImportError as exc:
             raise ConfigurationError(
                 "fastembed is not installed.",
-                hint="Install the local embedding extra: pip install grag[embed-local]",
+                hint="Install the local embedding extra: pip install gragdb[embed-local]",
             ) from exc
         self._model = TextEmbedding(model_name=cfg.model)
         self.dim = cfg.dim
@@ -99,7 +99,7 @@ class RemoteEmbedder:
         except ImportError as exc:
             raise ConfigurationError(
                 "httpx is not installed.",
-                hint="Install the remote embedding extra: pip install grag[embed-remote]",
+                hint="Install the remote embedding extra: pip install gragdb[embed-remote]",
             ) from exc
         if not cfg.base_url:
             raise ConfigurationError(
