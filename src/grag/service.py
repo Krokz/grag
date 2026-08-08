@@ -11,10 +11,15 @@ from __future__ import annotations
 import re
 
 from grag.config import GragConfig
-from grag.core.engine import Engine, EngineResult, extract_subgraph
+from grag.core.engine import (
+    Engine,
+    EngineResult,
+    drop_internal_rows,
+    extract_subgraph,
+    is_internal_label,
+)
 from grag.core.errors import GragError, ReadOnlyViolation
 from grag.core.types import (
-    META_TABLE,
     ContextRequest,
     ContextResponse,
     DefineSchemaRequest,
@@ -98,7 +103,9 @@ class GragService:
             )
         limit = req.limit or self.config.default_query_limit
         limit = max(1, min(limit, self.config.max_query_limit))
-        result = self.engine.execute(req.cypher)
+        # Hide internal tables (_grag_tables & friends): a generic MATCH (n)
+        # spans them, but they are not part of the user's data model.
+        result = drop_internal_rows(self.engine.execute(req.cypher))
         truncated = len(result.rows) > limit
         rows = result.rows[:limit]
         sub = extract_subgraph(EngineResult(result.columns, rows), self._pk_map())
@@ -159,8 +166,15 @@ class GragService:
             sub = merge_subgraphs(sub, extract_subgraph(rels, self._pk_map()))
         except GragError:
             pass  # no rel tables yet
+        nodes = [n for n in sub.nodes if not is_internal_label(n.label)]
+        kept = {n.id for n in nodes}
         sub = Subgraph(
-            nodes=[n for n in sub.nodes if n.label != META_TABLE], edges=sub.edges
+            nodes=nodes,
+            edges=[
+                e
+                for e in sub.edges
+                if not is_internal_label(e.type) and e.source in kept and e.target in kept
+            ],
         )
         return GraphSample(subgraph=sub, stats=self._stats())
 

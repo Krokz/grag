@@ -29,6 +29,8 @@ Without an embedder, everything works FTS-only (BM25 is native to the engine).
 python examples/build_example.py
 
 # serve REST + the graph UI at http://127.0.0.1:8471
+# (note: start it from a normal terminal — servers launched inside an agent
+# sandbox get torn down and can't be reached from your browser)
 grag --db examples/knowledge.lbdb serve
 
 # or answer 3 demo questions end-to-end in the terminal

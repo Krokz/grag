@@ -26,6 +26,7 @@ from grag.core.errors import CypherError, GragError
 from grag.core.types import (
     EMB_CODE_PROP,
     EMBEDDING_PROP,
+    RESERVED_PREFIX,
     EdgeRecord,
     NodeRecord,
     Subgraph,
@@ -182,6 +183,12 @@ def _plain(v: Any) -> Any:
     return v
 
 
+def is_internal_label(name: Any) -> bool:
+    """grag-internal tables (e.g. the _grag_tables registry) use the reserved
+    "_" prefix; they are never part of the user-facing data model."""
+    return isinstance(name, str) and name.startswith(RESERVED_PREFIX)
+
+
 def is_node_value(v: Any) -> bool:
     return isinstance(v, dict) and "_ID" in v and "_LABEL" in v and "_SRC" not in v
 
@@ -237,6 +244,37 @@ def edge_record_from_value(v: dict, id_of_internal: dict[tuple, str]) -> EdgeRec
 def _fallback_ref(ref: Any) -> str:
     table, offset = _internal_key(ref)
     return f"#{table}:{offset}"
+
+
+def _has_internal_graph_value(cell: Any) -> bool:
+    """True if a result cell holds (or nests) a node/rel from an internal table."""
+    if is_node_value(cell) or is_rel_value(cell):
+        label = cell.get("_LABEL") or cell.get("_TYPE")
+        return is_internal_label(label)
+    if is_path_value(cell):
+        return any(
+            _has_internal_graph_value(x)
+            for x in (*cell.get("_NODES", []), *cell.get("_RELS", []))
+        )
+    if isinstance(cell, (list, tuple)):
+        return any(_has_internal_graph_value(x) for x in cell)
+    return False
+
+
+def drop_internal_rows(result: EngineResult) -> EngineResult:
+    """Remove rows that surface nodes/rels from internal tables (_-prefixed).
+
+    Applied to user-facing read paths (cypher_query): a bare MATCH (n) spans
+    every node table including the _grag_tables registry, and those rows are
+    noise for callers. Introspection code queries the catalog via
+    engine.execute directly, so it is unaffected.
+    """
+    rows = [
+        row
+        for row in result.rows
+        if not any(_has_internal_graph_value(cell) for cell in row)
+    ]
+    return EngineResult(result.columns, rows)
 
 
 def extract_subgraph(

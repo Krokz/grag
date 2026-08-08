@@ -38,6 +38,22 @@ body {
   height: 100vh;
 }
 
+/* .context-panel (search results) only exists after a search; without explicit
+   placement, .main would land in the `auto` row 2 and the 1fr row would sit
+   empty, squishing everything to the top. Pin each child to its row so the
+   layout is identical whether or not the panel is present. */
+.app > .topbar {
+  grid-row: 1;
+}
+
+.app > .context-panel {
+  grid-row: 2;
+}
+
+.app > .main {
+  grid-row: 3;
+}
+
 /* ---------- header / search ---------- */
 
 .topbar {
@@ -636,6 +652,72 @@ table.results td {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+table.results td.cell-truncated {
+  cursor: pointer;
+}
+
+table.results td.cell-truncated:hover {
+  color: var(--text);
+  background: #18222e;
+}
+
+.cell-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 12, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.cell-modal {
+  width: min(640px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+
+.cell-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cell-modal-title {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.cell-modal-head .close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 15px;
+  padding: 0 4px;
+}
+
+.cell-modal-body {
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
 }
 
 .error-banner {

@@ -41,6 +41,10 @@ function RelRow({ rel }: { rel: RelTableDoc }) {
 
 export function SchemaPanel({ schema, loading, onRefresh, onSelectLabel }: Props) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  // "_"-prefixed tables are grag-internal (e.g. the _grag_tables registry);
+  // the backend already omits them — filter here too as defense in depth.
+  const nodeTables = schema?.node_tables.filter((t) => !t.name.startsWith('_')) ?? [];
+  const relTables = schema?.rel_tables.filter((t) => !t.name.startsWith('_')) ?? [];
 
   return (
     <aside className="sidebar">
@@ -56,8 +60,8 @@ export function SchemaPanel({ schema, loading, onRefresh, onSelectLabel }: Props
       )}
 
       <h2>Node tables</h2>
-      {schema?.node_tables.length === 0 && <div className="hint-text">none defined</div>}
-      {schema?.node_tables.map((t) => (
+      {schema && nodeTables.length === 0 && <div className="hint-text">none defined</div>}
+      {nodeTables.map((t) => (
         <div key={t.name} className="schema-item">
           <div className="schema-row">
             <span
@@ -85,8 +89,8 @@ export function SchemaPanel({ schema, loading, onRefresh, onSelectLabel }: Props
       ))}
 
       <h2>Rel tables</h2>
-      {schema?.rel_tables.length === 0 && <div className="hint-text">none defined</div>}
-      {schema?.rel_tables.map((r) => (
+      {schema && relTables.length === 0 && <div className="hint-text">none defined</div>}
+      {relTables.map((r) => (
         <RelRow key={r.name} rel={r} />
       ))}
     </aside>

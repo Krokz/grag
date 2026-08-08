@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from grag.config import GragConfig
-from grag.core.engine import Engine
+from grag.core.engine import Engine, is_internal_label
 from grag.core.errors import GragError
 from grag.core.types import (
     META_TABLE,
@@ -80,7 +80,7 @@ def pk_map(engine: Engine) -> dict[str, str]:
         tables = []
     for t in tables:
         name = str(t.get("name"))
-        if name == META_TABLE:
+        if is_internal_label(name):
             continue
         try:
             for prop in _table_info(engine, name):
@@ -143,7 +143,7 @@ def build_schema_document(engine: Engine, config: GragConfig) -> SchemaDocument:
     rel_docs: list[RelTableDoc] = []
     for t in tables:
         name = str(t.get("name"))
-        if name == META_TABLE:
+        if is_internal_label(name):
             continue
         kind = str(t.get("type", "")).upper()
         m = meta.get(name, {})
@@ -211,7 +211,7 @@ def table_stats(engine: Engine) -> GraphStats:
         return stats
     for t in tables:
         name = str(t.get("name"))
-        if name == META_TABLE:
+        if is_internal_label(name):
             continue
         kind = str(t.get("type", "")).upper()
         count = _row_count(engine, name, kind)

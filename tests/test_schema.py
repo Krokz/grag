@@ -136,6 +136,27 @@ def test_schema_excludes_meta_table(graph: Engine, config: GragConfig):
     assert META_TABLE not in stats.labels
 
 
+def test_schema_excludes_any_internal_table(graph: Engine, config: GragConfig):
+    """Any "_"-prefixed table is grag-internal, not just the registry."""
+    _create_meta(graph)
+    graph.execute_write("CREATE NODE TABLE _grag_scratch(tmp STRING PRIMARY KEY)")
+    graph.execute_write("CREATE (s:_grag_scratch {tmp: 'x'})")
+    graph.execute_write(
+        "CREATE REL TABLE _grag_trace(FROM Doc TO _grag_scratch, note STRING)"
+    )
+
+    doc = build_schema_document(graph, config)
+    all_names = [t.name for t in doc.node_tables] + [t.name for t in doc.rel_tables]
+    assert all(not n.startswith("_") for n in all_names)
+    assert "_grag_scratch" not in doc.text and "_grag_trace" not in doc.text
+
+    stats = table_stats(graph)
+    assert all(not k.startswith("_") for k in stats.labels)
+    assert stats.node_count == 9  # Doc + Tag only
+
+    assert all(not k.startswith("_") for k in pk_map(graph))
+
+
 def test_schema_text_rendering(graph: Engine, config: GragConfig):
     _create_meta(graph)
     _meta_row(graph, "Doc", "node", "id", True)

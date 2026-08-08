@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import pytest
 
-from grag.core.engine import Engine, extract_subgraph, is_node_value, is_rel_value
+from grag.core.engine import (
+    Engine,
+    drop_internal_rows,
+    extract_subgraph,
+    is_node_value,
+    is_rel_value,
+)
 from grag.core.types import make_node_id
 
 
@@ -86,3 +92,34 @@ def test_fts_extension(docs: Engine):
     )
     assert res.rows
     assert res.rows[0][0] == "doc-0"
+
+
+def test_drop_internal_rows(docs: Engine):
+    docs.execute_write("CREATE NODE TABLE _grag_meta(name STRING PRIMARY KEY)")
+    docs.execute_write("CREATE (m:_grag_meta {name: 'Doc'})")
+    docs.execute_write("CREATE REL TABLE _grag_link(FROM _grag_meta TO Doc)")
+    docs.execute_write(
+        "MATCH (m:_grag_meta {name: 'Doc'}), (d:Doc {id: 'doc-0'}) "
+        "CREATE (m)-[:_grag_link]->(d)"
+    )
+
+    res = docs.execute("MATCH (n) RETURN n")
+    assert {r[0]["_LABEL"] for r in res.rows} == {"Doc", "_grag_meta"}
+    filtered = drop_internal_rows(res)
+    assert {r[0]["_LABEL"] for r in filtered.rows} == {"Doc"}
+    assert filtered.columns == res.columns
+
+    # rows touching internal values through rels/paths are dropped too
+    res = docs.execute("MATCH (m)-[r:_grag_link]->(d) RETURN m, r, d")
+    assert res.rows and drop_internal_rows(res).rows == []
+    res = docs.execute("MATCH p = (m:_grag_meta)-[:_grag_link]->(d:Doc) RETURN p")
+    assert res.rows and drop_internal_rows(res).rows == []
+
+    # ...while a row whose only graph value is a user node stays
+    res = docs.execute("MATCH (m:_grag_meta)-[:_grag_link]->(d:Doc) RETURN d")
+    assert len(drop_internal_rows(res).rows) == 1
+
+    # scalar projections over an internal table are explicit introspection —
+    # no graph values in the row, so the row stays
+    res = docs.execute("MATCH (m:_grag_meta) RETURN m.name")
+    assert drop_internal_rows(res).rows == [["Doc"]]

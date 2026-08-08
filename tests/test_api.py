@@ -160,6 +160,25 @@ def test_query(seeded_client):
     assert q.truncated is False
 
 
+def test_query_excludes_internal_tables(seeded_client):
+    """define_schema wrote _grag_tables registry rows; a bare MATCH (n) spans
+    that internal table too, but its rows must not reach the user."""
+    res = seeded_client.post("/api/query", json={"cypher": "MATCH (n) RETURN n"})
+    assert res.status_code == 200
+    q = QueryResponse.model_validate(res.json())
+    assert q.row_count == 2
+    assert [row[0]["_LABEL"] for row in q.rows] == ["Person", "Person"]
+    assert q.subgraph.nodes  # alice + bob made it into the subgraph
+    assert all(not n.label.startswith("_") for n in q.subgraph.nodes)
+    assert all(not e.type.startswith("_") for e in q.subgraph.edges)
+
+    sample = GraphSample.model_validate(
+        seeded_client.get("/api/graph/sample").json()
+    )
+    assert all(not n.label.startswith("_") for n in sample.subgraph.nodes)
+    assert all(not k.startswith("_") for k in sample.stats.labels)
+
+
 def test_query_rejects_write_with_hint(seeded_client):
     res = seeded_client.post(
         "/api/query",

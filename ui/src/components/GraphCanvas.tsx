@@ -25,6 +25,21 @@ interface FgNode extends NodeRecord {
   y?: number;
 }
 
+/** Past this many visible nodes, per-node labels turn into hover/selection
+ * labels only — a wall of overlapping captions is unreadable anyway. */
+const LABEL_NODE_LIMIT = 30;
+
+interface LabelRect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+function overlaps(r: LabelRect, others: LabelRect[]): boolean {
+  return others.some((o) => r.x0 < o.x1 && r.x1 > o.x0 && r.y0 < o.y1 && r.y1 > o.y0);
+}
+
 function useElementSize() {
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -57,6 +72,10 @@ export function GraphCanvas({
   const fgRef = useRef<any>(null);
   const didFit = useRef(false);
   const lastClick = useRef<{ id: string; t: number }>({ id: '', t: 0 });
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  // Label bounding boxes already drawn this frame — cleared in
+  // onRenderFramePre, filled as labels render, used to skip overlaps.
+  const drawnLabels = useRef<LabelRect[]>([]);
 
   const data = useMemo(() => {
     const f = filter.trim().toLowerCase();
@@ -127,14 +146,35 @@ export function GraphCanvas({
         ctx.stroke();
       }
 
+      // --- label ------------------------------------------------------------
+      // Beyond LABEL_NODE_LIMIT only highlighted nodes get captions; below it
+      // every node is labeled, but a caption whose box overlaps one already
+      // drawn this frame is skipped instead of rendering an unreadable pileup.
+      const highlighted = n.id === hoverId || n.id === selectedId || seed != null;
+      if (!highlighted && data.nodes.length > LABEL_NODE_LIMIT) return;
+
+      const text = displayName(n, pkMap);
       const fontSize = Math.min(4, Math.max(2.2, 11 / globalScale));
       ctx.font = `${fontSize}px -apple-system, sans-serif`;
+      const w = ctx.measureText(text).width;
+      const rect: LabelRect = {
+        x0: x - w / 2 - 0.6,
+        y0: y + r + 1,
+        x1: x + w / 2 + 0.6,
+        y1: y + r + 1.5 + fontSize + 0.6,
+      };
+      if (!highlighted && overlaps(rect, drawnLabels.current)) return;
+      drawnLabels.current.push(rect);
+
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
-      ctx.fillStyle = 'rgba(229, 231, 235, 0.85)';
-      ctx.fillText(displayName(n, pkMap), x, y + r + 1.5);
+      // dark pill behind the text so captions stay legible over edges
+      ctx.fillStyle = 'rgba(11, 15, 20, 0.62)';
+      ctx.fillRect(rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0);
+      ctx.fillStyle = highlighted ? '#f3f4f6' : 'rgba(229, 231, 235, 0.85)';
+      ctx.fillText(text, x, y + r + 1.5);
     },
-    [seeds, selectedId, pkMap],
+    [seeds, selectedId, hoverId, pkMap, data.nodes.length],
   );
 
   const paintPointerArea = useCallback((node: object, color: string, ctx: CanvasRenderingContext2D) => {
@@ -204,6 +244,12 @@ export function GraphCanvas({
           linkDirectionalArrowLength={3.5}
           linkDirectionalArrowRelPos={1}
           onNodeClick={handleClick}
+          onNodeHover={(node: object | null) =>
+            setHoverId(node ? (node as FgNode).id : null)
+          }
+          onRenderFramePre={() => {
+            drawnLabels.current = [];
+          }}
           onBackgroundClick={() => onSelect(null)}
           enableNodeDrag={true}
           cooldownTime={2500}

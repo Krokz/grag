@@ -1,9 +1,15 @@
+import { useMemo, useState } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import type { ApiFailure, QueryResponse } from '../types';
-import { truncateCell } from '../graph-utils';
+import { buildTableModel, type TableCell } from '../graph-utils';
 
 export type ApplyMode = 'merge' | 'replace';
 export type ResultView = 'graph' | 'table';
+
+interface ExpandedCell {
+  header: string;
+  cell: TableCell;
+}
 
 interface Props {
   query: string;
@@ -32,6 +38,11 @@ export function Console({
   onApplyModeChange,
   appliedNote,
 }: Props) {
+  const [expanded, setExpanded] = useState<ExpandedCell | null>(null);
+  const table = useMemo(
+    () => (result ? buildTableModel(result.columns, result.rows) : null),
+    [result],
+  );
   return (
     <section className="console">
       <div className="console-main">
@@ -136,30 +147,36 @@ export function Console({
               </div>
             )}
 
-            {!error && result && view === 'table' && (
+            {!error && result && view === 'table' && table && (
               <>
-                {result.columns.length === 0 ? (
+                {table.columns.length === 0 ? (
                   <div className="placeholder">no columns in result</div>
                 ) : (
                   <table className="results">
                     <thead>
                       <tr>
-                        {result.columns.map((c) => (
+                        {table.columns.map((c) => (
                           <th key={c}>{c}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {result.rows.map((row, i) => (
+                      {table.rows.map((row, i) => (
                         <tr key={i}>
-                          {row.map((cell, j) => {
-                            const text = truncateCell(cell);
-                            return (
-                              <td key={j} title={text.endsWith('…') ? JSON.stringify(cell) : undefined}>
-                                {text}
-                              </td>
-                            );
-                          })}
+                          {row.map((cell, j) => (
+                            <td
+                              key={j}
+                              className={cell.truncated ? 'cell-truncated' : undefined}
+                              title={cell.truncated ? 'click to view full value' : undefined}
+                              onClick={
+                                cell.truncated
+                                  ? () => setExpanded({ header: table.columns[j], cell })
+                                  : undefined
+                              }
+                            >
+                              {cell.text}
+                            </td>
+                          ))}
                         </tr>
                       ))}
                     </tbody>
@@ -173,6 +190,20 @@ export function Console({
           </div>
         </div>
       </div>
+
+      {expanded && (
+        <div className="cell-modal-overlay" onClick={() => setExpanded(null)}>
+          <div className="cell-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="cell-modal-head">
+              <span className="cell-modal-title">{expanded.header}</span>
+              <button className="close" onClick={() => setExpanded(null)} title="close">
+                ✕
+              </button>
+            </div>
+            <pre className="cell-modal-body">{expanded.cell.full}</pre>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

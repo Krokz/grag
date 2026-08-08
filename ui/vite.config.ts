@@ -3,7 +3,10 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  base: './',
+  // absolute asset URLs: the SPA fallback serves index.html from arbitrary
+  // paths, so relative './assets/...' would resolve against the wrong base
+  // and come back as HTML (silently unstyled page).
+  base: '/',
   build: {
     outDir: '../src/grag/api/static',
     emptyOutDir: true,
