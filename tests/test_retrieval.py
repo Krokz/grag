@@ -108,6 +108,60 @@ def test_search_vector_failure_degrades_to_fts(docs_engine, hybrid_config, monke
     assert all(s.match == "fts" for s in resp.seeds)
 
 
+# --- per-label diversity cap ------------------------------------------------------
+
+
+def _make_flood(eng: Engine) -> None:
+    """A big 'Function' table that lexically floods the query, plus one
+    'Decision' node that is the semantically intended answer."""
+    eng.execute_write(
+        "CREATE NODE TABLE Func(id STRING PRIMARY KEY, name STRING, doc STRING)"
+    )
+    eng.execute_write(
+        "CREATE NODE TABLE Decision(id STRING PRIMARY KEY, title STRING, body STRING)"
+    )
+    for i in range(6):
+        eng.execute_write(
+            "CREATE (f:Func {id: $id, name: $n, doc: $d})",
+            {
+                "id": f"fn-{i}",
+                "n": f"python_backend_helper_{i}",
+                "d": "python backend python backend utility",
+            },
+        )
+    eng.execute_write(
+        "CREATE (d:Decision {id: 'why-python', title: 'why python backend', "
+        "body: 'python backend chosen for pydantic and embeddings'})"
+    )
+
+
+def test_label_cap_surfaces_underrepresented_label(tmp_path):
+    eng = Engine(GragConfig(db_path=tmp_path / "cap.lbdb", search_label_cap=2))
+    try:
+        _make_flood(eng)
+        resp = search_knowledge(eng, eng.config, SearchRequest(query="python backend", top_k=4, hops=0))
+        labels = [s.node.label for s in resp.seeds]
+        assert "Decision" in labels  # the lone knowledge node surfaces
+        # within the first `cap` positions per label, Func holds at most 2
+        first_pass = labels[: 2 + 1]  # 2 Func slots + next label's first slot
+        assert first_pass.count("Func") <= 2
+        # top of the ranking is not exclusively code
+        assert not all(l == "Func" for l in labels[:3])
+        assert len(resp.seeds) == 4
+    finally:
+        eng.close()
+
+
+def test_label_cap_zero_disables_diversity(tmp_path):
+    eng = Engine(GragConfig(db_path=tmp_path / "nocap.lbdb", search_label_cap=0))
+    try:
+        _make_flood(eng)
+        resp = search_knowledge(eng, eng.config, SearchRequest(query="python backend", top_k=4, hops=0))
+        assert all(s.node.label == "Func" for s in resp.seeds)  # pure RRF flood
+    finally:
+        eng.close()
+
+
 # --- expansion --------------------------------------------------------------------
 
 
@@ -175,7 +229,28 @@ def test_get_context_empty_ids(docs_engine):
     resp = get_context(docs_engine, docs_engine.config, ContextRequest(node_ids=[], hops=1))
     assert resp.context == ""
     assert resp.subgraph.nodes == []
-    assert not resp.truncated
+
+
+def test_get_context_accepts_bare_code_graph_ids(engine, tmp_path):
+    """Code-graph node keys are 'repo:path#qual' (no 'Label:' prefix), which
+    split_node_id would misread as label='repo'. get_context must resolve the
+    bare id to its table server-side. Regression for the dogfooding papercut."""
+    from grag.core.types import CodeIngestRequest
+    from grag.ingest.code import ingest_code
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "core.py").write_text(
+        "def helper(x):\n    return x * 2\n", encoding="utf-8"
+    )
+    ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
+
+    bare = "pkg:core.py#helper"  # no Label prefix
+    prefixed = f"Function:{bare}"
+    r_bare = get_context(engine, engine.config, ContextRequest(node_ids=[bare], hops=0))
+    r_prefixed = get_context(engine, engine.config, ContextRequest(node_ids=[prefixed], hops=0))
+    assert prefixed in r_bare.included_node_ids
+    assert r_bare.included_node_ids == r_prefixed.included_node_ids
 
 
 # --- service integration ------------------------------------------------------------

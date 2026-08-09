@@ -11,6 +11,7 @@ import grag
 from grag.api.main import _STATIC_DIR, create_app
 from grag.config import GragConfig
 from grag.core.types import (
+    CodeIngestResponse,
     ContextResponse,
     DefineSchemaRequest,
     GraphSample,
@@ -234,6 +235,13 @@ def test_graph_sample(seeded_client):
     ls = GraphSample.model_validate(labeled.json())
     assert all(n.label == "Person" for n in ls.subgraph.nodes)
 
+    # A labeled sample scopes edges to that label's 1-hop neighborhood (so a
+    # label view shows the label *and its relationships*, not the whole graph's
+    # edges). With alice -[KNOWS]-> bob present, the KNOWS edge appears.
+    labeled2 = seeded_client.get("/api/graph/sample", params={"label": "Person"})
+    ls2 = GraphSample.model_validate(labeled2.json())
+    assert any(e.type == "KNOWS" for e in ls2.subgraph.edges)
+
 
 def test_ingest(client):
     res = client.post(
@@ -256,6 +264,28 @@ def test_ingest(client):
     out = IngestResponse.model_validate(res.json())
     assert out.label == "Chunk"
     assert out.nodes_created >= 1
+
+
+def test_ingest_code(client, tmp_path):
+    pkg = tmp_path / "apipkg"
+    pkg.mkdir()
+    (pkg / "mod.py").write_text(
+        "def f(x: int) -> int:\n    return x\n", encoding="utf-8"
+    )
+    res = client.post("/api/ingest/code", json={"paths": [str(pkg)]})
+    assert res.status_code == 200
+    out = CodeIngestResponse.model_validate(res.json())
+    assert (out.repos, out.modules, out.classes, out.functions) == (1, 1, 0, 1)
+    assert out.edges == 2  # CONTAINS_REPO_MODULE + CONTAINS_MODULE_FUNCTION
+    assert out.warnings == []
+
+    q = client.post("/api/query", json={"cypher": "MATCH (f:Function) RETURN f.id"})
+    assert q.status_code == 200
+    assert QueryResponse.model_validate(q.json()).rows == [["apipkg:mod.py#f"]]
+
+    # multi-db selectors are honored like on every other route (single-db: ignored)
+    again = client.post("/api/ingest/code?db=anything", json={"paths": [str(pkg)]})
+    assert again.status_code == 200
 
 
 def test_missing_edge_endpoints_returns_404(seeded_client):
@@ -480,3 +510,120 @@ def test_selectorless_request_400s_but_selected_request_works(no_default_client)
     # Explicit selector still works against the same app.
     ok = no_default_client.post("/api/query?db=beta", json={"cypher": cypher})
     assert _item_names(ok) == ["beta-thing"]
+
+
+# --- single-process MCP mount (--with-mcp) -----------------------------------------
+
+
+def _sse_json(text: str):
+    """Parse the JSON payload from the last `data:` line of an SSE stream."""
+    import json as _json
+
+    payload = None
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            payload = line[len("data:"):].strip()
+    assert payload, f"no SSE data in reply: {text[:200]}"
+    return _json.loads(payload)
+
+
+def test_serve_with_mcp_mount_shares_one_db(tmp_path):
+    """--with-mcp mounts the MCP streamable-http endpoint on the REST app so UI
+    + REST + MCP run in one process against the same live .lbdb (single write
+    conn). Drives a REAL uvicorn server (the MCP endpoint's DNS-rebinding guard
+    is host-based and rejects TestClient's `testserver` host). Verifies: MCP
+    handshake + a tool call over /mcp see the SAME data written via REST."""
+    import socket
+    import threading
+    import time
+    import urllib.request
+
+    import uvicorn
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    app = create_app(
+        GragConfig(
+            db_path=tmp_path / "one.lbdb",
+            buffer_pool_size=128 * 1024 * 1024,
+            mcp_path="/mcp",
+        )
+    )
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.05)
+    assert server.started, "uvicorn did not start"
+
+    base = f"http://127.0.0.1:{port}"
+
+    def post(path, body, accept="application/json"):
+        req = urllib.request.Request(
+            base + path,
+            data=__import__("json").dumps(body).encode(),
+            headers={"Content-Type": "application/json", "Accept": accept},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.read().decode()
+
+    def mcp(method, params, req_id):
+        return _sse_json(
+            post(
+                "/mcp/",
+                {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params},
+                accept="application/json, text/event-stream",
+            )
+        )
+
+    try:
+        init = mcp(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "0"},
+            },
+            1,
+        )
+        assert init["result"]["serverInfo"]["name"] == "grag"
+
+        # Write via the REST surface.
+        post(
+            "/api/schema/define",
+            {
+                "node_tables": [
+                    {"name": "Note", "primary_key": "id", "properties": []}
+                ],
+                "rel_tables": [],
+            },
+        )
+        post(
+            "/api/nodes/upsert",
+            {"nodes": [{"label": "Note", "key": "n1", "properties": {}}]},
+        )
+
+        # The MCP surface reads the SAME write (shared registry/service).
+        call = mcp(
+            "tools/call",
+            {"name": "cypher_query", "arguments": {"cypher": "MATCH (n:Note) RETURN count(n)"}},
+            2,
+        )
+        text = call["result"]["content"][0]["text"]
+        # LadybugDB rewrites count(n) -> COUNT(n._ID); assert on the count value.
+        assert '"rows":[[1]]' in text, text
+
+        # REST health on the same process.
+        with urllib.request.urlopen(base + "/api/health", timeout=10) as r:
+            assert r.status == 200
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)

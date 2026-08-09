@@ -1,4 +1,5 @@
-"""grag MCP server: the frozen 7-tool contract over stdio or streamable-http.
+"""grag MCP server: the frozen tool contract (7 knowledge tools + ingest_code)
+over stdio or streamable-http.
 
 Tool logic lives in plain module-level functions (a GragService is the first
 argument) so tests exercise them without any MCP machinery. `create_server`
@@ -28,6 +29,7 @@ from grag.config import GragConfig
 from grag.core.errors import GragError
 from grag.registry import ServiceRegistry
 from grag.core.types import (
+    CodeIngestRequest,
     ContextRequest,
     DefineSchemaRequest,
     MutationSummary,
@@ -50,6 +52,7 @@ __all__ = [
     "cypher_query",
     "search_knowledge",
     "get_context",
+    "ingest_code",
     "create_server",
     "run",
 ]
@@ -62,7 +65,8 @@ _INSTRUCTIONS = (
     "grag is a graph knowledgebase. Typical workflow: describe_schema to see "
     "tables; define_schema to create new ones; upsert_nodes / upsert_edges to "
     "write; search_knowledge to find relevant nodes by text; get_context to "
-    "expand known node ids; cypher_query for exact read-only lookups."
+    "expand known node ids; cypher_query for exact read-only lookups; "
+    "ingest_code to index a codebase's structure (Repo/Module/Class/Function)."
 )
 
 
@@ -319,6 +323,40 @@ def get_context(
     return resp.context
 
 
+@_return_errors
+def ingest_code(
+    service: GragService,
+    paths: list[str],
+    calls: bool = True,
+    max_file_kb: int = 1024,
+) -> str:
+    """Index the STRUCTURE of one or more code repositories into the graph:
+    Repo/Module/Class/Function nodes (path, line range, signature, docstring —
+    never source bodies) plus CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Use it
+    to answer "what calls X / what inherits from Y / what does module Z
+    import" with cheap cypher_query instead of reading files. Re-running on
+    the same tree is idempotent (MERGE by stable ids like "Module:repo:src/
+    a.py" and "Function:repo:src/a.py#Class.method"). Parses Python via stdlib
+    ast plus TypeScript/JavaScript/C#/Terraform via tree-sitter (needs the
+    optional extra: pip install "gragdb[code]"; CALLS/INHERITS edges are
+    Python-only for now). Other code files are skipped with a warning.
+
+    Args:
+        paths: repo directories (or single files) to walk, e.g. ["src"].
+            Build artifacts and VCS dirs (.git, node_modules, dist, ...) are
+            skipped automatically.
+        calls: also record same-module CALLS edges (default true).
+        max_file_kb: skip files larger than this many KB (default 1024).
+
+    Returns compact JSON {"repos": n, "modules": n, "classes": n, "functions":
+    n, "edges": n, "warnings": [...]} — always check "warnings" for skipped
+    files.
+    """
+    req = CodeIngestRequest(paths=paths, calls=calls, max_file_kb=max_file_kb)
+    resp = service.ingest_code(req)
+    return json.dumps(resp.model_dump(), ensure_ascii=False, separators=_COMPACT)
+
+
 # --- MCP wiring ---------------------------------------------------------------------
 
 
@@ -342,11 +380,20 @@ def _resolve_service(registry: ServiceRegistry, ctx: Context | None) -> GragServ
     return registry.get(db)
 
 
-def create_server(config: GragConfig) -> MCPServer:
-    """Build the MCP server: a ServiceRegistry from config, and the 7 frozen
-    tools registered as thin closures that resolve their GragService per call
-    (x-grag-db header on HTTP transports, the default database otherwise)."""
-    registry = ServiceRegistry(config)
+def create_server(
+    config: GragConfig, registry: ServiceRegistry | None = None
+) -> MCPServer:
+    """Build the MCP server: the frozen tools registered as thin closures that
+    resolve their GragService per call (x-grag-db header on HTTP transports,
+    the default database otherwise).
+
+    Pass an existing `registry` to share one ServiceRegistry (one write conn
+    per .lbdb) with a hosting app — e.g. when the REST server mounts the MCP
+    endpoint so UI + MCP run in a single process against the same live file.
+    When omitted, a fresh registry is created and owned by the returned server
+    (run() closes it)."""
+    if registry is None:
+        registry = ServiceRegistry(config)
     server = MCPServer("grag", instructions=_INSTRUCTIONS)
 
     @server.tool(name="describe_schema", description=_doc(describe_schema))
@@ -406,6 +453,16 @@ def create_server(config: GragConfig) -> MCPServer:
         ctx: Context = None,
     ) -> str:
         return get_context(_resolve_service(registry, ctx), node_ids, hops, token_budget)
+
+    @server.tool(name="ingest_code", description=_doc(ingest_code))
+    @_return_errors
+    def ingest_code_tool(
+        paths: list[str],
+        calls: bool = True,
+        max_file_kb: int = 1024,
+        ctx: Context = None,
+    ) -> str:
+        return ingest_code(_resolve_service(registry, ctx), paths, calls, max_file_kb)
 
     # Handles for lifecycle management (run closes the registry) and for
     # tests. grag_service is the default service for back-compat; in multi-db

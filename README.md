@@ -28,6 +28,7 @@ built bundle at `src/grag/api/static` (the wheel's force-include; see `pyproject
 cd ui && npm ci && npm run build && cd ..   # builds the UI into src/grag/api/static/
 pip install -e .            # core: engine, REST, MCP, FTS — no torch, no GPU stack
 pip install -e ".[dev]"     # tests
+pip install -e ".[code]"          # optional: tree-sitter code parsing (ts/js/cs/tf)
 pip install -e ".[embed-local]"   # optional: local embeddings (fastembed/ONNX, still no torch)
 pip install -e ".[embed-remote]"  # optional: OpenAI-compatible remote embeddings
 ```
@@ -57,11 +58,19 @@ python examples/build_example.py
 # sandbox get torn down and can't be reached from your browser)
 grag --db examples/knowledge.lbdb serve
 
+# single-process mode: UI + REST + MCP on one live .lbdb (recommended for
+# dogfooding — the UI sees MCP writes the moment they land)
+grag --db examples/knowledge.lbdb serve --with-mcp
+#   UI  → http://127.0.0.1:8471/
+#   MCP → http://127.0.0.1:8471/mcp   (streamable-http; point MCP clients here)
+
 # or answer 3 demo questions end-to-end in the terminal
 python examples/demo_e2e.py
 ```
 
-The UI: force-graph explorer (click = inspect, double-click = expand neighbors), Cypher console (Ctrl+Enter, graph/table results), schema sidebar, and a search bar that shows the exact grounding text an LLM would receive.
+The UI: force-graph explorer (click = inspect, double-click = expand neighbors), Cypher console (Ctrl+Enter, graph/table results), schema sidebar, and a search bar that shows the exact grounding text an LLM would receive. **Click a label in the legend** (bottom-left) to view just that label and its 1-hop relationships — e.g. click `Decision` to see only your Decisions and what they document/motivate; run a query or reload to reset the canvas.
+
+**One process, one live file.** LadybugDB is single-writer, so `serve` and `mcp` can't share a `.lbdb` as separate processes. `serve --with-mcp` mounts the MCP endpoint *inside* the REST/UI server, so UI + REST + MCP share one registry and one write connection — the UI watches the AI's writes land live instead of reading a stale copy. Use `--mcp-path` to change the MCP mount path (default `/mcp`).
 
 ## Use from an LLM harness (MCP)
 
@@ -82,7 +91,7 @@ Cursor / `.cursor/mcp.json`:
 }
 ```
 
-Any MCP client gets these 7 tools:
+Any MCP client gets these 8 tools:
 
 | tool | purpose |
 |---|---|
@@ -90,10 +99,50 @@ Any MCP client gets these 7 tools:
 | `define_schema` | create node/rel tables (LLM designs the graph for a domain) |
 | `upsert_nodes` / `upsert_edges` | idempotent MERGE writes; `_source` provenance automatic |
 | `cypher_query` | read-only Cypher; errors come back with correction hints |
-| `search_knowledge` | hybrid BM25 + vector seeds → k-hop expansion → cited, token-budgeted context |
+| `search_knowledge` | hybrid BM25 + vector seeds → RRF fusion → per-label diversity cap → k-hop expansion → cited, token-budgeted context |
 | `get_context` | re-pack chosen node ids into a token budget |
+| `ingest_code` | index a repo's code STRUCTURE (Repo/Module/Class/Function + CONTAINS/IMPORTS/CALLS/INHERITS) — never source bodies |
 
 Errors are returned as `ERROR: ... HINT: ...` tool output so the model self-corrects in-loop.
+
+## Ingest code
+
+Point `ingest_code` at a repo and structural questions become cheap Cypher instead of file-reading spelunking. Two entry points, same engine:
+
+```bash
+# CLI
+grag --db knowledge.lbdb ingest-code src/ ../other-repo [--no-calls] [--max-file-kb 2048]
+```
+
+```
+# MCP (8th tool) — an agent indexes a repo on demand
+ingest_code(paths=["src/"], calls=true, max_file_kb=1024)
+```
+
+```mermaid
+graph LR
+  R[Repo] -->|CONTAINS_REPO_MODULE| M[Module]
+  M -->|CONTAINS_MODULE_CLASS| C[Class]
+  M -->|CONTAINS_MODULE_FUNCTION| F[Function]
+  C -->|CONTAINS_CLASS_FUNCTION| F
+  M -->|IMPORTS| M
+  C -->|INHERITS| C
+  F -->|CALLS| F
+```
+
+Nodes carry path, line range, signature and docstring — **structure only, no source bodies** — with ids like `Module:repo:src/a.py` and `Function:repo:src/a.py#Class.method`. Re-ingesting the same tree is idempotent (MERGE by key). Three recipes:
+
+```cypher
+// what imports module X?
+MATCH (m:Module)-[:IMPORTS]->(x:Module) WHERE x.id = 'pkg:core.py' RETURN m.id
+// what calls function Y?
+MATCH (f:Function)-[:CALLS]->(y:Function) WHERE y.id = 'pkg:core.py#helper' RETURN f.id
+// cross-repo imports (multiple paths ingested into one db)
+MATCH (r1:Repo)-[:CONTAINS_REPO_MODULE]->(a:Module)-[:IMPORTS]->(b:Module)<-[:CONTAINS_REPO_MODULE]-(r2:Repo)
+WHERE r1.id <> r2.id RETURN a.id, b.id
+```
+
+Python parses via stdlib `ast` in every install. TypeScript/JavaScript/C#/Terraform (`.ts/.tsx/.js/.jsx/.mjs/.cjs/.cs/.tf`) parse via tree-sitter and need `pip install "gragdb[code]"`; without it those files raise a hint-carrying error. CALLS/INHERITS edges are Python-only for now; IMPORTS is best-effort (path/namespace-based) for the tree-sitter languages.
 
 ## Multiple projects / shared server
 
@@ -138,7 +187,7 @@ res = svc.search_knowledge(SearchRequest(query="who owns the ingestion gateway?"
 print(res.context)        # cited subgraph text, ready for a prompt
 ```
 
-Everything is also mirrored over REST: `POST /api/{query,search,context,ingest}`, `GET /api/{schema,graph/sample,health}`, `POST /api/{schema/define,nodes/upsert,edges/upsert}`.
+Everything is also mirrored over REST: `POST /api/{query,search,context,ingest,ingest/code}`, `GET /api/{schema,graph/sample,health}`, `POST /api/{schema/define,nodes/upsert,edges/upsert}`.
 
 ## Retrieval: hybrid + polar-split vectors
 
@@ -159,7 +208,9 @@ Select with `GRAG_VECTOR_CODEC` / `GragConfig.vector_codec`. `polar` is opt-in; 
 
 ## Configuration
 
-Env vars: `GRAG_DB_PATH`, `GRAG_BUFFER_POOL_MB` (default 256), `GRAG_VECTOR_CODEC`, `GRAG_TOKEN_BUDGET`, `GRAG_EMBED_PROVIDER` (`fastembed`|`remote`), `GRAG_EMBED_MODEL`, `GRAG_EMBED_DIM`, `GRAG_EMBED_BASE_URL`, `GRAG_EMBED_API_KEY_ENV`.
+Env vars: `GRAG_DB_PATH`, `GRAG_BUFFER_POOL_MB` (default 256), `GRAG_VECTOR_CODEC`, `GRAG_TOKEN_BUDGET`, `GRAG_SEARCH_LABEL_CAP`, `GRAG_EMBED_PROVIDER` (`fastembed`|`remote`), `GRAG_EMBED_MODEL`, `GRAG_EMBED_DIM`, `GRAG_EMBED_BASE_URL`, `GRAG_EMBED_API_KEY_ENV`.
+
+`GRAG_SEARCH_LABEL_CAP` (default `2`) is the per-label diversity cap on `search_knowledge`: no single node label may occupy more than this many of the fused top_k seeds before other labels get a turn (leftover slots then backfill by rank). It stops a large table — e.g. an ingested repo's `Function` nodes — from crowding out knowledge tables (`Decision`/`Concept`) on a general query. Set `0` to disable and get pure RRF rank order.
 
 ## Performance budget
 

@@ -20,6 +20,8 @@ import grag
 from grag.config import GragConfig
 from grag.core.errors import GragError, NotFoundError, ReadOnlyViolation
 from grag.core.types import (
+    CodeIngestRequest,
+    CodeIngestResponse,
     ContextRequest,
     ContextResponse,
     DefineSchemaRequest,
@@ -48,22 +50,48 @@ def _error_body(message: str, hint: str | None) -> dict:
 
 
 def create_app(config: GragConfig) -> FastAPI:
+    # One registry for the whole process: REST + UI + (optionally) MCP share
+    # it, so a single GragService/write-conn serves every surface of a .lbdb.
+    registry = ServiceRegistry(config)
+
+    # Build the MCP streamable-http app first (when enabled) so its session
+    # manager can be driven by this app's lifespan below. It shares the single
+    # registry — passing it in is what makes single-process mode safe.
+    mcp_session_manager = None
+    mcp_app = None
+    if config.mcp_path:
+        from grag.mcp_server.server import create_server
+
+        mcp_server = create_server(config, registry=registry)
+        mcp_app = mcp_server.streamable_http_app(
+            streamable_http_path="/", stateless_http=True, host=config.host
+        )
+        mcp_session_manager = mcp_server.session_manager
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        app.state.registry.close()
+        if mcp_session_manager is not None:
+            async with mcp_session_manager.run():
+                yield
+        else:
+            yield
+        registry.close()
 
     app = FastAPI(title="grag", version=grag.__version__, lifespan=lifespan)
-    app.state.registry = ServiceRegistry(config)
+    app.state.registry = registry
     # Resolve the default lazily and tolerate failure: in multi-db mode with no
     # determinable default (2+ DBs, none named after db_path), registry.get()
     # raises at startup and the server would never come up — taking /api/dbs
     # (discovery) and all explicitly-selected requests down with it. Startup must
     # not depend on a default existing; only a request with no selector does.
     try:
-        app.state.service = app.state.registry.get()
+        app.state.service = registry.get()
     except GragError:
         app.state.service = None
+
+    # Mount MCP before the SPA catch-all at "/" so the MCP path is matched first.
+    if mcp_app is not None:
+        app.mount(config.mcp_path, mcp_app, name="mcp")
 
     app.add_middleware(
         CORSMiddleware,
@@ -156,6 +184,10 @@ def create_app(config: GragConfig) -> FastAPI:
     @app.post("/api/ingest", response_model=IngestResponse)
     def ingest(request: Request, req: IngestRequest) -> IngestResponse:
         return resolve(request).ingest(req)
+
+    @app.post("/api/ingest/code", response_model=CodeIngestResponse)
+    def ingest_code(request: Request, req: CodeIngestRequest) -> CodeIngestResponse:
+        return resolve(request).ingest_code(req)
 
     @app.get("/api/graph/sample", response_model=GraphSample)
     def graph_sample(

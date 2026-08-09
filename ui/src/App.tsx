@@ -31,6 +31,7 @@ export default function App() {
   const [seeds, setSeeds] = useState<Map<string, SeedInfo>>(new Map());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
+  const [labelFilter, setLabelFilter] = useState<string | null>(null);
 
   const [query, setQuery] = useState('MATCH (n) RETURN n LIMIT 25');
   const [result, setResult] = useState<QueryResponse | null>(null);
@@ -67,6 +68,20 @@ export default function App() {
     }
   }, []);
 
+  // Reset to the initial unfiltered overview: fresh sample, replacing the canvas.
+  const resetView = useCallback(async () => {
+    setLabelFilter(null);
+    setFilter('');
+    setSelectedId(null);
+    try {
+      const sample = await api.sample(200);
+      setStats(sample.stats);
+      setGraph(sample.subgraph); // replace, not merge — back to the start view
+    } catch {
+      // connectivity already surfaced via the health banner
+    }
+  }, []);
+
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth(null));
     api
@@ -99,6 +114,8 @@ export default function App() {
     setQueryError(null);
     setSearchResult(null);
     setSearchError(null);
+    setLabelFilter(null);
+    setFilter('');
     loadSchema();
     loadSample();
   }, [dbsLoaded, db, loadSchema, loadSample]);
@@ -139,9 +156,13 @@ export default function App() {
 
   const selectLabel = useCallback(
     (label: string) => {
-      const q = `MATCH (n:${label}) RETURN n LIMIT 50`;
+      // Nodes of this label PLUS their 1-hop relationships, so the view shows
+      // the label *and* how it connects (a bare `MATCH (n:Label) RETURN n`
+      // returns nodes with no edges). Undirected so incoming rels count too.
+      setLabelFilter(label);
+      const q = `MATCH (a:${label})-[r]-(b) RETURN a, r, b LIMIT 100`;
       setQuery(q);
-      void runQuery(q);
+      void runQuery(q, 'replace');
     },
     [runQuery],
   );
@@ -223,6 +244,9 @@ export default function App() {
             onFilterChange={setFilter}
             onSelect={(n) => setSelectedId(n?.id ?? null)}
             onExpand={expandNode}
+            onSelectLabel={selectLabel}
+            labelFilter={labelFilter}
+            onResetView={resetView}
           />
           {selectedNode && (
             <Inspector

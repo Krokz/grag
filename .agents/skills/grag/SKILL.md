@@ -16,13 +16,37 @@ designed for LLM grounding. One `.lbdb` file per database, zero daemons.
 **Core loop:** search/traverse the graph to ground an answer, or build the graph by
 defining a schema and upserting nodes/edges. Every fact carries `_source` provenance.
 
+## Always ground in grag first
+
+When a grag database is reachable (an MCP server is configured, `grag serve` is
+running, or a `.lbdb` exists you can start), make grag your **first** source of truth
+for questions about the project — not a fallback after reading files. This keeps
+answers grounded, cuts token spend, and avoids the context bloat that causes
+hallucination.
+
+- **Structure/architecture/rationale questions** → `describe_schema`, then
+  `search_knowledge` (natural language) or `cypher_query` (exact structural lookups)
+  **before** opening source files. The graph usually answers "what/where/how-connected"
+  with far fewer tokens than reading code.
+- **Read a source file only when** the graph points you at a specific node's
+  `path`/`line_start`/`line_end` and you genuinely need the body — not to wander.
+- **Build as you learn.** When the user states a decision, convention, or fact worth
+  keeping, `upsert_nodes`/`upsert_edges` it (with `_source`) so it compounds. When you
+  touch an unfamiliar repo, `ingest_code` it first.
+- **Connect words to code.** Link knowledge nodes to the code they describe (e.g. a
+  `Decision`/`Concept` `-[:DOCUMENTS|MENTIONS]->` a `Function`/`Module`), so retrieval
+  returns docs *and* the implementation in one cited subgraph.
+
+If grag is genuinely unavailable (no server, no DB), say so and proceed without it —
+don't stall.
+
 ## How to talk to it
 
 Pick the first surface that is available, in this order:
 
-1. **MCP tools** — if the `grag` MCP server is configured, the 7 tools appear directly.
+1. **MCP tools** — if the `grag` MCP server is configured, the 8 tools appear directly.
 2. **REST** — if `grag serve` is running (default `http://127.0.0.1:8471`):
-   `POST /api/{query,search,context,ingest}`, `GET /api/{schema,graph/sample,health}`,
+   `POST /api/{query,search,context,ingest,ingest/code}`, `GET /api/{schema,graph/sample,health}`,
    `POST /api/{schema/define,nodes/upsert,edges/upsert}`.
 3. **Python** — `from grag.service import GragService` with `GragConfig(db_path=...)`.
    Methods mirror the tools exactly.
@@ -30,7 +54,7 @@ Pick the first surface that is available, in this order:
 If none are running and a `.lbdb` exists, start one: `grag --db <file> serve` (UI + REST)
 or `grag --db <file> mcp` (for MCP clients).
 
-## The 7 tools
+## The 8 tools
 
 | tool | use |
 |---|---|
@@ -38,8 +62,29 @@ or `grag --db <file> mcp` (for MCP clients).
 | `define_schema` | Create node/rel tables. Design the graph for the domain. |
 | `upsert_nodes` / `upsert_edges` | Idempotent MERGE writes; `_source`/`_created_at` added automatically. |
 | `cypher_query` | Read-only Cypher. Write keywords (CREATE/MERGE/SET/DELETE/...) are rejected — use the upsert tools for writes. |
-| `search_knowledge` | Hybrid BM25 + vector seeds, RRF fusion, k-hop expansion, token-budgeted cited context. The main RAG entry point. |
+| `search_knowledge` | Hybrid BM25 + vector seeds, RRF fusion, **per-label diversity cap**, k-hop expansion, token-budgeted cited context. The main RAG entry point. |
 | `get_context` | Re-pack chosen node ids (from a prior search) into a fresh token budget. |
+| `ingest_code` | Index a repo's code STRUCTURE: Repo/Module/Class/Function nodes + CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Structure only — never source bodies. |
+
+## Working with an unfamiliar codebase (code graph)
+
+`ingest_code` (the 8th tool) is the token-frugal way to explore a repo. The loop:
+
+1. **Index first**: call `ingest_code` on the repo path(s) BEFORE reading files.
+   Re-running is idempotent (MERGE by stable ids), so re-index after big changes.
+2. **Ask structural questions with `cypher_query`** over the code tables:
+   - what imports X: `MATCH (m:Module)-[:IMPORTS]->(x:Module) WHERE x.id = '<repo>:<path>' RETURN m.id`
+   - what calls Y: `MATCH (f:Function)-[:CALLS]->(y:Function) WHERE y.id = '<repo>:<path>#<qualname>' RETURN f.id`
+   - subclass/implementor check: `MATCH (c:Class)-[:INHERITS]->(b:Class) WHERE b.name = 'Base' RETURN c.id`
+   - ids look like `Module:pkg:core.py` and `Function:pkg:core.py#Greeter.greet`;
+     nodes carry signature, docstring and line range — enough to navigate by.
+3. **Only fetch source bodies when truly needed** — read the file at the node's
+   `path`/`line_start`/`line_end` instead of bulk-reading the repo.
+
+Python parses in every install (stdlib ast); TypeScript/JavaScript/C#/Terraform
+need `pip install "gragdb[code]"` (tree-sitter) — without it those files raise
+an ERROR with that install HINT. CALLS/INHERITS edges are Python-only for now;
+IMPORTS for the tree-sitter languages is best-effort (path/namespace-based).
 
 ## Hard-won rules (respect these — they came from real errors)
 
@@ -62,8 +107,12 @@ or `grag --db <file> mcp` (for MCP clients).
 
 ## Operational gotchas
 
-- **Single-writer:** the embedded engine holds a write lock per `.lbdb`. Do not run
-  `serve` and `mcp` against the same file at once; use one process or separate files.
+- **Single-writer:** the embedded engine holds a write lock per `.lbdb`, so `serve`
+  and `mcp` cannot share one file as separate processes ("Could not set lock"). For a
+  live UI watching MCP writes, run ONE process: `grag --db <file> serve --with-mcp`
+  mounts the MCP endpoint (`/mcp`) on the REST/UI server — UI + REST + MCP share one
+  registry and one write conn, so the UI sees writes as they land. Otherwise use
+  separate files.
 - **FTS index is built lazily** on first search of a table (a write-path cost). Warm it
   with one search before timing latency.
 - **Extensions are preloaded at engine startup.** A table with an FTS or HNSW index
@@ -74,6 +123,11 @@ or `grag --db <file> mcp` (for MCP clients).
 - **Buffer pool:** creating FTS indexes needs headroom; tests use a 128MB pool.
 - **Vectors:** default codec `int8` (4x smaller, ~0.998 recall). `polar` is experimental
   (opt-in via `GRAG_VECTOR_CODEC`). Without an embedder, everything works FTS-only.
+- **Search is diversity-capped per label** (`GRAG_SEARCH_LABEL_CAP`, default 2). A big
+  code table can't flood out knowledge tables on a general "why/what" question — a
+  `Decision`/`Concept` still surfaces even when hundreds of `Function` nodes match the
+  tokens. To aim at one table anyway, pass `labels=[...]`. Set the cap to 0 for pure
+  rank order.
 
 ## Multiple databases
 

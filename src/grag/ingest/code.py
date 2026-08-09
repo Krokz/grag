@@ -1,0 +1,690 @@
+"""Code ingestion: walk repo paths, parse structure, build a code graph.
+
+`ingest_code` is the frozen library entry point (reached via
+grag.service.GragService.ingest_code, the MCP tool, POST /api/ingest/code and
+the `grag ingest-code` CLI). It records STRUCTURE ONLY — Repo/Module/Class/
+Function nodes carrying path/line_start/line_end/signature/docstring/language
+plus CONTAINS_*/IMPORTS/INHERITS/CALLS edges — so an LLM can answer
+structural questions with cheap Cypher. Source bodies stay out of the graph.
+
+Ids are stable and human-readable: a Repo id is its directory name, a Module
+id is `<repo>:<relative/path>`, a Class/Function id is `<module_id>#<qualname>`
+(qualname dotted for nesting, e.g. `ClassName.method`). Re-ingesting the same
+tree MERGEs by key — idempotent by construction, never DELETE+recreate. Every
+node/edge carries `_source` provenance (the file it was parsed from).
+
+Python parses via the stdlib `ast` module; TypeScript/JavaScript
+(.ts/.tsx/.js/.jsx/.mjs/.cjs), C# (.cs) and Terraform (.tf) parse via
+tree-sitter grammars in `grag.ingest.code_ts` (the `code` extra). `_PARSERS`
+maps file suffix to parser so both share the walk/upsert pipeline. The
+tree-sitter import is lazy: base installs run .py parsing fine, and parsing
+a tree-sitter suffix without the extra raises ConfigurationError with an
+install hint. Known code suffixes without a parser collect a non-fatal
+warning.
+"""
+
+from __future__ import annotations
+
+import ast
+import fnmatch
+import re
+import logging
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+from grag.config import GragConfig
+from grag.core.engine import Engine
+from grag.core.mutate import define_schema, upsert_edges, upsert_nodes
+from grag.core.types import (
+    CodeIngestRequest,
+    CodeIngestResponse,
+    DefineSchemaRequest,
+    NodeTableSpec,
+    PropertySpec,
+    RelTableSpec,
+    UpsertEdge,
+    UpsertEdgesRequest,
+    UpsertNode,
+    UpsertNodesRequest,
+)
+
+log = logging.getLogger(__name__)
+
+_S = PropertySpec  # shorthand, mirrors examples/build_self.py
+
+# CONTAINS is split into one rel table per (FROM, TO) pair. Verified
+# empirically: LadybugDB itself supports multi-pair rel tables via raw DDL,
+# but grag's write path does not — define_schema rejects duplicate table names
+# in one request, a same-named rel in a later define_schema call is silently
+# skipped (if_not_exists), and upsert_edges validates every edge against the
+# rel's single registered (from, to) pair. Same workaround as
+# examples/build_self.py's MENTIONS_MODULE / MENTIONS_CONCEPT.
+_CODE_NODE_TABLES = [
+    NodeTableSpec(
+        name="Repo",
+        primary_key="id",
+        searchable=True,
+        properties=[_S(name="name"), _S(name="path")],
+    ),
+    NodeTableSpec(
+        name="Module",
+        primary_key="id",
+        searchable=True,
+        properties=[_S(name="path"), _S(name="language"), _S(name="name")],
+    ),
+    NodeTableSpec(
+        name="Class",
+        primary_key="id",
+        searchable=True,
+        properties=[
+            _S(name="name"),
+            _S(name="path"),
+            _S(name="line_start", type="INT64"),
+            _S(name="line_end", type="INT64"),
+            _S(name="signature"),
+            _S(name="docstring"),
+            _S(name="language"),
+        ],
+    ),
+    NodeTableSpec(
+        name="Function",
+        primary_key="id",
+        searchable=True,
+        properties=[
+            _S(name="name"),
+            _S(name="path"),
+            _S(name="line_start", type="INT64"),
+            _S(name="line_end", type="INT64"),
+            _S(name="signature"),
+            _S(name="docstring"),
+            _S(name="language"),
+            _S(name="is_method", type="BOOL"),
+        ],
+    ),
+]
+
+_CODE_REL_TABLES = [
+    RelTableSpec(name="CONTAINS_REPO_MODULE", from_label="Repo", to_label="Module"),
+    RelTableSpec(name="CONTAINS_MODULE_CLASS", from_label="Module", to_label="Class"),
+    RelTableSpec(name="CONTAINS_MODULE_FUNCTION", from_label="Module", to_label="Function"),
+    RelTableSpec(name="CONTAINS_CLASS_FUNCTION", from_label="Class", to_label="Function"),
+    RelTableSpec(name="IMPORTS", from_label="Module", to_label="Module"),
+    RelTableSpec(name="INHERITS", from_label="Class", to_label="Class"),
+    RelTableSpec(name="CALLS", from_label="Function", to_label="Function"),
+]
+
+_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "node_modules",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        "__pycache__",
+        ".idea",
+        ".vscode",
+    }
+)
+_SKIP_FILE_PATTERNS = ("*.min.js",)
+
+# Content-hashed bundle filenames emitted by Vite/webpack/rollup, e.g.
+# `index-C2RYf8Fw.js`, `app-B3KT9Q2P.css`: a base name, a dash, then an 8+ char
+# alphanumeric hash. These are build artifacts, not source — indexing them floods
+# the graph with thousands of minified symbols. (fnmatch can't express "exactly 8
+# of a class", so this is a regex matcher, applied alongside the globs.)
+_HASHED_BUNDLE_RE = re.compile(r"^[A-Za-z0-9_.]+-[A-Za-z0-9_-]{8,}\.(js|mjs|css|map)$")
+
+
+def _skip_file(name: str) -> bool:
+    return any(fnmatch.fnmatch(name, pat) for pat in _SKIP_FILE_PATTERNS) or bool(
+        _HASHED_BUNDLE_RE.match(name)
+    )
+
+# Known code suffixes WITHOUT a registered parser: walked files with these
+# extensions collect one grouped warning instead of being silently ignored
+# (truly unknown extensions — docs, images, lockfiles — are skipped as
+# non-code). Parsed suffixes (.py + the tree-sitter set) are not listed here.
+_UNSUPPORTED_CODE_SUFFIXES = frozenset(
+    {
+        ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".go", ".java", ".kt",
+        ".kts", ".lua", ".m", ".php", ".pl", ".rb", ".rs", ".scala", ".sh",
+        ".sql", ".swift", ".vue",
+    }
+)
+
+
+# --- walk -----------------------------------------------------------------------
+
+
+def _walk(paths: list[Path], max_file_kb: int, warnings: list[str]) -> Iterator[tuple[Path, Path]]:
+    """Yield (repo_root, file) for every ingestable file under `paths`.
+
+    Recursive; each path may be a directory (walked, repo root) or a single
+    file (its parent is the repo root). Skip directories, skip-file glob
+    patterns and oversized files are never yielded; oversized files collect a
+    warning. Traversal order is sorted, so ingestion is deterministic.
+    """
+    limit = max_file_kb * 1024
+    for path in paths:
+        if path.is_file():
+            candidates = [(path.parent, path)]
+        elif path.is_dir():
+            candidates = []
+            for dirpath, dirnames, filenames in os.walk(path):
+                dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+                candidates.extend((path, Path(dirpath) / name) for name in sorted(filenames))
+        else:
+            warnings.append(f"skipped {path}: no such file or directory")
+            continue
+        for root, file in candidates:
+            if _skip_file(file.name):
+                continue
+            try:
+                size = file.stat().st_size
+            except OSError as exc:
+                warnings.append(f"skipped {file}: could not stat ({exc})")
+                continue
+            if size > limit:
+                warnings.append(
+                    f"skipped {file}: {size // 1024} KB exceeds max_file_kb={max_file_kb}"
+                )
+                continue
+            yield root, file
+
+
+# --- python parsing ---------------------------------------------------------------
+
+
+@dataclass
+class _ParsedModule:
+    """One parsed module: its node, its contained defs, and the raw facts the
+    cross-module resolution pass (IMPORTS/INHERITS/CALLS) needs."""
+
+    module: UpsertNode
+    dotted: str  # repo-relative dotted module path, e.g. "grag.ingest.code"
+    classes: list[UpsertNode] = field(default_factory=list)
+    functions: list[UpsertNode] = field(default_factory=list)
+    contains: list[tuple[str, str, str, str]] = field(default_factory=list)  # (rel, from_key, to_key)
+    import_refs: list[str] = field(default_factory=list)  # dotted names to resolve
+    # local name -> dotted base module, for `from X import name` (used to
+    # resolve bare `name(...)` calls to imported functions, e.g. lazy imports).
+    from_imports: dict[str, str] = field(default_factory=dict)
+    class_bases: list[tuple[str, str]] = field(default_factory=list)  # (class qualname, base expr)
+    class_ids: dict[str, str] = field(default_factory=dict)  # simple name -> class id
+    func_ids: dict[str, str] = field(default_factory=dict)  # simple name -> module-level function id
+    method_ids: dict[str, dict[str, str]] = field(default_factory=dict)  # class qual -> {name -> id}
+    # (caller qualname, "name" | "self_attr", called name)
+    call_refs: list[tuple[str, str, str]] = field(default_factory=list)
+    # Extra module-index keys for non-Python import resolution (C# namespace
+    # names, Terraform module dirs); empty for Python.
+    aliases: list[str] = field(default_factory=list)
+
+
+def _signature(node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Reconstruct the `class ...:` / `def ...:` first line (no body)."""
+    if isinstance(node, ast.ClassDef):
+        parts = [ast.unparse(b) for b in node.bases]
+        parts.extend(ast.unparse(k) for k in node.keywords)
+        return f"class {node.name}({', '.join(parts)}):" if parts else f"class {node.name}:"
+    prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+    sig = f"{prefix} {node.name}({ast.unparse(node.args)})"
+    if node.returns is not None:
+        sig += f" -> {ast.unparse(node.returns)}"
+    return sig + ":"
+
+
+def _collect_calls(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, out: list[tuple[str, str]]
+) -> None:
+    """Collect (kind, name) call refs from one function's own body.
+
+    kind "name" is a bare `foo(...)` call; kind "self_attr" is `self.foo(...)`.
+    Nested defs/classes have their own call scope and are not descended into;
+    other attribute calls (obj.m(), mod.f()) are unresolved in Wave A.
+    """
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(child, ast.Call):
+                target = child.func
+                if isinstance(target, ast.Name):
+                    out.append(("name", target.id))
+                elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                    if target.value.id == "self":
+                        out.append(("self_attr", target.attr))
+            visit(child)
+
+    visit(func)
+
+
+def _dotted(rel_path: str, repo: str) -> str:
+    """Repo-relative dotted module path: 'a/b.py' -> 'a.b', 'a/__init__.py' -> 'a'."""
+    parts = rel_path.removesuffix(".py").split("/")
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts) if parts else repo
+
+
+def _parse_python(
+    path: Path,
+    source: str,
+    *,
+    repo: str,
+    rel_path: str,
+    calls: bool,
+) -> _ParsedModule:
+    """Parse one Python file with stdlib ast into a _ParsedModule.
+
+    Raises SyntaxError/ValueError on unparseable source; the caller collects
+    it as a warning and skips the file.
+    """
+    module_id = f"{repo}:{rel_path}"
+    dotted = _dotted(rel_path, repo)
+    parsed = _ParsedModule(
+        module=UpsertNode(
+            label="Module",
+            key=module_id,
+            properties={"path": rel_path, "language": "python", "name": dotted},
+            source=str(path),
+        ),
+        dotted=dotted,
+    )
+    tree = ast.parse(source)
+    src = str(path)
+
+    def add_class(node: ast.ClassDef, qual: str) -> None:
+        cid = f"{module_id}#{qual}"
+        parsed.classes.append(
+            UpsertNode(
+                label="Class",
+                key=cid,
+                properties={
+                    "name": node.name,
+                    "path": rel_path,
+                    "line_start": node.lineno,
+                    "line_end": node.end_lineno,
+                    "signature": _signature(node),
+                    "docstring": ast.get_docstring(node) or "",
+                    "language": "python",
+                },
+                source=src,
+            )
+        )
+        # No Class->Class containment rel exists (see _CODE_REL_TABLES), so
+        # nested classes attach to the Module like top-level ones.
+        parsed.contains.append(("CONTAINS_MODULE_CLASS", module_id, cid))
+        parsed.class_ids.setdefault(node.name, cid)
+        parsed.class_bases.extend((qual, ast.unparse(b)) for b in node.bases)
+
+    def add_function(
+        node: ast.FunctionDef | ast.AsyncFunctionDef, qual: str, parent_class: str | None
+    ) -> None:
+        fid = f"{module_id}#{qual}"
+        is_method = parent_class is not None
+        parsed.functions.append(
+            UpsertNode(
+                label="Function",
+                key=fid,
+                properties={
+                    "name": node.name,
+                    "path": rel_path,
+                    "line_start": node.lineno,
+                    "line_end": node.end_lineno,
+                    "signature": _signature(node),
+                    "docstring": ast.get_docstring(node) or "",
+                    "language": "python",
+                    "is_method": is_method,
+                },
+                source=src,
+            )
+        )
+        if is_method:
+            parsed.contains.append(("CONTAINS_CLASS_FUNCTION", f"{module_id}#{parent_class}", fid))
+            parsed.method_ids.setdefault(parent_class, {})[node.name] = fid
+        else:
+            # Nested functions (def inside def) attach to the Module: there is
+            # no Function->Function containment rel.
+            parsed.contains.append(("CONTAINS_MODULE_FUNCTION", module_id, fid))
+            if "." not in qual:
+                parsed.func_ids.setdefault(node.name, fid)
+        if calls:
+            refs: list[tuple[str, str]] = []
+            _collect_calls(node, refs)
+            parsed.call_refs.extend((qual, kind, name) for kind, name in refs)
+
+    def visit(stmts: list[ast.stmt], prefix: str, parent_class: str | None) -> None:
+        for node in stmts:
+            if isinstance(node, ast.ClassDef):
+                qual = f"{prefix}.{node.name}" if prefix else node.name
+                add_class(node, qual)
+                visit(node.body, qual, qual)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qual = f"{prefix}.{node.name}" if prefix else node.name
+                add_function(node, qual, parent_class if prefix == parent_class else None)
+                visit(node.body, qual, parent_class)
+
+    visit(tree.body, "", None)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            parsed.import_refs.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:  # relative import: anchor at this module's package
+                pkg = dotted.split(".") if rel_path.endswith("__init__.py") else dotted.split(".")[:-1]
+                keep = max(0, len(pkg) - (node.level - 1))
+                base = ".".join(pkg[:keep] + (base.split(".") if base else []))
+            if base:
+                parsed.import_refs.append(base)
+                # `from pkg import submodule`: the alias may name a module too.
+                parsed.import_refs.extend(
+                    f"{base}.{a.name}" for a in node.names if a.name != "*"
+                )
+                # `from pkg.mod import func` (incl. function-local lazy imports)
+                # lets a bare `func(...)` call resolve to the imported function.
+                for a in node.names:
+                    if a.name != "*":
+                        parsed.from_imports[a.asname or a.name] = base
+    return parsed
+
+
+def _tree_sitter_parser(suffix: str) -> Callable[..., _ParsedModule]:
+    """Dispatch stub for the tree-sitter suffixes: imports code_ts (and thus
+    tree-sitter) lazily on first parse, so base installs without the `code`
+    extra still import this module and parse .py files fine. Without the
+    extra, code_ts raises ConfigurationError with the install hint."""
+
+    def parse(
+        path: Path, source: str, *, repo: str, rel_path: str, calls: bool
+    ) -> _ParsedModule:
+        from grag.ingest import code_ts
+
+        return code_ts.parse_file(suffix, path, source, repo=repo, rel_path=rel_path)
+
+    return parse
+
+
+# Suffix -> parser dispatch. Python uses stdlib ast; ts/js/cs/tf use the
+# tree-sitter wrappers above (Wave B) — neither touches the walk or upsert
+# pipeline.
+_PARSERS: dict[str, Callable[..., _ParsedModule]] = {".py": _parse_python}
+for _suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".tf"):
+    _PARSERS[_suffix] = _tree_sitter_parser(_suffix)
+del _suffix
+
+
+# --- resolution (IMPORTS / INHERITS / CALLS over the whole scanned set) ------------
+
+
+def _resolve_module_id(dotted: str, index: dict[str, list[str]]) -> str | None:
+    """Exact match, else unique suffix match ('grag.cli' -> 'src.grag.cli');
+    ambiguous or unknown resolves to None (external imports skip silently)."""
+    exact = index.get(dotted, [])
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        return None
+    matches = sorted(
+        {mid for d, mids in index.items() if d.endswith(f".{dotted}") for mid in mids}
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_imported_func(
+    name: str,
+    base: str,
+    module_index: dict[str, list[str]],
+    by_module: dict[str, "_ParsedModule"],
+) -> str | None:
+    """Resolve a bare call to a `from base import name` imported function.
+
+    `base` is the imported module's dotted path; the function lives in that
+    module's func_ids under `name`. Returns the function id, or None if the
+    module isn't in the scanned set or doesn't define it (external import).
+    """
+    mid = _resolve_module_id(base, module_index)
+    if mid and mid in by_module:
+        return by_module[mid].func_ids.get(name)
+    return None
+
+
+def _resolve_base(
+    expr: str,
+    parsed: _ParsedModule,
+    module_index: dict[str, list[str]],
+    class_index: dict[str, list[str]],
+    by_module: dict[str, _ParsedModule],
+) -> str | None:
+    """Resolve an unparsed base expression ('Foo', 'mod.Foo', 'Generic[T]') to
+    a scanned Class id: same module first, then the named module, then a
+    globally unique class of that name. Best-effort; None skips the edge."""
+    name = expr.split("[")[0].strip()  # drop generics subscript
+    if not name:
+        return None
+    parts = name.split(".")
+    cls_name = parts[-1]
+    if len(parts) == 1:
+        own = parsed.class_ids.get(cls_name)
+        if own:
+            return own
+    else:
+        mid = _resolve_module_id(".".join(parts[:-1]), module_index)
+        if mid and mid in by_module:
+            found = by_module[mid].class_ids.get(cls_name)
+            if found:
+                return found
+    matches = class_index.get(cls_name, [])
+    return matches[0] if len(matches) == 1 else None
+
+
+# --- public: ingest_code ----------------------------------------------------------
+
+
+def ingest_code(engine: Engine, config: GragConfig, req: CodeIngestRequest) -> CodeIngestResponse:
+    """Walk `req.paths`, parse code structure, and upsert the code graph.
+
+    The schema is defined idempotently on every call; all nodes go in via one
+    batched upsert_nodes per label and all edges via one upsert_edges per rel
+    type. Unreadable/unparseable/oversized files and unsupported code
+    extensions are collected as warnings instead of failing the batch.
+    """
+    define_schema(
+        engine,
+        config,
+        DefineSchemaRequest(
+            node_tables=list(_CODE_NODE_TABLES), rel_tables=list(_CODE_REL_TABLES)
+        ),
+    )
+
+    warnings: list[str] = []
+    repos: dict[str, UpsertNode] = {}
+    parsed_modules: list[_ParsedModule] = []
+    unsupported: dict[str, int] = {}
+
+    for root, file in _walk([Path(p) for p in req.paths], req.max_file_kb, warnings):
+        suffix = file.suffix.lower()
+        parser = _PARSERS.get(suffix)
+        if parser is None:
+            if suffix in _UNSUPPORTED_CODE_SUFFIXES:
+                unsupported[suffix] = unsupported.get(suffix, 0) + 1
+            continue
+        repo = root.resolve().name or "repo"
+        rel_path = file.relative_to(root).as_posix()
+        if repo not in repos:
+            repos[repo] = UpsertNode(
+                label="Repo",
+                key=repo,
+                properties={"name": repo, "path": str(root.resolve())},
+                source=str(root),
+            )
+        try:
+            source = file.read_text(encoding="utf-8")
+            parsed_modules.append(
+                parser(file, source, repo=repo, rel_path=rel_path, calls=req.calls)
+            )
+        except (OSError, UnicodeDecodeError) as exc:
+            warnings.append(f"skipped {file}: could not read ({exc})")
+        except (SyntaxError, ValueError) as exc:
+            warnings.append(f"skipped {file}: could not parse ({exc})")
+
+    for suffix in sorted(unsupported):
+        warnings.append(
+            f"skipped {unsupported[suffix]} file(s) with extension '{suffix}': "
+            "no parser registered (supported: .py, .ts, .tsx, .js, .jsx, "
+            ".mjs, .cjs, .cs, .tf)"
+        )
+
+    # Cross-module resolution: IMPORTS, INHERITS and CALLS need the whole
+    # scanned set, so edges are built after every module is parsed.
+    module_index: dict[str, list[str]] = {}
+    class_index: dict[str, list[str]] = {}
+    by_module: dict[str, _ParsedModule] = {}
+    for pm in parsed_modules:
+        mid = str(pm.module.key)
+        by_module[mid] = pm
+        # Index both the repo-relative dotted path and the repo-qualified one:
+        # when the repo dir IS the top package (repo "pkg" holding core.py),
+        # absolute imports say "pkg.core" while the relative dotted is "core".
+        repo = mid.split(":", 1)[0]
+        # Aliases are the non-Python resolution keys: C# namespaces and
+        # Terraform module dirs (populated by code_ts; empty for Python).
+        index_keys = {pm.dotted, f"{repo}.{pm.dotted}"}
+        index_keys.update(pm.aliases)
+        index_keys.update(f"{repo}.{alias}" for alias in pm.aliases)
+        for key in index_keys:
+            module_index.setdefault(key, [])
+            if mid not in module_index[key]:
+                module_index[key].append(mid)
+        for cid in pm.class_ids.values():
+            simple = cid.rsplit("#", 1)[1].rsplit(".", 1)[-1]
+            class_index.setdefault(simple, [])
+            if cid not in class_index[simple]:
+                class_index[simple].append(cid)
+
+    # Global function index (simple name -> ids) for resolving bare calls to
+    # from-imported or otherwise-referenced functions defined in scanned modules.
+    func_index: dict[str, list[str]] = {}
+    for pm in parsed_modules:
+        for n in pm.functions:
+            simple = str(n.key).rsplit("#", 1)[1].rsplit(".", 1)[-1]
+            func_index.setdefault(simple, [])
+            if str(n.key) not in func_index[simple]:
+                func_index[simple].append(str(n.key))
+
+    edges: dict[tuple[str, str, str], UpsertEdge] = {}
+
+    def add_edge(type_: str, from_label: str, from_key: str, to_label: str, to_key: str, src: str) -> None:
+        if from_key == to_key and from_label == to_label:
+            return
+        edges.setdefault(
+            (type_, from_key, to_key),
+            UpsertEdge(
+                type=type_,
+                from_label=from_label,
+                from_key=from_key,
+                to_label=to_label,
+                to_key=to_key,
+                source=src,
+            ),
+        )
+
+    for pm in parsed_modules:
+        mid = str(pm.module.key)
+        src = str(pm.module.source)
+        add_edge("CONTAINS_REPO_MODULE", "Repo", mid.split(":", 1)[0], "Module", mid, src)
+        for rel, from_key, to_key in pm.contains:
+            to_label = "Class" if rel == "CONTAINS_MODULE_CLASS" else "Function"
+            from_label = "Class" if rel == "CONTAINS_CLASS_FUNCTION" else "Module"
+            add_edge(rel, from_label, from_key, to_label, to_key, src)
+        for ref in pm.import_refs:
+            target = _resolve_module_id(ref, module_index)
+            if target and target != mid:
+                add_edge("IMPORTS", "Module", mid, "Module", target, src)
+        for qual, expr in pm.class_bases:
+            target = _resolve_base(expr, pm, module_index, class_index, by_module)
+            if target:
+                add_edge("INHERITS", "Class", f"{mid}#{qual}", "Class", target, src)
+        for qual, kind, name in pm.call_refs:
+            caller = f"{mid}#{qual}"
+            if kind == "name":
+                target = pm.func_ids.get(name)
+                if target is None and name in pm.from_imports:
+                    # `from base import name`; `name(...)` -> the imported function
+                    target = _resolve_imported_func(name, pm.from_imports[name], module_index, by_module)
+                if target is None:
+                    # Unique global match across the scanned set (guarded/lazy calls).
+                    matches = func_index.get(name, [])
+                    target = matches[0] if len(matches) == 1 else None
+            else:  # self_attr: method on the caller's own class
+                cls_qual = qual.rsplit(".", 1)[0] if "." in qual else ""
+                target = pm.method_ids.get(cls_qual, {}).get(name)
+            if target:
+                add_edge("CALLS", "Function", caller, "Function", target, src)
+
+    nodes_by_label: list[tuple[str, dict[str, UpsertNode]]] = [
+        ("Repo", repos),
+        ("Module", {str(pm.module.key): pm.module for pm in parsed_modules}),
+        ("Class", {str(n.key): n for pm in parsed_modules for n in pm.classes}),
+        ("Function", {str(n.key): n for pm in parsed_modules for n in pm.functions}),
+    ]
+    counts: dict[str, int] = {}
+    for label, nodes in nodes_by_label:
+        counts[label] = len(nodes)
+        if nodes:
+            summary = upsert_nodes(engine, config, UpsertNodesRequest(nodes=list(nodes.values())))
+            warnings.extend(summary.warnings)
+
+    edges_by_type: dict[str, list[UpsertEdge]] = {}
+    for edge in edges.values():
+        edges_by_type.setdefault(edge.type, []).append(edge)
+    edge_count = 0
+    for rel_type in sorted(edges_by_type):
+        batch = edges_by_type[rel_type]
+        edge_count += len(batch)
+        summary = upsert_edges(engine, config, UpsertEdgesRequest(edges=batch))
+        warnings.extend(summary.warnings)
+
+    return CodeIngestResponse(
+        repos=counts["Repo"],
+        modules=counts["Module"],
+        classes=counts["Class"],
+        functions=counts["Function"],
+        edges=edge_count,
+        warnings=warnings,
+    )
+
+
+# --- public: ingest_code_paths (CLI) ------------------------------------------------
+
+
+def ingest_code_paths(
+    config: GragConfig, paths: list[Path], *, calls: bool = True, max_file_kb: int = 1024
+) -> str:
+    """Ingest code structure from `paths` and return a human-readable summary
+    for the CLI (mirrors loaders.ingest_paths)."""
+    from grag.service import GragService
+
+    service = GragService(config)
+    try:
+        resp = service.ingest_code(
+            CodeIngestRequest(
+                paths=[str(p) for p in paths], calls=calls, max_file_kb=max_file_kb
+            )
+        )
+    finally:
+        service.close()
+
+    lines = [
+        f"Ingested code from {len(paths)} path(s): "
+        f"{resp.repos} repo(s), {resp.modules} module(s), {resp.classes} class(es), "
+        f"{resp.functions} function(s), {resp.edges} edge(s) written to {config.db_path}."
+    ]
+    if resp.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {w}" for w in resp.warnings)
+    return "\n".join(lines)

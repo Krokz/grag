@@ -31,8 +31,19 @@ class GragConfig(BaseModel):
     max_hops: int = 3
     default_token_budget: int = 2000
     statement_timeout_ms: int = 30_000
+    # Per-label diversity cap: max seeds a single label may occupy in the fused
+    # top_k before promoting other labels. Prevents one large table (e.g. code
+    # Functions) from crowding out others. Set <= 0 to disable.
+    search_label_cap: int = 2
     vector_codec: Literal["fp32", "int8", "binary", "polar"] = "fp32"
     embedder: EmbedderConfig | None = None
+    # Mount the MCP streamable-http endpoint on the REST/UI server so one
+    # process serves UI + REST + MCP against the same live .lbdb (single
+    # writer satisfied; UI sees writes the moment they land). Off by default.
+    mcp_path: str | None = None
+    # Host the server binds to; used for the MCP endpoint's DNS-rebinding
+    # allow-list when mcp_path is set. Defaults to loopback.
+    host: str = "127.0.0.1"
 
     @classmethod
     def from_env(cls) -> "GragConfig":
@@ -47,6 +58,8 @@ class GragConfig(BaseModel):
             cfg.vector_codec = codec  # type: ignore[assignment]
         if budget := os.environ.get("GRAG_TOKEN_BUDGET"):
             cfg.default_token_budget = int(budget)
+        if cap := os.environ.get("GRAG_SEARCH_LABEL_CAP"):
+            cfg.search_label_cap = int(cap)
         if provider := os.environ.get("GRAG_EMBED_PROVIDER"):
             cfg.embedder = EmbedderConfig(
                 provider=provider,  # type: ignore[arg-type]

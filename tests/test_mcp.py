@@ -1,6 +1,6 @@
 """Tests for grag.mcp_server.server — plain tool functions (full LLM workflow
-simulation, error contract) plus FastMCP/MCPServer registration of the 7
-frozen tool names, multi-db per-call routing, and the streamable-http app."""
+simulation, error contract) plus FastMCP/MCPServer registration of the frozen
+tool names, multi-db per-call routing, and the streamable-http app."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ FROZEN_TOOLS = {
     "cypher_query",
     "search_knowledge",
     "get_context",
+    "ingest_code",
 }
 
 NODE_TABLES = [
@@ -304,6 +305,49 @@ def test_search_knowledge_empty_db_returns_empty_seeds(service: GragService):
     assert not out.startswith("ERROR")
     payload = json.loads(out)  # no context, just the footer
     assert payload == {"seeds": []}
+
+
+# --- ingest_code ---------------------------------------------------------------------
+
+
+def test_ingest_code_tool(service: GragService, tmp_path):
+    pkg = tmp_path / "mcpkg"
+    pkg.mkdir()
+    (pkg / "mod.py").write_text(
+        "def f(x: int) -> int:\n"
+        '    """Identity-ish."""\n'
+        "    return x\n",
+        encoding="utf-8",
+    )
+
+    out = mcp_server.ingest_code(service, [str(pkg)])
+    assert not out.startswith("ERROR"), out
+    payload = json.loads(out)
+    assert payload["repos"] == 1
+    assert payload["modules"] == 1
+    assert payload["functions"] == 1
+    assert payload["warnings"] == []
+
+    # the code graph is queryable through the existing tools
+    result = json.loads(
+        mcp_server.cypher_query(service, "MATCH (f:Function) RETURN f.id, f.signature")
+    )
+    assert result["rows"] == [["mcpkg:mod.py#f", "def f(x: int) -> int:"]]
+    assert "Module" in mcp_server.describe_schema(service)
+
+    # re-run is idempotent
+    again = json.loads(mcp_server.ingest_code(service, [str(pkg)]))
+    assert again["modules"] == 1
+    check = json.loads(mcp_server.cypher_query(service, "MATCH (m:Module) RETURN count(m)"))
+    assert check["rows"] == [[1]]
+
+
+def test_ingest_code_validation_error_returns_error_string(service: GragService):
+    out = mcp_server.ingest_code(service, "not-a-list")  # paths must be a list
+    assert isinstance(out, str)  # returned, not raised
+    assert out.startswith("ERROR:")
+    assert "paths" in out
+    assert "HINT:" in out
 
 
 # --- MCP registration ------------------------------------------------------------------

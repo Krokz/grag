@@ -12,6 +12,7 @@ Tool / endpoint contract (MCP tool = REST endpoint, same payloads):
     cypher_query(req)                 POST /api/query          -> QueryResponse
     search_knowledge(req)             POST /api/search         -> SearchResponse
     get_context(req)                  POST /api/context        -> ContextResponse
+    ingest_code(req)                  POST /api/ingest/code    -> CodeIngestResponse
     (ingest)                          POST /api/ingest         -> IngestResponse
     (ui)                              GET  /api/graph/sample   -> GraphSample
     (ui)                              GET  /api/health         -> {"status": "ok", "version": str}
@@ -29,6 +30,7 @@ Internal module contract (implemented by later waves, called via grag.service):
     grag.retrieval.context.get_context(engine, config, ContextRequest) -> ContextResponse
     grag.retrieval.vectors.vector_candidates(engine, config, query, labels, top_k) -> list[ScoredNode]
     grag.ingest.loaders.ingest_documents(engine, config, IngestRequest) -> IngestResponse
+    grag.ingest.code.ingest_code(engine, config, CodeIngestRequest) -> CodeIngestResponse
     grag.api.main.create_app(config) -> fastapi.FastAPI
     grag.mcp_server.server.run(config) -> None
 
@@ -302,6 +304,21 @@ class IngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     label: str
     nodes_created: int
+
+
+class CodeIngestRequest(BaseModel):
+    paths: list[str]
+    calls: bool = True
+    max_file_kb: int = 1024
+
+
+class CodeIngestResponse(BaseModel):
+    repos: int = 0
+    modules: int = 0
+    classes: int = 0
+    functions: int = 0
+    edges: int = 0
+    warnings: list[str] = Field(default_factory=list)
 
 
 # --- UI -------------------------------------------------------------------------
