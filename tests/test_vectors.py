@@ -16,8 +16,8 @@ from grag.core.engine import Engine
 from grag.core.errors import ConfigurationError, GragError
 from grag.core.types import (
     EMB_CODE_PROP,
-    EMB_MODEL_PROP,
     EMB_MAGNITUDE_PROP,
+    EMB_MODEL_PROP,
     EMBEDDING_PROP,
 )
 from grag.retrieval import vectors
@@ -37,8 +37,8 @@ class FakeEmbedder:
         out = []
         for text in texts:
             v = np.zeros(self.dim, dtype=np.float32)
-            for tok in text.lower().split():
-                tok = self.synonyms.get(tok, tok)
+            for raw_tok in text.lower().split():
+                tok = self.synonyms.get(raw_tok, raw_tok)
                 d = hashlib.sha256(tok.encode()).digest()
                 for j in range(3):
                     idx = d[j] % self.dim
@@ -286,6 +286,26 @@ def test_embed_pending_nodes_no_embedder(engine):
     assert vectors.embed_pending_nodes(engine, engine.config, "Doc") == 0
 
 
+def test_embed_pending_nodes_max_nodes_caps(vengine, vconfig):
+    """The search path caps synchronous embedding; the backlog drains over
+    later calls instead of blocking one request on the whole table."""
+    n = vectors.embed_pending_nodes(vengine, vconfig, "Doc", max_nodes=2)
+    assert n == 2
+    assert vectors.pending_embedding_count(vengine, vconfig, "Doc") == 1
+    assert vectors.embed_pending_nodes(vengine, vconfig, "Doc", max_nodes=2) == 1
+    assert vectors.pending_embedding_count(vengine, vconfig, "Doc") == 0
+
+
+def test_embed_pending_nodes_max_nodes_zero(vengine, vconfig):
+    vectors.ensure_vector_storage(vengine, vconfig, "Doc")
+    assert vectors.embed_pending_nodes(vengine, vconfig, "Doc", max_nodes=0) == 0
+    assert vectors.pending_embedding_count(vengine, vconfig, "Doc") == 3
+
+
+def test_pending_embedding_count_without_vector_columns(engine):
+    assert vectors.pending_embedding_count(engine, engine.config, "Doc") == 0
+
+
 # --- vector candidates ----------------------------------------------------------
 
 
@@ -327,3 +347,39 @@ def test_vector_candidates_second_call_reuses_index(vengine, vconfig):
     second = vectors.vector_candidates(vengine, vconfig, "graph relationships", None, 2)
     assert [h.node.id for h in first] == [h.node.id for h in second]
     assert first[0].node.id == "Doc:doc-0"
+
+
+@pytest.mark.parametrize("codec", ["int8", "binary"])
+def test_codec_candidates_fetch_full_nodes_only_for_shortlist(
+    vengine, vconfig, monkeypatch, codec
+):
+    """The approximate pass must project (pk, code) only — full node records
+    (with fp32 vectors) are fetched by primary key for the rescore shortlist,
+    never for the whole table."""
+    vconfig.vector_codec = codec
+    vectors.embed_pending_nodes(vengine, vconfig, "Doc")
+    seen: list[str] = []
+    orig_execute = vengine.execute
+
+    def spy(cypher, params=None):
+        seen.append(cypher)
+        return orig_execute(cypher, params)
+
+    monkeypatch.setattr(vengine, "execute", spy)
+    hits = vectors.vector_candidates(vengine, vconfig, "semantic vector retrieval", None, 1)
+    assert hits and hits[0].node.id == "Doc:doc-1"
+    doc_matches = [c for c in seen if c.strip().startswith("MATCH (n:Doc)")]
+    bare_node_returns = [
+        c
+        for c in doc_matches
+        if c.rstrip().endswith("RETURN n") and "IN $keys" not in c
+    ]
+    assert bare_node_returns == []
+    assert any("IN $keys" in c for c in doc_matches)
+
+
+def test_vector_candidates_caps_in_request_embedding(vengine, vconfig):
+    vconfig.max_embed_per_search = 2
+    hits = vectors.vector_candidates(vengine, vconfig, "semantic vector retrieval", None, 2)
+    assert hits  # the capped batch is already searchable
+    assert vectors.pending_embedding_count(vengine, vconfig, "Doc") == 1

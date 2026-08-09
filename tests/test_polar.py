@@ -72,7 +72,7 @@ def test_allocate_bits_budget_and_clamps():
             bits = polar.allocate_bits(dim, bpd)
             assert bits.shape == (dim - 1,)
             assert bits.min() >= 1 and bits.max() <= 8
-            assert bits.sum() == max(int(round(bpd * dim)), dim - 1)
+            assert bits.sum() == max(round(bpd * dim), dim - 1)
     bits = polar.allocate_bits(64, 4.0)
     assert bits[0] > bits[-1]  # head tilt survives the floor
 
@@ -95,7 +95,7 @@ def test_blob_layout_and_size():
     assert len(blob) == 6 + (int(bits.sum()) + 7) // 8
     assert blob[0] == 0x50 and blob[1] == 1
     assert blob[2] | (blob[3] << 8) == dim
-    assert (blob[4] | (blob[5] << 8)) == int(round(bpd * 64))
+    assert (blob[4] | (blob[5] << 8)) == round(bpd * 64)
 
 
 def test_decode_is_self_describing():

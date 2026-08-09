@@ -88,7 +88,7 @@ def test_node_without_props():
 
 def test_edge_line_format(docs_graph: Subgraph):
     packed = pack_context(docs_graph, token_budget=10_000)
-    edge_line = [l for l in packed.text.splitlines() if "-[" in l][0]
+    edge_line = next(line for line in packed.text.splitlines() if "-[" in line)
     assert edge_line == "Doc:doc-0 -[RELATED {since: 2024}]-> Doc:doc-1"
 
 
@@ -129,7 +129,12 @@ def test_long_strings_truncated():
 
 def test_datetime_rendered_isoformat():
     sub = Subgraph(
-        nodes=[_node("Doc:a", _created_at=datetime.datetime(2026, 8, 7, 12, 30, 5))]
+        nodes=[
+            _node(
+                "Doc:a",
+                _created_at=datetime.datetime(2026, 8, 7, 12, 30, 5),  # noqa: DTZ001 — naive rendering is the behavior under test
+            )
+        ]
     )
     packed = pack_context(sub, token_budget=10_000)
     assert '"2026-08-07T12:30:05"' in packed.text

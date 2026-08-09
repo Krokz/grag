@@ -27,12 +27,12 @@ from __future__ import annotations
 
 import ast
 import fnmatch
-import re
 import logging
 import os
+import re
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator
 
 from grag.config import GragConfig
 from grag.core.engine import Engine
@@ -207,7 +207,7 @@ class _ParsedModule:
     dotted: str  # repo-relative dotted module path, e.g. "grag.ingest.code"
     classes: list[UpsertNode] = field(default_factory=list)
     functions: list[UpsertNode] = field(default_factory=list)
-    contains: list[tuple[str, str, str, str]] = field(default_factory=list)  # (rel, from_key, to_key)
+    contains: list[tuple[str, str, str]] = field(default_factory=list)  # (rel, from_key, to_key)
     import_refs: list[str] = field(default_factory=list)  # dotted names to resolve
     # local name -> dotted base module, for `from X import name` (used to
     # resolve bare `name(...)` calls to imported functions, e.g. lazy imports).
@@ -254,9 +254,12 @@ def _collect_calls(
                 target = child.func
                 if isinstance(target, ast.Name):
                     out.append(("name", target.id))
-                elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
-                    if target.value.id == "self":
-                        out.append(("self_attr", target.attr))
+                elif (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    out.append(("self_attr", target.attr))
             visit(child)
 
     visit(func)
@@ -343,7 +346,7 @@ def _parse_python(
                 source=src,
             )
         )
-        if is_method:
+        if parent_class is not None:
             parsed.contains.append(("CONTAINS_CLASS_FUNCTION", f"{module_id}#{parent_class}", fid))
             parsed.method_ids.setdefault(parent_class, {})[node.name] = fid
         else:
@@ -439,7 +442,7 @@ def _resolve_imported_func(
     name: str,
     base: str,
     module_index: dict[str, list[str]],
-    by_module: dict[str, "_ParsedModule"],
+    by_module: dict[str, _ParsedModule],
 ) -> str | None:
     """Resolve a bare call to a `from base import name` imported function.
 
@@ -680,9 +683,11 @@ def ingest_code_paths(
         service.close()
 
     lines = [
-        f"Ingested code from {len(paths)} path(s): "
-        f"{resp.repos} repo(s), {resp.modules} module(s), {resp.classes} class(es), "
-        f"{resp.functions} function(s), {resp.edges} edge(s) written to {config.db_path}."
+        (
+            f"Ingested code from {len(paths)} path(s): "
+            f"{resp.repos} repo(s), {resp.modules} module(s), {resp.classes} class(es), "
+            f"{resp.functions} function(s), {resp.edges} edge(s) written to {config.db_path}."
+        )
     ]
     if resp.warnings:
         lines.append("Warnings:")

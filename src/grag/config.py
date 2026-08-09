@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class EmbedderConfig(BaseModel):
@@ -41,12 +41,27 @@ class GragConfig(BaseModel):
     # process serves UI + REST + MCP against the same live .lbdb (single
     # writer satisfied; UI sees writes the moment they land). Off by default.
     mcp_path: str | None = None
-    # Host the server binds to; used for the MCP endpoint's DNS-rebinding
-    # allow-list when mcp_path is set. Defaults to loopback.
+    # Host the server binds to; drives the REST layer's Host-header allow-list
+    # (DNS-rebinding guard) and the MCP endpoint's own allow-list. Defaults to
+    # loopback.
     host: str = "127.0.0.1"
+    # Bearer token required on /api/* (except /api/health) and the MCP mount
+    # when set. Unset means the loopback trust model: anyone who can reach the
+    # port directly is trusted, and browsers are kept out by the Host
+    # allow-list + no cross-origin CORS. Set GRAG_API_TOKEN before binding a
+    # non-loopback host.
+    api_token: str | None = None
+    # Extra CORS origins (e.g. a separately-hosted UI). Default is none: the
+    # built-in UI is served same-origin, so browsers need no cross-origin
+    # allowance at all.
+    cors_origins: list[str] = Field(default_factory=list)
+    # Max nodes embedded synchronously per search call. The remainder stays
+    # pending (reported as SearchResponse.pending_embeddings) and drains over
+    # later searches; ingest paths embed their own writes in full.
+    max_embed_per_search: int = 256
 
     @classmethod
-    def from_env(cls) -> "GragConfig":
+    def from_env(cls) -> GragConfig:
         cfg = cls()
         if p := os.environ.get("GRAG_DB_PATH"):
             cfg.db_path = Path(p)
@@ -60,6 +75,12 @@ class GragConfig(BaseModel):
             cfg.default_token_budget = int(budget)
         if cap := os.environ.get("GRAG_SEARCH_LABEL_CAP"):
             cfg.search_label_cap = int(cap)
+        if token := os.environ.get("GRAG_API_TOKEN"):
+            cfg.api_token = token
+        if origins := os.environ.get("GRAG_CORS_ORIGINS"):
+            cfg.cors_origins = [o.strip() for o in origins.split(",") if o.strip()]
+        if cap := os.environ.get("GRAG_MAX_EMBED_PER_SEARCH"):
+            cfg.max_embed_per_search = int(cap)
         if provider := os.environ.get("GRAG_EMBED_PROVIDER"):
             cfg.embedder = EmbedderConfig(
                 provider=provider,  # type: ignore[arg-type]

@@ -29,7 +29,7 @@ flowchart LR
 ### The rules
 
 - **PRs required** for everything. No direct pushes to `main` or `develop`.
-- **CI must be green** before merge (pytest matrix + UI build — see
+- **CI must be green** before merge (pytest matrix + ruff/mypy + UI build — see
   `.github/workflows/ci.yml`).
 - **Squash-merge** `feature/*` into `develop` to keep history readable.
 - **No force-push** to `main` or `develop`. Ever.
@@ -56,9 +56,11 @@ cd ui && npm ci && npm run build && cd ..
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest                      # run the test suite
+ruff check src tests        # lint (config pinned in pyproject.toml)
+mypy src/grag               # type-check
 ```
 
-grag targets **Python 3.10+** (CI tests 3.10–3.13). LadybugDB downloads its FTS
+grag targets **Python 3.10+** (CI tests 3.10–3.14). LadybugDB downloads its FTS
 and VECTOR extensions on first use, so the first test run needs network access.
 
 ## Cutting a release

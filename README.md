@@ -1,14 +1,28 @@
 # grag
 
-**LLM-first graph knowledgebase.** One embedded Cypher engine ([LadybugDB](https://ladybugdb.com), the Kuzu successor), one file per database, zero daemons — wrapped in the tool contract LLMs actually need: schema introspection that anchors text-to-Cypher, idempotent upserts with provenance, hybrid FTS/vector search, and token-budgeted subgraph context for grounded, low-hallucination answers.
+**Local-first, LLM-first graph knowledgebase.** One embedded Cypher engine ([LadybugDB](https://ladybugdb.com), the Kuzu successor), one file per database, zero daemons, nothing leaves your machine — wrapped in the tool contract LLMs actually need: schema introspection that anchors text-to-Cypher, idempotent upserts with provenance, hybrid FTS/vector search, and token-budgeted subgraph context for grounded, low-hallucination answers.
 
 *(**G**(raph)**RAG** — retrieval-augmented generation grounded in a graph.)*
 
 Not an enterprise platform. `pip install`, point an MCP client at it, done.
 
-## Why
+## Local-first, token-frugal
 
-LLM answers hallucinate when retrieval returns isolated chunks. grag stores knowledge as a **graph** — entities, documents, and their relationships — so retrieval returns a connected, cited subgraph an LLM can reason over. The LLM can also *build* the graph: `define_schema` + `upsert_nodes/edges` are first-class tools, so "turn these docs into a knowledge graph" is a normal conversation, not a pipeline project.
+grag is built for **your** machine, not a server farm. Every developer runs their own `gragdb`, with each project's knowledge in its own `.lbdb` file. Your LLM queries *that* — locally, offline, no per-token API cost for retrieval — instead of re-reading your whole codebase every session.
+
+The point isn't just "local storage," it's **token economics**:
+
+- **Stop re-reading files.** An agent that greps and re-reads source every session burns thousands of tokens re-deriving structure it already knew. grag answers "what calls X / what imports Y / why did we choose Z" with a cheap Cypher or search call — tokens go to *reasoning*, not *re-discovery*.
+- **Structure over bodies.** Code ingestion stores signatures, docstrings, and line ranges — never source bodies — so the graph stays tiny and queries resolve at near-zero body tokens. Fetch a body only when the graph points you at the exact `path:line_start-line_end`.
+- **Token budgets everywhere.** `search_knowledge` / `get_context` return cited subgraphs packed to a budget you set, so grounding never floods the context window.
+- **Context that compounds.** Decisions, conventions, and rationale the agent learns get written back (`upsert_nodes/edges` with provenance) and linked to the code they describe — so the next session starts from what you already established, not from scratch.
+- **Local means private and free.** No external embedding service by default (optional local ONNX embeddings, no torch), no telemetry, no daemon. Your code and your knowledge stay on-disk, in a file you can copy, back up, or delete.
+
+The result: an LLM that grounds its answers in *your* project's accumulated knowledge — with far fewer tokens, far less hallucination, and zero data leaving the box.
+
+## Why a graph
+
+LLM answers hallucinate when retrieval returns isolated chunks. grag stores knowledge as a **graph** — entities, documents, code, and their relationships — so retrieval returns a connected, cited subgraph an LLM can reason over, not a bag of fragments. And the LLM can *build* the graph itself: `define_schema` + `upsert_nodes/edges` are first-class tools, so "turn these docs (or this repo) into a knowledge graph" is a normal conversation, not a pipeline project.
 
 ## Install
 
@@ -144,9 +158,23 @@ WHERE r1.id <> r2.id RETURN a.id, b.id
 
 Python parses via stdlib `ast` in every install. TypeScript/JavaScript/C#/Terraform (`.ts/.tsx/.js/.jsx/.mjs/.cjs/.cs/.tf`) parse via tree-sitter and need `pip install "gragdb[code]"`; without it those files raise a hint-carrying error. CALLS/INHERITS edges are Python-only for now; IMPORTS is best-effort (path/namespace-based) for the tree-sitter languages.
 
-## Multiple projects / shared server
+## Multiple projects
 
-One `.lbdb` = one isolated universe — no shared entities, no cross-db queries. Per-project DBs is the default pattern; multi-db serving is opt-in via `--db-dir` (single-db is unchanged).
+There are two distinct ways to hold several projects, depending on whether they **relate**:
+
+**A. Related projects → one shared `.lbdb`.** Ingest several repos into the *same* database and they become separate `Repo` nodes in a single queryable graph — so the LLM can trace a call or an import across repo boundaries, or link a `Decision` in one project to a `Function` in another. This is the model for a monorepo, a system split across services, or any set of codebases that reference each other.
+
+```bash
+grag --db platform.lbdb ingest-code ../api ../web ../infra   # 3 repos, one graph
+```
+
+```cypher
+// cross-repo imports, inside one db
+MATCH (r1:Repo)-[:CONTAINS_REPO_MODULE]->(a:Module)-[:IMPORTS]->(b:Module)<-[:CONTAINS_REPO_MODULE]-(r2:Repo)
+WHERE r1.id <> r2.id RETURN a.id, b.id
+```
+
+**B. Unrelated projects → separate `.lbdb` files.** One file = one isolated universe (no shared entities, no cross-db queries), so a throwaway experiment never pollutes a real project's graph. This is the default local-first pattern: **one `.lbdb` per project, per developer**, each queryable locally with zero per-token retrieval cost. To serve many of them at once, opt into multi-db mode with `--db-dir`:
 
 ```bash
 grag --db-dir ~/kb serve    # one process serves every .lbdb in ~/kb
@@ -174,6 +202,8 @@ Cursor / `.cursor/mcp.json` (per window, one header per project):
 ```
 
 The server is localhost-only by default, and db names are routing hints, not auth — resolution rejects absolute paths and `..`. Single-db stdio (`grag --db knowledge.lbdb mcp`) remains the simple default.
+
+**HTTP security posture.** The REST layer has no accounts or sessions; the trust model is "whoever can reach the port directly is trusted." Drive-by browser access is denied by default: a Host-header allow-list (loopbacks + the bind host) blocks DNS rebinding, and CORS grants no cross-origin access at all unless you opt in via `GRAG_CORS_ORIGINS` (the built-in UI is served same-origin and needs none). If you bind a non-loopback address, set `GRAG_API_TOKEN` — every `/api/*` route except `/api/health` (and the MCP mount, when enabled) then requires `Authorization: Bearer <token>`.
 
 ## Python API
 
@@ -206,15 +236,17 @@ Codec ladder (`grag bench` reproduces these numbers on a synthetic 1500-doc corp
 
 Select with `GRAG_VECTOR_CODEC` / `GragConfig.vector_codec`. `polar` is opt-in; `int8` is the sweet spot today.
 
+Two honest costs of the codec path: candidate generation for non-fp32 codecs is an O(rows) approximate scan (only pk + code bytes cross the wire; fp32 nodes are fetched for the 4·top_k rescore shortlist only) — that's the property `grag bench` measures, so no ANN index is involved. And the first searches after a large ingest embed lazily: at most `GRAG_MAX_EMBED_PER_SEARCH` (default 256) nodes per search call, with the remainder reported as `pending_embeddings` on the search response so agents know vector recall is still improving.
+
 ## Configuration
 
-Env vars: `GRAG_DB_PATH`, `GRAG_BUFFER_POOL_MB` (default 256), `GRAG_VECTOR_CODEC`, `GRAG_TOKEN_BUDGET`, `GRAG_SEARCH_LABEL_CAP`, `GRAG_EMBED_PROVIDER` (`fastembed`|`remote`), `GRAG_EMBED_MODEL`, `GRAG_EMBED_DIM`, `GRAG_EMBED_BASE_URL`, `GRAG_EMBED_API_KEY_ENV`.
+Env vars: `GRAG_DB_PATH`, `GRAG_DB_DIR`, `GRAG_BUFFER_POOL_MB` (default 256), `GRAG_VECTOR_CODEC`, `GRAG_TOKEN_BUDGET`, `GRAG_SEARCH_LABEL_CAP`, `GRAG_MAX_EMBED_PER_SEARCH` (default 256), `GRAG_API_TOKEN`, `GRAG_CORS_ORIGINS`, `GRAG_EMBED_PROVIDER` (`fastembed`|`remote`), `GRAG_EMBED_MODEL`, `GRAG_EMBED_DIM`, `GRAG_EMBED_BASE_URL`, `GRAG_EMBED_API_KEY_ENV`.
 
 `GRAG_SEARCH_LABEL_CAP` (default `2`) is the per-label diversity cap on `search_knowledge`: no single node label may occupy more than this many of the fused top_k seeds before other labels get a turn (leftover slots then backfill by rank). It stops a large table — e.g. an ingested repo's `Function` nodes — from crowding out knowledge tables (`Decision`/`Concept`) on a general query. Set `0` to disable and get pure RRF rank order.
 
 ## Performance budget
 
-Measured, not assumed — `tests/test_perf.py` guards cold start (< 2s), search latency, and RSS; `grag bench` reports recall + p50/p95 + RSS per codec. Design rules: no heavy deps in the default install, one process for API+UI, lazy embedder loading, default `LIMIT`s, hop caps, statement timeouts, token budgets everywhere.
+Measured — `tests/test_perf.py` guards cold start (< 2s), search latency, and RSS; `grag bench` reports recall + p50/p95 + RSS per codec. Design rules: no heavy deps in the default install, one process for API+UI, lazy embedder loading, default `LIMIT`s, hop caps, statement timeouts, token budgets everywhere.
 
 ## Storage conventions
 
@@ -226,7 +258,8 @@ Measured, not assumed — `tests/test_perf.py` guards cold start (< 2s), search 
 ## Develop
 
 ```bash
-python -m pytest tests/          # 160+ tests, ~10s
+python -m pytest tests/          # 240+ tests, ~25s
+ruff check src tests && mypy src/grag   # CI gates on both
 grag bench                        # codec recall/latency/RSS table
 cd ui && npm run build            # rebuilds the UI into src/grag/api/static/
 ```

@@ -89,7 +89,6 @@ def _ordered_nodes(subgraph: Subgraph, seed_ids: list[str] | None) -> list[NodeR
 def pack_context(
     subgraph: Subgraph, token_budget: int, seed_ids: list[str] | None = None
 ) -> PackedContext:
-    lines: list[str] = []
     included_node_ids: list[str] = []
     truncated = False
 

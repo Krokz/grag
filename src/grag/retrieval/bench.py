@@ -185,9 +185,9 @@ def _bench_codec(
 
             recalls, query_ms = [], []
             for qi, qtext in enumerate(queries):
-                t0 = time.perf_counter()
+                q0 = time.perf_counter()
                 hits = vectors.vector_candidates(eng, cfg, qtext, None, 10)
-                query_ms.append((time.perf_counter() - t0) * 1e3)
+                query_ms.append((time.perf_counter() - q0) * 1e3)
                 got = {h.node.id for h in hits}
                 recalls.append(len(got & truth[qi]) / 10.0)
             rss1 = _rss_mb()
@@ -253,10 +253,14 @@ def format_bench(results: dict) -> str:
     """Render run_bench's dict as an aligned table."""
     p = results["params"]
     lines = [
-        f"grag codec bench — n_docs={p['n_docs']} dim={p['dim']} "
-        f"seed={p['seed']} queries={p['n_queries']}",
-        f"{'codec':<8} {'recall@10':>10} {'query_ms':>10} {'encode_us':>10} "
-        f"{'rss_delta_mb':>13} {'code_bytes':>11}",
+        (
+            f"grag codec bench — n_docs={p['n_docs']} dim={p['dim']} "
+            f"seed={p['seed']} queries={p['n_queries']}"
+        ),
+        (
+            f"{'codec':<8} {'recall@10':>10} {'query_ms':>10} {'encode_us':>10} "
+            f"{'rss_delta_mb':>13} {'code_bytes':>11}"
+        ),
     ]
     for c in p["codecs"]:
         r = results["results"][c]

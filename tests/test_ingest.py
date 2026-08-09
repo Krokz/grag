@@ -4,6 +4,7 @@ scripts end to end."""
 
 from __future__ import annotations
 
+import itertools
 import json
 import subprocess
 import sys
@@ -31,7 +32,7 @@ def test_chunking_respects_size_and_overlap():
     for i in range(12):
         assert any(f"Sentence number {i} ends here." in c for c in chunks)
     # overlap: each chunk opens with a word carried over from its predecessor
-    for prev, nxt in zip(chunks, chunks[1:]):
+    for prev, nxt in itertools.pairwise(chunks):
         assert nxt.split()[0] in prev.split()
     # no mid-word splits: every original word appears intact
     words = set(text.split())
@@ -153,10 +154,10 @@ def test_ingest_meta_json_roundtrip(engine):
     )
     ingest_documents(engine, engine.config, req)
 
-    rows = dict(
-        (r[0], r[1])
+    rows = {
+        r[0]: r[1]
         for r in engine.execute("MATCH (c:Chunk) RETURN c.id, c.meta").rows
-    )
+    }
     assert json.loads(rows["m.md#0000"]) == meta
     assert rows["plain.md#0000"] is None  # no metadata -> meta omitted
 
@@ -270,6 +271,7 @@ def test_example_scripts_run_end_to_end():
         capture_output=True,
         text=True,
         timeout=300,
+        check=False,
     )
     assert build.returncode == 0, f"build_example failed:\n{build.stdout}\n{build.stderr}"
     assert "MENTIONS edges" in build.stdout
@@ -280,6 +282,7 @@ def test_example_scripts_run_end_to_end():
         capture_output=True,
         text=True,
         timeout=300,
+        check=False,
     )
     assert demo.returncode == 0, f"demo_e2e failed:\n{demo.stdout}\n{demo.stderr}"
     assert "Who owns the ingestion gateway?" in demo.stdout

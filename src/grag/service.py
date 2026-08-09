@@ -43,9 +43,51 @@ from grag.core.types import (
 
 # Write keywords rejected on the read-only cypher_query path. Guardrail, not a
 # security boundary — the LLM contract steers writes to the upsert tools.
-_WRITE_PATTERN = re.compile(
-    r"\b(CREATE|MERGE|DELETE|DETACH|SET|DROP|ALTER|COPY|INSTALL|LOAD)\b", re.IGNORECASE
+# Matching runs on the statement with string literals and comments blanked
+# out, so a read like WHERE n.title = 'Set Theory' doesn't trip it.
+_LITERALS = re.compile(
+    r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|//[^\n]*|/\*.*?\*/", re.DOTALL
 )
+_WRITE_PATTERN = re.compile(
+    r"\b(CREATE|MERGE|DELETE|DETACH|SET|DROP|ALTER|COPY|INSTALL|LOAD|UNINSTALL)\b",
+    re.IGNORECASE,
+)
+# CALL procedures with side effects (CREATE_VECTOR_INDEX, DROP_FTS_INDEX, ...)
+# slip past the keyword pattern — underscores are word chars, so \bCREATE\b
+# doesn't match inside them. CALL is allowed only for known read procedures.
+_READ_CALL = re.compile(
+    r"\bCALL\s+(?:QUERY_[A-Z_]*|TABLE_INFO|SHOW_TABLES|CURRENT_SETTING|DB_VERSION)\b",
+    re.IGNORECASE,
+)
+_ANY_CALL = re.compile(r"\bCALL\b", re.IGNORECASE)
+_LIMIT_PATTERN = re.compile(r"\bLIMIT\b", re.IGNORECASE)
+_UNION_PATTERN = re.compile(r"\bUNION\b", re.IGNORECASE)
+
+
+def _assert_read_only(cypher: str) -> None:
+    scrubbed = _LITERALS.sub(" ", cypher)
+    violates = _WRITE_PATTERN.search(scrubbed) is not None
+    if not violates:
+        violates = any(
+            not _READ_CALL.match(scrubbed, m.start())
+            for m in _ANY_CALL.finditer(scrubbed)
+        )
+    if violates:
+        raise ReadOnlyViolation(
+            "cypher_query is read-only; the statement contains a write keyword.",
+            hint="Use define_schema / upsert_nodes / upsert_edges for writes.",
+        )
+
+
+def _with_limit(cypher: str, limit: int) -> str:
+    """Append a LIMIT unless the statement already bounds itself. The caller
+    passes limit+1 so one extra row proves truncation without materializing
+    the full result set. UNION is left alone: an appended LIMIT would bind to
+    the last branch only."""
+    scrubbed = _LITERALS.sub(" ", cypher)
+    if _LIMIT_PATTERN.search(scrubbed) or _UNION_PATTERN.search(scrubbed):
+        return cypher
+    return cypher.rstrip().rstrip(";") + f"\nLIMIT {limit}"
 
 
 def _not_implemented(module: str) -> GragError:
@@ -69,14 +111,14 @@ class GragService:
         try:
             from grag.core.schema import build_schema_document
         except ImportError:
-            raise _not_implemented("grag.core.schema")
+            raise _not_implemented("grag.core.schema") from None
         return build_schema_document(self.engine, self.config)
 
     def define_schema(self, req: DefineSchemaRequest) -> SchemaDocument:
         try:
             from grag.core.mutate import define_schema
         except ImportError:
-            raise _not_implemented("grag.core.mutate")
+            raise _not_implemented("grag.core.mutate") from None
         return define_schema(self.engine, self.config, req)
 
     # -- mutation --------------------------------------------------------------
@@ -85,29 +127,30 @@ class GragService:
         try:
             from grag.core.mutate import upsert_nodes
         except ImportError:
-            raise _not_implemented("grag.core.mutate")
+            raise _not_implemented("grag.core.mutate") from None
         return upsert_nodes(self.engine, self.config, req)
 
     def upsert_edges(self, req: UpsertEdgesRequest) -> MutationSummary:
         try:
             from grag.core.mutate import upsert_edges
         except ImportError:
-            raise _not_implemented("grag.core.mutate")
+            raise _not_implemented("grag.core.mutate") from None
         return upsert_edges(self.engine, self.config, req)
 
     # -- query ------------------------------------------------------------------
 
     def cypher_query(self, req: QueryRequest) -> QueryResponse:
-        if _WRITE_PATTERN.search(req.cypher):
-            raise ReadOnlyViolation(
-                "cypher_query is read-only; the statement contains a write keyword.",
-                hint="Use define_schema / upsert_nodes / upsert_edges for writes.",
-            )
+        _assert_read_only(req.cypher)
         limit = req.limit or self.config.default_query_limit
         limit = max(1, min(limit, self.config.max_query_limit))
         # Hide internal tables (_grag_tables & friends): a generic MATCH (n)
-        # spans them, but they are not part of the user's data model.
-        result = drop_internal_rows(self.engine.execute(req.cypher))
+        # spans them, but they are not part of the user's data model. The
+        # filter runs after the pushed-down LIMIT, so on a bare MATCH (n) a
+        # few internal rows can consume result budget — truncated stays the
+        # signal that more rows exist.
+        result = drop_internal_rows(
+            self.engine.execute(_with_limit(req.cypher, limit + 1))
+        )
         truncated = len(result.rows) > limit
         rows = result.rows[:limit]
         sub = extract_subgraph(EngineResult(result.columns, rows), self._pk_map())
@@ -132,7 +175,7 @@ class GragService:
         try:
             from grag.retrieval.search import search_knowledge
         except ImportError:
-            raise _not_implemented("grag.retrieval.search")
+            raise _not_implemented("grag.retrieval.search") from None
         req.hops = max(0, min(req.hops, self.config.max_hops))
         return search_knowledge(self.engine, self.config, req)
 
@@ -140,7 +183,7 @@ class GragService:
         try:
             from grag.retrieval.context import get_context
         except ImportError:
-            raise _not_implemented("grag.retrieval.context")
+            raise _not_implemented("grag.retrieval.context") from None
         req.hops = max(0, min(req.hops, self.config.max_hops))
         return get_context(self.engine, self.config, req)
 
@@ -150,14 +193,14 @@ class GragService:
         try:
             from grag.ingest.loaders import ingest_documents
         except ImportError:
-            raise _not_implemented("grag.ingest.loaders")
+            raise _not_implemented("grag.ingest.loaders") from None
         return ingest_documents(self.engine, self.config, req)
 
     def ingest_code(self, req: CodeIngestRequest) -> CodeIngestResponse:
         try:
             from grag.ingest.code import ingest_code
         except ImportError:
-            raise _not_implemented("grag.ingest.code")
+            raise _not_implemented("grag.ingest.code") from None
         return ingest_code(self.engine, self.config, req)
 
     # -- ui -----------------------------------------------------------------------------

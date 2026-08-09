@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -46,6 +46,31 @@ jobs:
       - name: Run tests
         # LadybugDB downloads FTS/VECTOR extensions on first use; CI has network.
         run: pytest
+
+  lint:
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install package
+        # Editable install so mypy checks against real dependency types; the
+        # empty static dir satisfies the wheel force-include without a UI build.
+        run: |
+          mkdir -p src/grag/api/static
+          pip install -e ".[dev]"
+
+      - name: ruff
+        run: ruff check src tests
+
+      - name: mypy
+        run: mypy src/grag
 
   ui:
     name: UI build (typecheck + bundle)
