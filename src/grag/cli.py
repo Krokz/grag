@@ -1,4 +1,4 @@
-"""grag CLI: serve / mcp / ingest / bench."""
+"""grag CLI: serve / mcp / ingest / ingest-code / bench."""
 
 from __future__ import annotations
 
@@ -38,6 +38,18 @@ def main(argv: list[str] | None = None) -> int:
     serve = sub.add_parser("serve", help="run the REST API + UI server")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8471)
+    serve.add_argument(
+        "--with-mcp",
+        action="store_true",
+        help="also mount the MCP streamable-http endpoint on this server, so one "
+        "process serves UI + REST + MCP against the same live .lbdb (single "
+        "writer satisfied; the UI sees MCP writes the moment they land)",
+    )
+    serve.add_argument(
+        "--mcp-path",
+        default="/mcp",
+        help="HTTP path for the MCP endpoint when --with-mcp is set",
+    )
 
     mcp = sub.add_parser("mcp", help="run the MCP server (stdio or streamable-http)")
     mcp.add_argument(
@@ -56,6 +68,17 @@ def main(argv: list[str] | None = None) -> int:
     ingest = sub.add_parser("ingest", help="ingest files into the graph")
     ingest.add_argument("paths", nargs="+")
 
+    ingest_code = sub.add_parser(
+        "ingest-code", help="ingest code structure (Repo/Module/Class/Function)"
+    )
+    ingest_code.add_argument("paths", nargs="+")
+    ingest_code.add_argument(
+        "--no-calls", action="store_true", help="skip CALLS edges"
+    )
+    ingest_code.add_argument(
+        "--max-file-kb", type=int, default=1024, help="skip files larger than this (KB)"
+    )
+
     bench = sub.add_parser("bench", help="codec benchmark (recall / latency / RSS)")
     bench.add_argument("--codec", default=None)
 
@@ -67,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
 
         from grag.api.main import create_app
 
+        if getattr(args, "with_mcp", False):
+            cfg.mcp_path = args.mcp_path
         uvicorn.run(create_app(cfg), host=args.host, port=args.port, workers=1)
     elif args.cmd == "mcp":
         from grag.mcp_server.server import run
@@ -76,6 +101,16 @@ def main(argv: list[str] | None = None) -> int:
         from grag.ingest.loaders import ingest_paths
 
         summary = ingest_paths(cfg, [Path(p) for p in args.paths])
+        print(summary)
+    elif args.cmd == "ingest-code":
+        from grag.ingest.code import ingest_code_paths
+
+        summary = ingest_code_paths(
+            cfg,
+            [Path(p) for p in args.paths],
+            calls=not args.no_calls,
+            max_file_kb=args.max_file_kb,
+        )
         print(summary)
     elif args.cmd == "bench":
         from grag.retrieval.bench import run_bench

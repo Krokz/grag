@@ -20,6 +20,8 @@ from grag.core.engine import (
 )
 from grag.core.errors import GragError, ReadOnlyViolation
 from grag.core.types import (
+    CodeIngestRequest,
+    CodeIngestResponse,
     ContextRequest,
     ContextResponse,
     DefineSchemaRequest,
@@ -151,6 +153,13 @@ class GragService:
             raise _not_implemented("grag.ingest.loaders")
         return ingest_documents(self.engine, self.config, req)
 
+    def ingest_code(self, req: CodeIngestRequest) -> CodeIngestResponse:
+        try:
+            from grag.ingest.code import ingest_code
+        except ImportError:
+            raise _not_implemented("grag.ingest.code")
+        return ingest_code(self.engine, self.config, req)
+
     # -- ui -----------------------------------------------------------------------------
 
     def graph_sample(self, limit: int = 200, label: str | None = None) -> GraphSample:
@@ -160,9 +169,17 @@ class GragService:
             self.engine.execute(f"MATCH {pattern} RETURN n LIMIT {limit}"), self._pk_map()
         )
         try:
-            rels = self.engine.execute(
-                f"MATCH (a)-[r]->(b) RETURN a, r, b LIMIT {limit}"
-            )
+            if label:
+                # Label-scoped: only the 1-hop neighborhood of matching nodes,
+                # so a label view shows that label *and its relationships*
+                # instead of the whole graph's edges (the leaky-merge papercut).
+                rels = self.engine.execute(
+                    f"MATCH (a:{label})-[r]-(b) RETURN a, r, b LIMIT {limit}"
+                )
+            else:
+                rels = self.engine.execute(
+                    f"MATCH (a)-[r]->(b) RETURN a, r, b LIMIT {limit}"
+                )
             sub = merge_subgraphs(sub, extract_subgraph(rels, self._pk_map()))
         except GragError:
             pass  # no rel tables yet

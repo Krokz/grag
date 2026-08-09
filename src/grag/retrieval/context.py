@@ -19,6 +19,33 @@ from grag.retrieval.search import _expand_neighborhood, _pack
 from grag.retrieval.vectors import _ident, node_tables, pk_map_with_fallback
 
 
+def _resolve_bare_key(
+    engine: Engine, pk: dict[str, str], known: set[str], nid: str
+) -> tuple[str, str] | None:
+    """Resolve a node id whose 'label' segment isn't a real table.
+
+    Code-graph pks look like 'repo:path#qual' (no 'Label:' prefix), so
+    split_node_id misreads the repo as the label. Probe each searchable table
+    for a row whose primary key equals the whole id; return (label, key) for a
+    unique hit, else None (caller raises unknown-label). Ambiguous across
+    tables resolves to None too — callers should pass the 'Label:' prefix.
+    """
+    hits: list[str] = []
+    for label in sorted(known):
+        p = pk.get(label)
+        if not p:
+            continue
+        res = engine.execute(
+            f"MATCH (n:{_ident(label)}) WHERE n.{_ident(p)} = $k RETURN n.{_ident(p)}",
+            {"k": nid},
+        )
+        if res.rows:
+            hits.append(label)
+    if len(hits) == 1:
+        return hits[0], nid
+    return None
+
+
 def get_context(engine: Engine, config: GragConfig, req: ContextRequest) -> ContextResponse:
     """Look up req.node_ids ('Label:key'), expand k hops, and pack the result
     into a token budget. Node ids that don't resolve are excluded; unknown
@@ -29,6 +56,7 @@ def get_context(engine: Engine, config: GragConfig, req: ContextRequest) -> Cont
     known = set(node_tables(engine))
 
     groups: dict[str, list[str]] = {}
+    normalized: list[tuple[str, str]] = []  # (label, key) per input id, resolved
     for nid in req.node_ids:
         label, key = split_node_id(nid)
         if not label or not key:
@@ -37,11 +65,19 @@ def get_context(engine: Engine, config: GragConfig, req: ContextRequest) -> Cont
                 hint="Node ids look like 'Label:key' (see make_node_id).",
             )
         if label not in known:
-            raise SchemaError(
-                f"Unknown label '{label}' (from node id {nid!r}).",
-                hint=f"Available node labels: {sorted(known)}. Use describe_schema for details.",
-            )
+            # Code-graph node keys are themselves 'repo:path#qual' (no Label
+            # prefix), so split_node_id reads the repo as the label. Treat the
+            # whole id as a bare key and resolve its label from the tables.
+            resolved = _resolve_bare_key(engine, pk, known, nid)
+            if resolved is not None:
+                label, key = resolved
+            else:
+                raise SchemaError(
+                    f"Unknown label '{label}' (from node id {nid!r}).",
+                    hint=f"Available node labels: {sorted(known)}. Use describe_schema for details.",
+                )
         groups.setdefault(label, []).append(key)
+        normalized.append((label, key))
 
     found: dict[tuple[str, str], tuple[NodeRecord, Any]] = {}
     for label, keys in groups.items():
@@ -61,8 +97,7 @@ def get_context(engine: Engine, config: GragConfig, req: ContextRequest) -> Cont
     seeds: list[NodeRecord] = []
     refs: list[tuple[str, Any]] = []
     seen: set[str] = set()
-    for nid in req.node_ids:
-        label, key = split_node_id(nid)
+    for label, key in normalized:
         hit = found.get((label, key))
         if hit is None or hit[0].id in seen:
             continue

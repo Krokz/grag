@@ -18,6 +18,9 @@ interface Props {
   onFilterChange: (f: string) => void;
   onSelect: (node: NodeRecord | null) => void;
   onExpand: (node: NodeRecord) => void;
+  onSelectLabel?: (label: string) => void;
+  labelFilter?: string | null;
+  onResetView?: () => void;
 }
 
 interface FgNode extends NodeRecord {
@@ -66,6 +69,9 @@ export function GraphCanvas({
   onFilterChange,
   onSelect,
   onExpand,
+  onSelectLabel,
+  labelFilter,
+  onResetView,
 }: Props) {
   const [wrapRef, size] = useElementSize();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -200,6 +206,31 @@ export function GraphCanvas({
           value={filter}
           onChange={(e) => onFilterChange(e.target.value)}
         />
+        {labelFilter && (
+          <span className="filter-chip" title="A label filter is active">
+            label: <strong>{labelFilter}</strong>
+            {onResetView && (
+              <button
+                type="button"
+                className="filter-chip-x"
+                title="Clear filter and return to the full overview"
+                onClick={onResetView}
+              >
+                ×
+              </button>
+            )}
+          </span>
+        )}
+        {onResetView && (labelFilter || filter) && (
+          <button
+            type="button"
+            className="reset-view-btn"
+            title="Clear all filters and return to the full overview"
+            onClick={onResetView}
+          >
+            Reset view
+          </button>
+        )}
         <span className="canvas-stats">
           {data.nodes.length} nodes · {data.links.length} edges
           {filter && ` (filtered from ${subgraph.nodes.length})`}
@@ -219,13 +250,33 @@ export function GraphCanvas({
 
       {labels.length > 0 && !empty && (
         <div className="legend">
-          {labels.map((l) => (
-            <span key={l} className="li">
-              <span className="label-dot" style={{ background: colorForLabel(l) }} />
-              {l}
-              {stats?.labels[l] != null ? ` (${stats.labels[l]})` : ''}
-            </span>
-          ))}
+          {labels.map((l) =>
+            onSelectLabel ? (
+              <button
+                key={l}
+                type="button"
+                className={`li li-btn${labelFilter === l ? ' li-active' : ''}`}
+                title={
+                  labelFilter === l
+                    ? `${l} filter active — click to clear`
+                    : `Show only ${l} nodes and their relationships`
+                }
+                onClick={() =>
+                  labelFilter === l && onResetView ? onResetView() : onSelectLabel(l)
+                }
+              >
+                <span className="label-dot" style={{ background: colorForLabel(l) }} />
+                {l}
+                {stats?.labels[l] != null ? ` (${stats.labels[l]})` : ''}
+              </button>
+            ) : (
+              <span key={l} className="li">
+                <span className="label-dot" style={{ background: colorForLabel(l) }} />
+                {l}
+                {stats?.labels[l] != null ? ` (${stats.labels[l]})` : ''}
+              </span>
+            ),
+          )}
         </div>
       )}
 

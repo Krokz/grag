@@ -60,7 +60,8 @@ def search_knowledge(
         except Exception as exc:  # vector path is best-effort
             log.warning("Vector search skipped, degrading to FTS-only: %s", exc)
 
-    seeds = _rrf_fuse({"fts": fts_list, "vector": vec_list})[:top_k]
+    fused = _rrf_fuse({"fts": fts_list, "vector": vec_list})
+    seeds = _diversify(fused, top_k, config.search_label_cap)
     seed_ids = [s.node.id for s in seeds]
 
     expanded = _expand_neighborhood(engine, _seed_refs(seeds, pk), hops, pk)
@@ -143,6 +144,36 @@ def _rrf_fuse(lists: dict[str, list[ScoredNode]]) -> list[ScoredNode]:
         fused.append(ScoredNode(node=nodes[nid], score=score, match=match))
     fused.sort(key=lambda s: s.score, reverse=True)
     return fused
+
+
+def _diversify(
+    fused: list[ScoredNode], top_k: int, cap: int
+) -> list[ScoredNode]:
+    """Cap how many fused top_k seeds one label may occupy. A label over the cap
+    defers its extra seeds to a hold pool; after the main pass each label takes
+    its best remaining held seeds (rank order) until top_k is filled. This keeps
+    a large table (e.g. code Functions) from crowding out every other label
+    while never dropping it entirely. cap <= 0 disables (pure RRF order)."""
+    if cap <= 0:
+        return fused[:top_k]
+    held: list[ScoredNode] = []
+    chosen: list[ScoredNode] = []
+    counts: dict[str, int] = {}
+    for s in fused:
+        label = s.node.label
+        if len(chosen) >= top_k:
+            break
+        if counts.get(label, 0) < cap:
+            chosen.append(s)
+            counts[label] = counts.get(label, 0) + 1
+        else:
+            held.append(s)
+    # Backfill from held seeds (still fused-rank order) if we under-filled.
+    for s in held:
+        if len(chosen) >= top_k:
+            break
+        chosen.append(s)
+    return chosen
 
 
 # ---------------------------------------------------------------------------
