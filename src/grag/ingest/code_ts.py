@@ -28,8 +28,9 @@ from __future__ import annotations
 import importlib
 import posixpath
 import re
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from grag.core.errors import ConfigurationError
 from grag.core.types import UpsertNode
@@ -76,7 +77,7 @@ def _build_parser(suffix: str) -> Any:
         return Parser(language)  # tree-sitter >= 0.22
     except TypeError:  # older bindings: set_language on a bare Parser
         parser = Parser()
-        parser.set_language(language)
+        parser.set_language(language)  # type: ignore[attr-defined]
         return parser
 
 
@@ -93,8 +94,8 @@ def parse_file(suffix: str, path: Path, source: str, *, repo: str, rel_path: str
     if root.has_error:
         raise ValueError("tree-sitter reported syntax errors")
     dotted = rel_path[: -len(suffix)].replace("/", ".")
-    if dotted.endswith(".d"):  # TypeScript declaration file: foo.d.ts -> foo
-        dotted = dotted[:-2]
+    # TypeScript declaration file: foo.d.ts -> foo
+    dotted = dotted.removesuffix(".d")
     parsed = _ParsedModule(
         module=UpsertNode(
             label="Module",
@@ -142,13 +143,13 @@ _XML_TAG = re.compile(r"</?[a-zA-Z][^>]*>")  # C# xmldoc <summary> etc.
 def _clean_comment(raw: str) -> str:
     """Strip comment markers: // and /// lines, /* */ and JSDoc leading *."""
     lines = []
-    for line in raw.split("\n"):
-        line = line.strip()
-        line = re.sub(r"^/{2,}", "", line)
-        line = re.sub(r"^/\*+", "", line)
-        line = re.sub(r"\*/$", "", line)
-        line = re.sub(r"^\*( |$)", "", line)
-        lines.append(line.strip())
+    for raw_line in raw.split("\n"):
+        cleaned = raw_line.strip()
+        cleaned = re.sub(r"^/{2,}", "", cleaned)
+        cleaned = re.sub(r"^/\*+", "", cleaned)
+        cleaned = re.sub(r"\*/$", "", cleaned)
+        cleaned = re.sub(r"^\*( |$)", "", cleaned)
+        lines.append(cleaned.strip())
     return "\n".join(lines).strip()
 
 
@@ -245,7 +246,7 @@ def _add_function(
             source=source_path,
         )
     )
-    if is_method:
+    if parent_class is not None:
         parsed.contains.append(("CONTAINS_CLASS_FUNCTION", f"{module_id}#{parent_class}", fid))
         parsed.method_ids.setdefault(parent_class, {})[name] = fid
     else:
@@ -274,8 +275,7 @@ def _path_import_refs(spec: str, rel_path: str, *, index_name: str | None = "ind
         if joined.endswith(ext):
             joined = joined[: -len(ext)]
             break
-    if joined.endswith(".d"):  # foo.d.ts
-        joined = joined[:-2]
+    joined = joined.removesuffix(".d")  # foo.d.ts
     dotted = joined.replace("/", ".")
     refs = [dotted]
     if index_name:

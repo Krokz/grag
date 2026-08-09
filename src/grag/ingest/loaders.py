@@ -148,8 +148,10 @@ def ingest_paths(config: GragConfig, paths: list[Path]) -> str:
         service.close()
 
     lines = [
-        f"Ingested {len(documents)} document(s) from {files_read} file(s): "
-        f"{resp.nodes_created} node(s) written to label '{resp.label}' in {config.db_path}."
+        (
+            f"Ingested {len(documents)} document(s) from {files_read} file(s): "
+            f"{resp.nodes_created} node(s) written to label '{resp.label}' in {config.db_path}."
+        )
     ]
     if warnings:
         lines.append("Warnings:")
@@ -171,10 +173,10 @@ def _load_file(path: Path, suffix: str) -> list[IngestDocument]:
             )
         return [IngestDocument.model_validate(item) for item in data]
     docs: list[IngestDocument] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            docs.append(IngestDocument.model_validate(json.loads(line)))
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if stripped:
+            docs.append(IngestDocument.model_validate(json.loads(stripped)))
     return docs
 
 
@@ -197,8 +199,8 @@ def _chunk_text(text: str, size: int, overlap: int) -> list[str]:
     overlap = max(0, min(int(overlap), size - 1))
 
     chunks: list[str] = []
-    for para in _PARAGRAPH_RE.split(text):
-        para = para.strip()
+    for raw_para in _PARAGRAPH_RE.split(text):
+        para = raw_para.strip()
         if not para:
             continue
         if len(para) <= size:
@@ -247,8 +249,8 @@ def _fit_tail(tail: str, budget: int) -> str:
 def _sentence_pieces(paragraph: str, size: int) -> list[str]:
     pieces: list[str] = []
     current = ""
-    for sent in _SENTENCE_RE.split(paragraph):
-        sent = sent.strip()
+    for raw_sent in _SENTENCE_RE.split(paragraph):
+        sent = raw_sent.strip()
         if not sent:
             continue
         if len(sent) > size:

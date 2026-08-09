@@ -20,14 +20,14 @@ from __future__ import annotations
 import functools
 import inspect
 import json
-from typing import Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from mcp.server.mcpserver import Context, MCPServer
 from pydantic import ValidationError
 
 from grag.config import GragConfig
 from grag.core.errors import GragError
-from grag.registry import ServiceRegistry
 from grag.core.types import (
     CodeIngestRequest,
     ContextRequest,
@@ -42,19 +42,20 @@ from grag.core.types import (
     UpsertNode,
     UpsertNodesRequest,
 )
+from grag.registry import ServiceRegistry
 from grag.service import GragService
 
 __all__ = [
-    "describe_schema",
-    "define_schema",
-    "upsert_nodes",
-    "upsert_edges",
+    "create_server",
     "cypher_query",
-    "search_knowledge",
+    "define_schema",
+    "describe_schema",
     "get_context",
     "ingest_code",
-    "create_server",
     "run",
+    "search_knowledge",
+    "upsert_edges",
+    "upsert_nodes",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., str])
@@ -275,23 +276,24 @@ def search_knowledge(
     Returns the packed context (ready for grounding), a "---" separator, then
     a JSON footer {"seeds": [{"id": "Doc:42", "score": 0.016, "match":
     "fts"}, ...]}. Pass seed ids to get_context for focused follow-up
-    expansion.
+    expansion. When the footer includes "pending_embeddings": n, n nodes are
+    still awaiting vector embedding — vector recall improves as later
+    searches drain that backlog (ingest embeds its own writes in full).
     """
     resp = service.search_knowledge(
         SearchRequest(
             query=query, top_k=top_k, hops=hops, labels=labels, token_budget=token_budget
         )
     )
-    footer = json.dumps(
-        {
-            "seeds": [
-                {"id": s.node.id, "score": round(s.score, 6), "match": s.match}
-                for s in resp.seeds
-            ]
-        },
-        ensure_ascii=False,
-        separators=_COMPACT,
-    )
+    payload: dict[str, Any] = {
+        "seeds": [
+            {"id": s.node.id, "score": round(s.score, 6), "match": s.match}
+            for s in resp.seeds
+        ]
+    }
+    if resp.pending_embeddings:
+        payload["pending_embeddings"] = resp.pending_embeddings
+    footer = json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
     if resp.context:
         return f"{resp.context}\n\n---\n{footer}"
     return footer
@@ -373,7 +375,7 @@ def _resolve_service(registry: ServiceRegistry, ctx: Context | None) -> GragServ
     if ctx is not None:
         try:
             headers = ctx.headers
-        except Exception:
+        except Exception:  # noqa: BLE001 — ctx.headers raises outside a request
             headers = None
         if headers:
             db = headers.get("x-grag-db")
@@ -398,7 +400,7 @@ def create_server(
 
     @server.tool(name="describe_schema", description=_doc(describe_schema))
     @_return_errors
-    def describe_schema_tool(ctx: Context = None) -> str:
+    def describe_schema_tool(ctx: Context | None = None) -> str:
         return describe_schema(_resolve_service(registry, ctx))
 
     @server.tool(name="define_schema", description=_doc(define_schema))
@@ -407,7 +409,7 @@ def create_server(
         node_tables: list[dict],
         rel_tables: list[dict],
         if_not_exists: bool = True,
-        ctx: Context = None,
+        ctx: Context | None = None,
     ) -> str:
         return define_schema(
             _resolve_service(registry, ctx), node_tables, rel_tables, if_not_exists
@@ -415,18 +417,18 @@ def create_server(
 
     @server.tool(name="upsert_nodes", description=_doc(upsert_nodes))
     @_return_errors
-    def upsert_nodes_tool(nodes: list[dict], ctx: Context = None) -> str:
+    def upsert_nodes_tool(nodes: list[dict], ctx: Context | None = None) -> str:
         return upsert_nodes(_resolve_service(registry, ctx), nodes)
 
     @server.tool(name="upsert_edges", description=_doc(upsert_edges))
     @_return_errors
-    def upsert_edges_tool(edges: list[dict], ctx: Context = None) -> str:
+    def upsert_edges_tool(edges: list[dict], ctx: Context | None = None) -> str:
         return upsert_edges(_resolve_service(registry, ctx), edges)
 
     @server.tool(name="cypher_query", description=_doc(cypher_query))
     @_return_errors
     def cypher_query_tool(
-        cypher: str, limit: int | None = None, ctx: Context = None
+        cypher: str, limit: int | None = None, ctx: Context | None = None
     ) -> str:
         return cypher_query(_resolve_service(registry, ctx), cypher, limit)
 
@@ -438,7 +440,7 @@ def create_server(
         hops: int = 1,
         labels: list[str] | None = None,
         token_budget: int | None = None,
-        ctx: Context = None,
+        ctx: Context | None = None,
     ) -> str:
         return search_knowledge(
             _resolve_service(registry, ctx), query, top_k, hops, labels, token_budget
@@ -450,7 +452,7 @@ def create_server(
         node_ids: list[str],
         hops: int = 1,
         token_budget: int | None = None,
-        ctx: Context = None,
+        ctx: Context | None = None,
     ) -> str:
         return get_context(_resolve_service(registry, ctx), node_ids, hops, token_budget)
 
@@ -460,7 +462,7 @@ def create_server(
         paths: list[str],
         calls: bool = True,
         max_file_kb: int = 1024,
-        ctx: Context = None,
+        ctx: Context | None = None,
     ) -> str:
         return ingest_code(_resolve_service(registry, ctx), paths, calls, max_file_kb)
 
@@ -495,7 +497,9 @@ def run(
             )
             uvicorn.run(app, host=host, port=port)
         else:
-            server.run(transport=transport)
+            # CLI restricts transport to stdio|streamable-http; the literal
+            # keeps the typed overloads happy.
+            server.run(transport="stdio")
     finally:
         server.grag_registry.close()  # type: ignore[attr-defined]
 

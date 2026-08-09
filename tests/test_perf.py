@@ -26,7 +26,7 @@ def _service(tmp_path) -> GragService:
 def test_cold_start_under_budget(tmp_path):
     start = time.perf_counter()
     svc = _service(tmp_path)
-    svc.cypher_query  # attribute exists
+    assert callable(svc.cypher_query)
     from grag.core.types import QueryRequest
 
     svc.cypher_query(QueryRequest(cypher="RETURN 1"))

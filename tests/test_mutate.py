@@ -515,8 +515,8 @@ def test_write_after_search_fresh_engine(tmp_path):
     writing through a brand-new Engine on the same file (fresh extension state).
     """
     from grag.config import GragConfig
-    from grag.retrieval.search import search_knowledge
     from grag.core.types import SearchRequest
+    from grag.retrieval.search import search_knowledge
 
     db = tmp_path / "ext.lbdb"
     cfg = GragConfig(db_path=db)

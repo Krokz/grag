@@ -93,7 +93,9 @@ export function neighborCypher(node: NodeRecord, pkMap: Map<string, string>): st
   const pk = pkMap.get(node.label) ?? 'id';
   const raw = node.properties[pk];
   const key = raw != null ? raw : splitNodeId(node.id).key;
-  return `MATCH (n:${node.label} {${pk}: ${cypherLiteral(key)}})-[r]-(m) RETURN n, r, m LIMIT 100`;
+  // OPTIONAL MATCH so isolated nodes (no rels) still return the node itself
+  // instead of a 0-row result.
+  return `MATCH (n:${node.label} {${pk}: ${cypherLiteral(key)}}) OPTIONAL MATCH (n)-[r]-(m) RETURN n, r, m LIMIT 100`;
 }
 
 export function truncateCell(value: unknown, max = 120): string {

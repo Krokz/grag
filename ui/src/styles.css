@@ -824,6 +824,36 @@ table.results td.cell-truncated:hover {
   color: var(--warn);
 }
 
+.token-banner form {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.token-banner input {
+  flex: 0 1 260px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font: inherit;
+}
+
+.token-banner button {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.token-banner button:hover {
+  border-color: var(--text-dim);
+}
+
 .placeholder {
   padding: 18px;
   color: var(--text-dim);

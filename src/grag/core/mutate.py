@@ -157,12 +157,12 @@ def _validate_request(req: DefineSchemaRequest) -> None:
         _reject_reserved(spec.primary_key, spec.name)
         _validate_props(spec)
         seen_names.append(spec.name)
-    for spec in req.rel_tables:
-        _validate_ident(spec.name, "rel table name")
-        _validate_ident(spec.from_label, f"from_label of '{spec.name}'")
-        _validate_ident(spec.to_label, f"to_label of '{spec.name}'")
-        _validate_props(spec)
-        seen_names.append(spec.name)
+    for rspec in req.rel_tables:
+        _validate_ident(rspec.name, "rel table name")
+        _validate_ident(rspec.from_label, f"from_label of '{rspec.name}'")
+        _validate_ident(rspec.to_label, f"to_label of '{rspec.name}'")
+        _validate_props(rspec)
+        seen_names.append(rspec.name)
     dupes = sorted({n for n in seen_names if seen_names.count(n) > 1})
     if dupes:
         raise SchemaError(
@@ -264,29 +264,29 @@ def define_schema(
         engine.execute_write(_node_ddl(spec))
         tables[spec.name] = "NODE"
 
-    for spec in req.rel_tables:
-        kind = tables.get(spec.name)
+    for rspec in req.rel_tables:
+        kind = tables.get(rspec.name)
         if kind is not None:
             if not req.if_not_exists:
-                raise _exists_error(spec.name)
+                raise _exists_error(rspec.name)
             if kind != "REL":
                 raise SchemaError(
-                    f"'{spec.name}' already exists as a node table.",
+                    f"'{rspec.name}' already exists as a node table.",
                     hint="Choose a different rel table name.",
                 )
             continue
-        for endpoint in (spec.from_label, spec.to_label):
+        for endpoint in (rspec.from_label, rspec.to_label):
             if tables.get(endpoint) != "NODE":
                 node_tables = sorted(
                     n for n, k in tables.items() if k == "NODE" and n != META_TABLE
                 )
                 raise SchemaError(
-                    f"Rel '{spec.name}' endpoint '{endpoint}' is not an existing node table.",
+                    f"Rel '{rspec.name}' endpoint '{endpoint}' is not an existing node table.",
                     hint=f"Define '{endpoint}' under node_tables (in this or an earlier "
                     f"define_schema call). Existing node tables: {node_tables}.",
                 )
-        engine.execute_write(_rel_ddl(spec))
-        tables[spec.name] = "REL"
+        engine.execute_write(_rel_ddl(rspec))
+        tables[rspec.name] = "REL"
 
     for spec in req.node_tables:
         pk = _pk_of(engine, spec.name) or spec.primary_key
@@ -299,11 +299,11 @@ def define_schema(
             from_label="",
             to_label="",
         )
-    for spec in req.rel_tables:
-        conn = _connection_of(engine, spec.name) or (spec.from_label, spec.to_label)
+    for rspec in req.rel_tables:
+        conn = _connection_of(engine, rspec.name) or (rspec.from_label, rspec.to_label)
         _merge_meta(
             engine,
-            name=spec.name,
+            name=rspec.name,
             kind="rel",
             pk="",
             searchable=False,
@@ -558,10 +558,10 @@ def _render_schema_text(node_docs: list[NodeTableDoc], rel_docs: list[RelTableDo
         )
         lines.append(f"  {d.name}({props}) [{d.row_count} rows]")
     lines.append("Rel tables:")
-    for d in rel_docs:
-        props = ", ".join(f"{p.name} {p.type}" for p in d.properties)
-        rel = f"{d.name}({props})" if props else d.name
-        lines.append(f"  ({d.from_label})-[:{rel}]->({d.to_label}) [{d.row_count} rows]")
+    for r in rel_docs:
+        props = ", ".join(f"{p.name} {p.type}" for p in r.properties)
+        rel = f"{r.name}({props})" if props else r.name
+        lines.append(f"  ({r.from_label})-[:{rel}]->({r.to_label}) [{r.row_count} rows]")
     return "\n".join(lines)
 
 

@@ -259,6 +259,10 @@ class SearchResponse(BaseModel):
     seeds: list[ScoredNode] = Field(default_factory=list)
     subgraph: Subgraph = Field(default_factory=Subgraph)  # seeds + expansion
     context: str = ""  # token-budgeted serialization, ready for prompt injection
+    # Nodes still awaiting an embedding after this search (the query path
+    # embeds at most config.max_embed_per_search synchronously). > 0 means
+    # vector recall improves as later searches drain the backlog.
+    pending_embeddings: int = 0
 
 
 class ContextRequest(BaseModel):

@@ -195,11 +195,11 @@ def _render_text(node_docs: list[NodeTableDoc], rel_docs: list[RelTableDoc]) -> 
             quoted = ",".join(f'"{k}"' for k in t.sample_keys)
             line += f" samples: {quoted}"
         lines.append(line)
-    for t in rel_docs:
-        head = f"{t.from_label} -> {t.to_label}" if t.from_label or t.to_label else ""
-        props = ", ".join(f"{p.name}:{p.type}" for p in t.properties)
+    for r in rel_docs:
+        head = f"{r.from_label} -> {r.to_label}" if r.from_label or r.to_label else ""
+        props = ", ".join(f"{p.name}:{p.type}" for p in r.properties)
         inner = ", ".join(part for part in (head, props) if part)
-        lines.append(f"{t.name}({inner}) [{t.row_count} rows]")
+        lines.append(f"{r.name}({inner}) [{r.row_count} rows]")
     return "\n".join(lines)
 
 

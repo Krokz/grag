@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import weakref
-from typing import Any
+from typing import Any, Literal
 
 from grag.config import GragConfig
 from grag.core.engine import Engine, extract_subgraph, node_record_from_value
@@ -30,6 +30,7 @@ from grag.retrieval.vectors import (
     _ensure_extension,
     _ident,
     candidate_tables,
+    pending_embedding_count,
     pk_map_with_fallback,
     string_props,
     vector_candidates,
@@ -52,12 +53,14 @@ def search_knowledge(
 
     fts_list: list[ScoredNode] = []
     vec_list: list[ScoredNode] = []
+    pending = 0
     if req.query.strip():
         for table in tables:
             fts_list.extend(_fts_seeds(engine, table, req.query, top_k, pk))
         try:
             vec_list = vector_candidates(engine, config, req.query, req.labels, top_k)
-        except Exception as exc:  # vector path is best-effort
+            pending = sum(pending_embedding_count(engine, config, t) for t in tables)
+        except Exception as exc:  # noqa: BLE001 — vector path is best-effort
             log.warning("Vector search skipped, degrading to FTS-only: %s", exc)
 
     fused = _rrf_fuse({"fts": fts_list, "vector": vec_list})
@@ -67,7 +70,9 @@ def search_knowledge(
     expanded = _expand_neighborhood(engine, _seed_refs(seeds, pk), hops, pk)
     subgraph = merge_subgraphs(Subgraph(nodes=[s.node for s in seeds]), expanded)
     packed = _pack(subgraph, budget, seed_ids)
-    return SearchResponse(seeds=seeds, subgraph=subgraph, context=packed.text)
+    return SearchResponse(
+        seeds=seeds, subgraph=subgraph, context=packed.text, pending_embeddings=pending
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +80,7 @@ def search_knowledge(
 # ---------------------------------------------------------------------------
 
 
-_FTS_INDEXES: "weakref.WeakKeyDictionary[Engine, set[str]]" = weakref.WeakKeyDictionary()
+_FTS_INDEXES: weakref.WeakKeyDictionary[Engine, set[str]] = weakref.WeakKeyDictionary()
 
 
 def _fts_seeds(
@@ -140,7 +145,9 @@ def _rrf_fuse(lists: dict[str, list[ScoredNode]]) -> list[ScoredNode]:
         score = sum(1.0 / (_RRF_K + r) for r in src_ranks.values())
         fts_r = src_ranks.get("fts")
         vec_r = src_ranks.get("vector")
-        match = "fts" if (fts_r is not None and (vec_r is None or fts_r <= vec_r)) else "vector"
+        match: Literal["fts", "vector"] = (
+            "fts" if (fts_r is not None and (vec_r is None or fts_r <= vec_r)) else "vector"
+        )
         fused.append(ScoredNode(node=nodes[nid], score=score, match=match))
     fused.sort(key=lambda s: s.score, reverse=True)
     return fused
@@ -263,25 +270,25 @@ def _fallback_pack_context(
     for n in ordered:
         lines.append((f"{n.id} {props_json(n.properties)}", n.id))
     for e in subgraph.edges:
-        line = f"{e.source} -[{e.type}]-> {e.target}"
+        eline = f"{e.source} -[{e.type}]-> {e.target}"
         if e.properties:
-            line += f" {props_json(e.properties)}"
-        lines.append((line, None))
+            eline += f" {props_json(e.properties)}"
+        lines.append((eline, None))
 
     budget = max(0, int(token_budget))
     parts: list[str] = []
     included: list[str] = []
     used = 0
     truncated = False
-    for line, nid in lines:
-        cost = max(1, (len(line) + 1) // 4)
+    for text, node_id in lines:
+        cost = max(1, (len(text) + 1) // 4)
         if used + cost > budget:
             truncated = True
             continue
-        parts.append(line)
+        parts.append(text)
         used += cost
-        if nid is not None:
-            included.append(nid)
+        if node_id is not None:
+            included.append(node_id)
     return PackedContext(
         text="\n".join(parts),
         token_estimate=used,

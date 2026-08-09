@@ -92,6 +92,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if getattr(args, "with_mcp", False):
             cfg.mcp_path = args.mcp_path
+        # The bind host drives the REST Host-header allow-list and the MCP
+        # endpoint's DNS-rebinding allow-list, not just uvicorn's socket.
+        cfg.host = args.host
         uvicorn.run(create_app(cfg), host=args.host, port=args.port, workers=1)
     elif args.cmd == "mcp":
         from grag.mcp_server.server import run

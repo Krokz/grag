@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "gragdb"
 version = "0.2.0"
-description = "LLM-first graph knowledgebase: embedded Cypher engine, MCP tool contract, GraphRAG retrieval"
+description = "Local-first, LLM-first graph knowledgebase: embedded Cypher engine, MCP tool contract, token-frugal GraphRAG retrieval"
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = { text = "MIT" }
@@ -24,7 +24,7 @@ embed-remote = ["httpx>=0.27"]
 # Tree-sitter grammars for the generic code parser (ts/js/cs/tf).
 # Python parses via stdlib ast and never imports these.
 code = ["tree-sitter>=0.23", "tree-sitter-python", "tree-sitter-typescript", "tree-sitter-javascript", "tree-sitter-c-sharp", "tree-sitter-hcl"]
-dev = ["pytest>=8.0", "httpx>=0.27", "pyyaml>=6.0"]
+dev = ["pytest>=8.0", "httpx>=0.27", "pyyaml>=6.0", "ruff>=0.16", "mypy>=2.3"]
 
 [project.scripts]
 grag = "grag.cli:main"
@@ -61,3 +61,33 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+src = ["src", "tests"]
+
+# Explicit rule families: CI results must not depend on a contributor's
+# machine-level ruff config or on new rules appearing in a future release's
+# default set.
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9", "F", "W",   # pycodestyle + pyflakes core
+    "I",                          # import sorting
+    "UP",                         # pyupgrade
+    "B",                          # bugbear
+    "SIM", "C4", "ISC", "RUF", "FURB", "PLW",
+    "S", "BLE",                   # bandit + blind-except
+    "DTZ", "PYI",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S310"]  # asserts and urlopen-to-localhost are the test idiom
+
+[tool.mypy]
+# 3.12 grammar: numpy's stubs use `type` statements, unparseable below 3.12
+# (follow_imports=skip still parses them). Runtime 3.10 compat is guarded by
+# the CI test matrix, which runs the suite on 3.10.
+python_version = "3.12"
+mypy_path = "src"
+explicit_package_bases = true
+ignore_missing_imports = true  # ladybug / fastembed / tree_sitter ship no stubs

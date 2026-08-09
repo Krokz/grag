@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, setDb, toFailure } from './api';
+import { api, hasToken, setDb, setToken, setUnauthorizedHandler, toFailure } from './api';
 import type {
   ApiFailure,
   GraphStats,
@@ -45,6 +45,11 @@ export default function App() {
   const [searchResult, setSearchResult] = useState<SearchResponse | null>(null);
   const [searchError, setSearchError] = useState<ApiFailure | null>(null);
 
+  // Set when any API call comes back 401 (server started with GRAG_API_TOKEN).
+  const [needsToken, setNeedsToken] = useState(false);
+  const [tokenDraft, setTokenDraft] = useState('');
+  const tokenWasSet = hasToken(); // a 401 with a stored token means it was rejected
+
   const pkMap = useMemo(() => pkMapFromSchema(schema), [schema]);
 
   const loadSchema = useCallback(async () => {
@@ -80,6 +85,11 @@ export default function App() {
     } catch {
       // connectivity already surfaced via the health banner
     }
+  }, []);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => setNeedsToken(true));
+    return () => setUnauthorizedHandler(null);
   }, []);
 
   useEffect(() => {
@@ -157,10 +167,12 @@ export default function App() {
   const selectLabel = useCallback(
     (label: string) => {
       // Nodes of this label PLUS their 1-hop relationships, so the view shows
-      // the label *and* how it connects (a bare `MATCH (n:Label) RETURN n`
-      // returns nodes with no edges). Undirected so incoming rels count too.
+      // the label *and* how it connects. OPTIONAL MATCH keeps isolated nodes
+      // (a plain `MATCH (a)-[r]-(b)` drops them, and a 0-row result never
+      // replaces the canvas — the label click looked dead). Undirected so
+      // incoming rels count too.
       setLabelFilter(label);
-      const q = `MATCH (a:${label})-[r]-(b) RETURN a, r, b LIMIT 100`;
+      const q = `MATCH (a:${label}) OPTIONAL MATCH (a)-[r]-(b) RETURN a, r, b LIMIT 100`;
       setQuery(q);
       void runQuery(q, 'replace');
     },
@@ -214,6 +226,46 @@ export default function App() {
           {health ? `v${health.version}` : 'offline'}
         </span>
       </header>
+
+      {needsToken && (
+        <div className="error-banner token-banner">
+          <span className="err">
+            {tokenWasSet ? 'Stored token was rejected.' : 'This server requires an API token.'}
+          </span>
+          <div className="hint">
+            the server was started with GRAG_API_TOKEN; the token is stored in this browser only
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const t = tokenDraft.trim();
+              if (!t) return;
+              setToken(t);
+              location.reload();
+            }}
+          >
+            <input
+              type="password"
+              placeholder="API token"
+              value={tokenDraft}
+              onChange={(e) => setTokenDraft(e.target.value)}
+              autoFocus
+            />
+            <button type="submit">Save &amp; reload</button>
+            {tokenWasSet && (
+              <button
+                type="button"
+                onClick={() => {
+                  setToken(null);
+                  setNeedsToken(false);
+                }}
+              >
+                Clear stored token
+              </button>
+            )}
+          </form>
+        </div>
+      )}
 
       {(searchResult || searchError) && (
         <SearchPanel

@@ -109,7 +109,7 @@ def _populate(service: GragService) -> None:
 
 def _seed_ids(search_out: str) -> list[str]:
     _, _, footer = search_out.partition("\n---\n")
-    payload = json.loads(footer if footer else search_out)
+    payload = json.loads(footer or search_out)
     return [s["id"] for s in payload["seeds"]]
 
 

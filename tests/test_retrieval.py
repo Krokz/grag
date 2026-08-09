@@ -14,7 +14,6 @@ from grag.retrieval import vectors
 from grag.retrieval.context import get_context
 from grag.retrieval.search import search_knowledge
 from grag.service import GragService
-
 from test_vectors import FAKE_DIM, FakeEmbedder, make_docs
 
 
@@ -61,6 +60,21 @@ def test_search_fts_no_match_returns_empty(docs_engine):
     assert resp.seeds == []
     assert resp.subgraph.nodes == []
     assert resp.context == ""
+    assert resp.pending_embeddings == 0
+
+
+def test_search_reports_and_drains_pending_embeddings(docs_engine, hybrid_config):
+    """In-request embedding is capped; the response surfaces the backlog so
+    callers know vector recall improves as later searches drain it."""
+    hybrid_config.max_embed_per_search = 2
+    resp = search_knowledge(
+        docs_engine, hybrid_config, SearchRequest(query="graph relationships", hops=0)
+    )
+    assert resp.pending_embeddings == 1
+    resp = search_knowledge(
+        docs_engine, hybrid_config, SearchRequest(query="graph relationships", hops=0)
+    )
+    assert resp.pending_embeddings == 0
 
 
 def test_search_fts_labels_filter(docs_engine):
@@ -146,7 +160,7 @@ def test_label_cap_surfaces_underrepresented_label(tmp_path):
         first_pass = labels[: 2 + 1]  # 2 Func slots + next label's first slot
         assert first_pass.count("Func") <= 2
         # top of the ranking is not exclusively code
-        assert not all(l == "Func" for l in labels[:3])
+        assert not all(lbl == "Func" for lbl in labels[:3])
         assert len(resp.seeds) == 4
     finally:
         eng.close()

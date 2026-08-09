@@ -64,6 +64,9 @@ class ServiceRegistry:
         return svc
 
     def _resolve(self, db: str | None) -> Path:
+        if self.config.db_dir is None:
+            # _resolve is only called in multi-db mode; guard for direct use.
+            raise ConfigurationError("db_dir is not configured.")
         root = self.config.db_dir.resolve()
         if db and db.strip():
             name = db.strip()

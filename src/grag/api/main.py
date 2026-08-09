@@ -7,12 +7,14 @@ started by the CLI, not this module.
 
 from __future__ import annotations
 
+import hmac
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import fastapi
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -44,6 +46,27 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 DB_HEADER = "x-grag-db"
 
+log = logging.getLogger(__name__)
+
+# Binding to a wildcard address is an explicit "expose me" decision: Host
+# validation can't help there (every Host is legitimate), so api_token should
+# be set instead.
+_WILDCARD_BINDS = {"", "0.0.0.0", "::"}  # noqa: S104 — a constant, not a bind
+
+
+def _allowed_hosts(config: GragConfig) -> list[str]:
+    """Host-header allow-list — the REST layer's DNS-rebinding guard.
+
+    Loopbacks plus the configured bind host; "testserver" keeps FastAPI's
+    TestClient working (it is not a publicly resolvable name, so a rebinding
+    page cannot produce it)."""
+    if config.host in _WILDCARD_BINDS:
+        return ["*"]
+    hosts = ["127.0.0.1", "localhost", "::1", "[::1]", "testserver"]
+    if config.host not in hosts:
+        hosts.append(config.host)
+    return hosts
+
 
 def _error_body(message: str, hint: str | None) -> dict:
     return {"error": message, "hint": hint}
@@ -59,7 +82,8 @@ def create_app(config: GragConfig) -> FastAPI:
     # registry — passing it in is what makes single-process mode safe.
     mcp_session_manager = None
     mcp_app = None
-    if config.mcp_path:
+    mcp_path = config.mcp_path
+    if mcp_path:
         from grag.mcp_server.server import create_server
 
         mcp_server = create_server(config, registry=registry)
@@ -90,16 +114,45 @@ def create_app(config: GragConfig) -> FastAPI:
         app.state.service = None
 
     # Mount MCP before the SPA catch-all at "/" so the MCP path is matched first.
-    if mcp_app is not None:
-        app.mount(config.mcp_path, mcp_app, name="mcp")
+    if mcp_app is not None and mcp_path is not None:
+        app.mount(mcp_path, mcp_app, name="mcp")
 
+    # Middleware stack (last added = outermost): TrustedHost rejects
+    # DNS-rebinding Host headers before anything else runs; CORS then handles
+    # preflights for explicitly configured origins; bearer auth runs last, so
+    # it never sees CORS preflights (browsers don't send credentials on them).
+    if config.api_token:
+        expected = f"Bearer {config.api_token}"
+
+        @app.middleware("http")
+        async def require_bearer(request: Request, call_next):
+            path = request.url.path
+            protected = path.startswith("/api/") and path != "/api/health"
+            if config.mcp_path and path.startswith(config.mcp_path):
+                protected = True
+            if protected and not hmac.compare_digest(
+                request.headers.get("authorization", ""), expected
+            ):
+                return JSONResponse(
+                    status_code=401,
+                    content=_error_body(
+                        "Unauthorized.",
+                        "Send 'Authorization: Bearer <token>' (GRAG_API_TOKEN).",
+                    ),
+                )
+            return await call_next(request)
+
+    # Same-origin UI needs no CORS at all; only origins explicitly configured
+    # via GRAG_CORS_ORIGINS get cross-origin access. No credentials: there are
+    # no cookies/sessions, and credentialed wildcard CORS is spec-invalid.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=config.cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["content-type", "authorization", DB_HEADER],
     )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts(config))
 
     def resolve(request: Request) -> GragService:
         # Single-db mode: db selectors are ignored, never an error.
@@ -129,9 +182,12 @@ def create_app(config: GragConfig) -> FastAPI:
         )
 
     @app.exception_handler(Exception)
-    async def unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
+    async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Detail stays in the server log; clients get a generic body (raw
+        # str(exc) leaks paths and driver internals).
+        log.exception("Unhandled %s %s: %s", request.method, request.url.path, exc)
         return JSONResponse(
-            status_code=500, content=_error_body(str(exc), None)
+            status_code=500, content=_error_body("Internal server error.", None)
         )
 
     # -- endpoints (contract: see grag.core.types docstring) --------------------

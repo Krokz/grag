@@ -8,10 +8,12 @@ description: >-
   architecture/history/rationale questions about a project that has a .lbdb file.
 ---
 
-# grag — LLM-first graph knowledgebase
+# grag — local-first, LLM-first graph knowledgebase
 
 grag is an embedded Cypher graph DB (LadybugDB) wrapped in an MCP/REST tool contract
-designed for LLM grounding. One `.lbdb` file per database, zero daemons.
+designed for LLM grounding. **Local-first**: one `.lbdb` file per project per developer,
+zero daemons, nothing leaves the machine. Its core value is **token efficiency** — answer
+structural/rationale questions from the graph instead of re-reading source files.
 
 **Core loop:** search/traverse the graph to ground an answer, or build the graph by
 defining a schema and upserting nodes/edges. Every fact carries `_source` provenance.
@@ -130,6 +132,11 @@ IMPORTS for the tree-sitter languages is best-effort (path/namespace-based).
   rank order.
 
 ## Multiple databases
+
+**Related repos belong in ONE `.lbdb`:** `ingest_code` with several paths puts each repo
+as a separate `Repo` node in a single graph, so you can trace CALLS/IMPORTS across repo
+boundaries or link a Decision in one project to a Function in another. Separate `.lbdb`
+files are for UNRELATED projects (isolation). Choose per project set, then be consistent.
 
 A server started with `--db-dir` hosts many `.lbdb` files; one file = one isolated
 universe. Detect it with `GET /api/dbs` — `dbs` non-empty means multi-db.

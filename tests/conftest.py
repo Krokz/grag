@@ -5,7 +5,6 @@ import pytest
 from grag.config import GragConfig
 from grag.core.engine import Engine
 
-
 # 128MB: big enough for FTS index builds, small enough to keep the suite's
 # many concurrent Engine instances light.
 TEST_BUFFER_POOL = 128 * 1024 * 1024

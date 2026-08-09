@@ -41,19 +41,19 @@ from typing import Any, Protocol
 import numpy as np
 
 from grag.config import EmbedderConfig, GragConfig
-from grag.retrieval import polar
 from grag.core.engine import Engine, node_record_from_value
 from grag.core.errors import ConfigurationError, GragError, SchemaError
 from grag.core.types import (
     EMB_CODE_PROP,
-    EMB_MODEL_PROP,
     EMB_MAGNITUDE_PROP,
+    EMB_MODEL_PROP,
     EMBEDDING_PROP,
     META_TABLE,
     RESERVED_PREFIX,
     VECTOR_PROPS,
     ScoredNode,
 )
+from grag.retrieval import polar
 
 # ---------------------------------------------------------------------------
 # embedders
@@ -158,7 +158,7 @@ def get_embedder(config: GragConfig) -> Embedder | None:
 # ---------------------------------------------------------------------------
 
 _CODECS = ("fp32", "int8", "binary", "polar")
-_POPCOUNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
+_POPCOUNT = np.array([i.bit_count() for i in range(256)], dtype=np.uint8)
 
 
 def _check_codec(codec: str) -> None:
@@ -403,7 +403,7 @@ def string_props(engine: Engine, table: str) -> list[str]:
 # extension + index bookkeeping
 # ---------------------------------------------------------------------------
 
-_LOADED_EXTENSIONS: "weakref.WeakKeyDictionary[Engine, set[str]]" = weakref.WeakKeyDictionary()
+_LOADED_EXTENSIONS: weakref.WeakKeyDictionary[Engine, set[str]] = weakref.WeakKeyDictionary()
 
 
 def _ensure_extension(engine: Engine, name: str) -> None:
@@ -418,7 +418,7 @@ def vector_index_name(table: str) -> str:
     return f"grag_vec__{_ident(table)}"
 
 
-_VEC_INDEXES: "weakref.WeakKeyDictionary[Engine, set[str]]" = weakref.WeakKeyDictionary()
+_VEC_INDEXES: weakref.WeakKeyDictionary[Engine, set[str]] = weakref.WeakKeyDictionary()
 
 
 def _ensure_vector_index(engine: Engine, table: str, index: str) -> None:
@@ -493,15 +493,24 @@ def ensure_vector_storage(engine: Engine, config: GragConfig, table: str) -> Non
 
 
 def embed_pending_nodes(
-    engine: Engine, config: GragConfig, table: str, batch_size: int = 128
+    engine: Engine,
+    config: GragConfig,
+    table: str,
+    batch_size: int = 128,
+    max_nodes: int | None = None,
 ) -> int:
-    """Embed every node in `table` whose embedding is NULL.
+    """Embed nodes in `table` whose embedding is NULL.
 
     Embed text is the concatenation of the node's STRING properties
     (excluding reserved/vector columns). Each node gets the full fp32 vector,
     its polar magnitude, the encoded direction (config.vector_codec) and the
     embedder model id. Returns the number of nodes embedded.
+
+    max_nodes caps the total embedded in this call (the search path uses it
+    to bound request latency); None drains the whole backlog (ingest paths).
     """
+    if max_nodes is not None and max_nodes <= 0:
+        return 0
     cfg = config.embedder
     if cfg is None:
         return 0
@@ -530,15 +539,18 @@ def embed_pending_nodes(
     batch_size = max(1, int(batch_size))
     total = 0
     while True:
+        limit = batch_size
+        if max_nodes is not None:
+            limit = min(limit, max_nodes - total)
         res = engine.execute(
             f"MATCH (n:{_ident(table)}) WHERE n.{EMBEDDING_PROP} IS NULL "
-            f"RETURN {projection} LIMIT {batch_size}"
+            f"RETURN {projection} LIMIT {limit}"
         )
         if not res.rows:
             return total
         keys = [row[0] for row in res.rows]
         texts = []
-        for row, key in zip(res.rows, keys):
+        for row, key in zip(res.rows, keys, strict=True):
             parts = [str(v) for v in row[1:] if v is not None]
             texts.append("\n".join(parts) if parts else str(key))
         vectors = embedder.embed(texts)
@@ -547,7 +559,7 @@ def embed_pending_nodes(
                 f"Embedder returned {len(vectors)} vectors for {len(keys)} texts.",
                 hint="Embedder.embed must return one vector per input text.",
             )
-        for key, vec in zip(keys, vectors):
+        for key, vec in zip(keys, vectors, strict=True):
             v = np.asarray(vec, dtype=np.float32).ravel()
             if v.size != cfg.dim:
                 raise ConfigurationError(
@@ -572,6 +584,21 @@ def embed_pending_nodes(
                 },
             )
         total += len(keys)
+        if max_nodes is not None and total >= max_nodes:
+            return total
+
+
+def pending_embedding_count(engine: Engine, config: GragConfig, table: str) -> int:
+    """Nodes in `table` still awaiting an embedding. 0 when no embedder is
+    configured or the table has no vector columns yet."""
+    if config.embedder is None:
+        return 0
+    if EMBEDDING_PROP not in table_properties(engine, table):
+        return 0
+    res = engine.execute(
+        f"MATCH (n:{_ident(table)}) WHERE n.{EMBEDDING_PROP} IS NULL RETURN count(n)"
+    )
+    return int(res.rows[0][0]) if res.rows else 0
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +615,10 @@ def vector_candidates(
 ) -> list[ScoredNode]:
     """Cosine-similarity candidates for query_text. Returns [] when no
     embedder is configured (FTS-only mode). Lazily provisions vector columns
-    and embeds pending nodes on candidate tables."""
+    and embeds pending nodes on candidate tables — capped at
+    config.max_embed_per_search per call so a first query after a large
+    ingest doesn't embed the whole table on the request thread (the backlog
+    drains over subsequent searches; see SearchResponse.pending_embeddings)."""
     cfg = config.embedder
     if cfg is None:
         return []
@@ -601,7 +631,9 @@ def vector_candidates(
         return []
     for table in tables:
         ensure_vector_storage(engine, config, table)
-        embed_pending_nodes(engine, config, table)
+        embed_pending_nodes(
+            engine, config, table, max_nodes=config.max_embed_per_search
+        )
     q = np.asarray(embedder.embed([query_text])[0], dtype=np.float32).ravel()
     if q.size != cfg.dim:
         raise ConfigurationError(
@@ -670,31 +702,63 @@ def _fp32_candidates(
     return out
 
 
+def _fetch_nodes_by_keys(
+    engine: Engine, table: str, pk_prop: str, keys: list[Any]
+) -> list[dict]:
+    """Full node rows for a primary-key shortlist (the exact-rescore pass)."""
+    if not keys:
+        return []
+    res = engine.execute(
+        f"MATCH (n:{_ident(table)}) WHERE n.{_ident(pk_prop)} IN $keys RETURN n",
+        {"keys": list(keys)},
+    )
+    return [row[0] for row in res.rows]
+
+
 def _exact_scan(
     engine: Engine, table: str, q: np.ndarray, top_k: int, pk: dict[str, str]
 ) -> list[ScoredNode]:
+    """HNSW-unavailable fallback: exact cosine over the table, two-phase.
+
+    Phase 1 ships only (pk, fp32 vector) per row — full node records are
+    fetched for the top_k winners only."""
+    pk_prop = pk.get(table)
+    if not pk_prop:
+        # Unreachable via embed_pending_nodes (it requires a pk to key
+        # embedding writes); guards against externally-written columns.
+        return []
     res = engine.execute(
-        f"MATCH (n:{_ident(table)}) WHERE n.{EMBEDDING_PROP} IS NOT NULL RETURN n"
+        f"MATCH (n:{_ident(table)}) WHERE n.{EMBEDDING_PROP} IS NOT NULL "
+        f"RETURN n.{_ident(pk_prop)}, n.{EMBEDDING_PROP}"
     )
-    nodes, vecs = [], []
-    for (nv,) in res.rows:
-        emb = nv.get(EMBEDDING_PROP)
+    keys, vecs = [], []
+    for key, emb in res.rows:
         if emb is None:
             continue
-        nodes.append(nv)
+        keys.append(key)
         vecs.append(np.asarray(emb, dtype=np.float32))
     if not vecs:
         return []
     scores = _cosine_scores(np.stack(vecs), q)
     order = np.argsort(-scores)[:top_k]
-    return [
-        ScoredNode(
-            node=node_record_from_value(nodes[i], pk),
-            score=float(scores[i]),
-            match="vector",
+    by_key = {
+        nv.get(pk_prop): nv
+        for nv in _fetch_nodes_by_keys(
+            engine, table, pk_prop, [keys[i] for i in order]
         )
-        for i in order
-    ]
+    }
+    out = []
+    for i in order:
+        nv = by_key.get(keys[i])
+        if nv is not None:
+            out.append(
+                ScoredNode(
+                    node=node_record_from_value(nv, pk),
+                    score=float(scores[i]),
+                    match="vector",
+                )
+            )
+    return out
 
 
 def _codec_candidates(
@@ -707,30 +771,47 @@ def _codec_candidates(
     pk: dict[str, str],
 ) -> list[ScoredNode]:
     """Approximate scoring over stored direction codes, then exact rescore of
-    the top 4*top_k against the fp32 embeddings."""
+    the top 4*top_k against the fp32 embeddings.
+
+    The approximate pass is inherently O(table) — codec candidate quality is
+    the property grag bench measures, so no ANN index is involved — but it
+    ships only (pk, code) per row; full nodes + fp32 vectors are fetched for
+    the shortlist only."""
+    pk_prop = pk.get(table)
+    if not pk_prop:
+        return []  # see _exact_scan
     res = engine.execute(
         f"MATCH (n:{_ident(table)}) WHERE n.{EMB_CODE_PROP} IS NOT NULL "
-        f"AND n.{EMBEDDING_PROP} IS NOT NULL RETURN n"
+        f"RETURN n.{_ident(pk_prop)}, n.{EMB_CODE_PROP}"
     )
-    nodes, codes, vecs = [], [], []
-    for (nv,) in res.rows:
-        raw_code, emb = nv.get(EMB_CODE_PROP), nv.get(EMBEDDING_PROP)
-        if raw_code is None or emb is None:
+    keys, codes = [], []
+    for key, raw_code in res.rows:
+        if raw_code is None:
             continue
-        codes.append(bytes(raw_code) if not isinstance(raw_code, (bytes, bytearray)) else bytes(raw_code))
-        nodes.append(nv)
-        vecs.append(np.asarray(emb, dtype=np.float32))
+        keys.append(key)
+        codes.append(bytes(raw_code))
     if not codes:
         return []
     approx = candidate_scores(codes, codec, u_q)
     pre = np.argsort(-approx)[: 4 * top_k]
-    exact = _cosine_scores(np.stack([vecs[i] for i in pre]), q)
-    ranked = pre[np.argsort(-exact)[:top_k]]
+    nodes, vecs = [], []
+    for nv in _fetch_nodes_by_keys(
+        engine, table, pk_prop, [keys[i] for i in pre]
+    ):
+        emb = nv.get(EMBEDDING_PROP)
+        if emb is None:
+            continue
+        nodes.append(nv)
+        vecs.append(np.asarray(emb, dtype=np.float32))
+    if not vecs:
+        return []
+    exact = _cosine_scores(np.stack(vecs), q)
+    order = np.argsort(-exact)[:top_k]
     return [
         ScoredNode(
             node=node_record_from_value(nodes[i], pk),
-            score=float(_cosine_scores(vecs[i][None, :], q)[0]),
+            score=float(exact[i]),
             match="vector",
         )
-        for i in ranked
+        for i in order
     ]

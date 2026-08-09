@@ -335,6 +335,108 @@ def test_root_fallback(client):
         assert body["version"] == grag.__version__
 
 
+# -- transport security ---------------------------------------------------------
+
+
+def test_version_matches_package_metadata():
+    """Three-way guard: __version__ == installed dist metadata == pyproject.
+    The pyproject leg also catches stale editable installs (metadata frozen at
+    install time) — reinstall with `pip install -e .` if this fails."""
+    import re
+    from importlib.metadata import version as dist_version
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    m = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
+    assert m, "pyproject.toml is missing a version field"
+    assert grag.__version__ == dist_version("gragdb") == m.group(1)
+
+
+def test_cors_never_wildcard(client):
+    """The API serves its UI same-origin, so no cross-origin allowance exists
+    by default — a drive-by page must get no CORS grant (and never '*')."""
+    preflight = client.options(
+        "/api/health",
+        headers={
+            "Origin": "https://evil.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert preflight.headers.get("access-control-allow-origin") is None
+
+    res = client.get("/api/health", headers={"Origin": "https://evil.example"})
+    assert res.status_code == 200  # server answers; the browser blocks the read
+    assert res.headers.get("access-control-allow-origin") is None
+
+
+def test_cors_configured_origin_allowed(tmp_path):
+    app = create_app(
+        GragConfig(
+            db_path=tmp_path / "cors.lbdb",
+            buffer_pool_size=128 * 1024 * 1024,
+            cors_origins=["https://ui.example"],
+        )
+    )
+    with TestClient(app) as c:
+        res = c.get("/api/health", headers={"Origin": "https://ui.example"})
+        assert res.headers.get("access-control-allow-origin") == "https://ui.example"
+        evil = c.get("/api/health", headers={"Origin": "https://evil.example"})
+        assert evil.headers.get("access-control-allow-origin") is None
+
+
+def test_dns_rebinding_host_header_rejected(client):
+    """A rebinding attack arrives with the attacker's Host header; the
+    TrustedHost allow-list (loopbacks only by default) rejects it."""
+    res = client.get("/api/health", headers={"host": "evil.example"})
+    assert res.status_code == 400
+
+
+@pytest.fixture()
+def token_client(tmp_path):
+    app = create_app(
+        GragConfig(
+            db_path=tmp_path / "tok.lbdb",
+            buffer_pool_size=128 * 1024 * 1024,
+            api_token="sekret",  # noqa: S106 — test fixture, not a real secret
+        )
+    )
+    with TestClient(app) as c:
+        yield c
+
+
+def test_bearer_token_required_when_configured(token_client):
+    assert token_client.get("/api/schema").status_code == 401
+    assert (
+        token_client.post("/api/query", json={"cypher": "RETURN 1"}).status_code == 401
+    )
+    ok = token_client.get("/api/schema", headers={"Authorization": "Bearer sekret"})
+    assert ok.status_code == 200
+    wrong = token_client.get("/api/schema", headers={"Authorization": "Bearer nope"})
+    assert wrong.status_code == 401
+
+
+def test_health_exempt_from_token(token_client):
+    assert token_client.get("/api/health").status_code == 200
+
+
+def test_500_returns_generic_body(tmp_path, monkeypatch):
+    """Unhandled exceptions must not leak str(exc) (paths, driver internals)."""
+
+    def boom(self, req):
+        raise RuntimeError("/secret/path exploded")
+
+    monkeypatch.setattr(GragService, "cypher_query", boom)
+    app = create_app(
+        GragConfig(db_path=tmp_path / "err.lbdb", buffer_pool_size=128 * 1024 * 1024)
+    )
+    # raise_server_exceptions is baked into the transport at construction.
+    with TestClient(app, raise_server_exceptions=False) as c:
+        res = c.post("/api/query", json={"cypher": "RETURN 1"})
+    assert res.status_code == 500
+    assert res.json() == {"error": "Internal server error.", "hint": None}
+    assert "/secret/path" not in res.text
+
+
 # -- multi-db routing ----------------------------------------------------------
 
 

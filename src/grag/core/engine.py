@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,7 @@ class EngineResult:
     rows: list[list[Any]]
 
     def as_dicts(self) -> list[dict[str, Any]]:
-        return [dict(zip(self.columns, row)) for row in self.rows]
+        return [dict(zip(self.columns, row, strict=True)) for row in self.rows]
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -86,10 +87,8 @@ class Engine:
         covers the pooled read connections too.
         """
         for name in ("FTS", "VECTOR"):
-            try:
+            with suppress(GragError):
                 self._run(self._write_conn, f"LOAD EXTENSION {name}", None)
-            except GragError:
-                pass
 
     # -- execution -------------------------------------------------------------
 
@@ -107,10 +106,13 @@ class Engine:
             return self._run(self._write_conn, cypher, params)
 
     def _run(
-        self, conn: "lb.Connection", cypher: str, params: dict[str, Any] | None
+        self, conn: lb.Connection, cypher: str, params: dict[str, Any] | None
     ) -> EngineResult:
         try:
-            result = conn.execute(cypher, params or {})
+            results = conn.execute(cypher, params or {})
+            # The bindings return a list of QueryResults for multi-statement
+            # strings; grag only ever sends one statement at a time.
+            result = results[-1] if isinstance(results, list) else results
             columns = list(result.get_column_names())
             rows: list[list[Any]] = []
             while result.has_next():
@@ -129,10 +131,9 @@ class Engine:
 
     def load_extension(self, name: str) -> None:
         """INSTALL (best effort) + LOAD an extension such as FTS or VECTOR."""
-        try:
+        with suppress(CypherError):
+            # already installed, or a build with bundled extensions
             self.execute_write(f"INSTALL {name}")
-        except CypherError:
-            pass  # already installed, or a build with bundled extensions
         try:
             self.execute_write(f"LOAD EXTENSION {name}")
         except CypherError as exc:
@@ -143,7 +144,7 @@ class Engine:
 
     # -- internals -----------------------------------------------------------------
 
-    def _borrow_reader(self) -> "lb.Connection":
+    def _borrow_reader(self) -> lb.Connection:
         try:
             return self._readers.get_nowait()
         except queue.Empty:
@@ -155,13 +156,11 @@ class Engine:
                     return conn
             return self._readers.get()  # all busy: wait for one to come back
 
-    def _set_timeout(self, conn: "lb.Connection") -> None:
+    def _set_timeout(self, conn: lb.Connection) -> None:
         setter = getattr(conn, "set_query_timeout", None)
         if callable(setter) and self.config.statement_timeout_ms:
-            try:
+            with suppress(Exception):  # best-effort driver knob
                 setter(self.config.statement_timeout_ms)
-            except Exception:
-                pass
 
     def close(self) -> None:
         conns = [self._write_conn]
@@ -173,20 +172,16 @@ class Engine:
         for conn in conns:
             close = getattr(conn, "close", None)
             if callable(close):
-                try:
+                with suppress(Exception):  # close() must never raise
                     close()
-                except Exception:
-                    pass
         # The Database holds the buffer manager's (very large) virtual mapping;
         # without closing it, processes that open many engines leak address space.
         db_close = getattr(self._db, "close", None)
         if callable(db_close):
-            try:
+            with suppress(Exception):  # close() must never raise
                 db_close()
-            except Exception:
-                pass
 
-    def __enter__(self) -> "Engine":
+    def __enter__(self) -> Engine:  # noqa: PYI034 — Self needs typing_extensions on py3.10
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -338,7 +333,7 @@ def extract_subgraph(
 
     edges: dict[str, EdgeRecord] = {}
     for v in rel_vals:
-        rec = edge_record_from_value(v, id_of_internal)
-        edges.setdefault(rec.id, rec)
+        erec = edge_record_from_value(v, id_of_internal)
+        edges.setdefault(erec.id, erec)
 
     return Subgraph(nodes=list(nodes.values()), edges=list(edges.values()))

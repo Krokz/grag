@@ -27,6 +27,28 @@ export function setDb(name: string | null): void {
   currentDb = name;
 }
 
+// Bearer token for servers started with GRAG_API_TOKEN. Stored in
+// localStorage (this browser only); never sent cross-origin because the
+// server grants no CORS origins by default.
+const TOKEN_KEY = 'grag.api.token';
+let apiToken: string | null = localStorage.getItem(TOKEN_KEY);
+
+export function setToken(token: string | null): void {
+  apiToken = token;
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+
+export function hasToken(): boolean {
+  return apiToken != null;
+}
+
+// App-level hook fired on any 401 so it can show the token prompt.
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  onUnauthorized = fn;
+}
+
 function apiUrl(path: string): string {
   if (!currentDb) return path;
   const sep = path.includes('?') ? '&' : '?';
@@ -34,12 +56,11 @@ function apiUrl(path: string): string {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
   let res: Response;
   try {
-    res = await fetch(apiUrl(path), {
-      headers: { 'Content-Type': 'application/json' },
-      ...init,
-    });
+    res = await fetch(apiUrl(path), { headers, ...init });
   } catch {
     throw new ApiError(
       'cannot reach the grag server',
@@ -47,6 +68,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       0,
     );
   }
+  if (res.status === 401) onUnauthorized?.();
   if (!res.ok) {
     let body: { error?: string; hint?: string | null } | null = null;
     try {

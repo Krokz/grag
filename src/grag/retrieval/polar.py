@@ -79,7 +79,7 @@ _MAX_ANGLE_BITS = 8
 _GRID_POINTS = 4096
 
 # Caches: (dim, bpd_x64) -> _Tables; sin-exponent m -> (grid, cdf).
-_TABLES: dict[tuple[int, int], "_Tables"] = {}
+_TABLES: dict[tuple[int, int], _Tables] = {}
 _CDFS: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
 
@@ -182,7 +182,7 @@ def allocate_bits(dim: int, bits_per_dim: float = DEFAULT_BITS_PER_DIM) -> np.nd
             f"bits_per_dim must be in (0, 8], got {bits_per_dim!r}.",
             hint="Set GRAG_POLAR_BITS_PER_DIM between 0 and 8 (default 1.0).",
         )
-    budget = max(int(round(bits_per_dim * dim)), n)  # >= 1 bit per angle
+    budget = max(round(bits_per_dim * dim), n)  # >= 1 bit per angle
     # spec weights: w_i = log2(effective support x peak density)
     w = np.zeros(n, dtype=np.float64)
     log2_pi = math.log2(math.pi)
@@ -252,10 +252,10 @@ class _Tables:
 
 
 def _tables(dim: int, bits_per_dim: float) -> _Tables:
-    key = (int(dim), int(round(float(bits_per_dim) * 64.0)))
+    key = (dim, round(float(bits_per_dim) * 64.0))
     t = _TABLES.get(key)
     if t is None:
-        t = _Tables(int(dim), key[1] / 64.0)
+        t = _Tables(dim, key[1] / 64.0)
         _TABLES[key] = t
     return t
 
@@ -317,8 +317,8 @@ def encode(
             _VERSION,
             dim & 0xFF,
             (dim >> 8) & 0xFF,
-            int(round(bits_per_dim * 64.0)) & 0xFF,
-            (int(round(bits_per_dim * 64.0)) >> 8) & 0xFF,
+            round(bits_per_dim * 64.0) & 0xFF,
+            (round(bits_per_dim * 64.0) >> 8) & 0xFF,
         )
     )
     return header + _pack_codes(codes, t)
@@ -357,11 +357,11 @@ def decode_many(blobs: list[bytes], dim: int, bits_per_dim: float | None = None)
         raise _bad_blob(f"header dim={hdim} but dim={dim} was requested")
     t = _tables(dim, bits_per_dim if bits_per_dim is not None else hbpd)
     payload = np.empty((len(blobs), t.nbytes), dtype=np.uint8)
-    for i, b in enumerate(blobs):
-        b = bytes(b)
-        if len(b) != _HEADER + t.nbytes:
-            raise _bad_blob(f"blob {i} has {len(b)} bytes, expected {_HEADER + t.nbytes}")
-        payload[i] = np.frombuffer(b, dtype=np.uint8, count=t.nbytes, offset=_HEADER)
+    for i, raw in enumerate(blobs):
+        blob = bytes(raw)
+        if len(blob) != _HEADER + t.nbytes:
+            raise _bad_blob(f"blob {i} has {len(blob)} bytes, expected {_HEADER + t.nbytes}")
+        payload[i] = np.frombuffer(blob, dtype=np.uint8, count=t.nbytes, offset=_HEADER)
     if t.total_bits:
         bitarr = np.unpackbits(payload, axis=1, count=t.total_bits)  # (n, total_bits)
         codes = np.zeros((len(blobs), dim - 1), dtype=np.int64)
