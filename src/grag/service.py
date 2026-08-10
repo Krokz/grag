@@ -209,7 +209,8 @@ class GragService:
         limit = max(1, min(limit, self.config.max_query_limit))
         pattern = f"(n:{label})" if label else "(n)"
         sub = extract_subgraph(
-            self.engine.execute(f"MATCH {pattern} RETURN n LIMIT {limit}"), self._pk_map()
+            self.engine.execute(f"MATCH {pattern} RETURN n LIMIT {limit}"),
+            self._pk_map(),
         )
         try:
             if label:
@@ -233,7 +234,9 @@ class GragService:
             edges=[
                 e
                 for e in sub.edges
-                if not is_internal_label(e.type) and e.source in kept and e.target in kept
+                if not is_internal_label(e.type)
+                and e.source in kept
+                and e.target in kept
             ],
         )
         return GraphSample(subgraph=sub, stats=self._stats())

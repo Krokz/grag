@@ -108,7 +108,9 @@ def test_decode_is_self_describing():
 def test_decode_rejects_malformed_blobs():
     with pytest.raises(ConfigurationError):
         polar.decode(b"\x00", 1)
-    good = polar.encode(polar.cartesian_to_angles(_unit(np.random.default_rng(3), 16)), 16, 1.0)
+    good = polar.encode(
+        polar.cartesian_to_angles(_unit(np.random.default_rng(3), 16)), 16, 1.0
+    )
     with pytest.raises(ConfigurationError):
         polar.decode(good, 32)  # dim mismatch vs header
     with pytest.raises(ConfigurationError):

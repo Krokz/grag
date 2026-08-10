@@ -124,7 +124,9 @@ def test_ingest_chunked_ids_and_counts(engine):
 
     assert resp.nodes_created > 1  # ~700 chars of text, 200-char chunks
     rows = engine.execute("MATCH (c:Chunk) RETURN c.id ORDER BY c.id").rows
-    assert [r[0] for r in rows] == [f"big.md#{i:04d}" for i in range(resp.nodes_created)]
+    assert [r[0] for r in rows] == [
+        f"big.md#{i:04d}" for i in range(resp.nodes_created)
+    ]
 
 
 def test_ingest_is_idempotent(engine):
@@ -155,8 +157,7 @@ def test_ingest_meta_json_roundtrip(engine):
     ingest_documents(engine, engine.config, req)
 
     rows = {
-        r[0]: r[1]
-        for r in engine.execute("MATCH (c:Chunk) RETURN c.id, c.meta").rows
+        r[0]: r[1] for r in engine.execute("MATCH (c:Chunk) RETURN c.id, c.meta").rows
     }
     assert json.loads(rows["m.md#0000"]) == meta
     assert rows["plain.md#0000"] is None  # no metadata -> meta omitted
@@ -191,8 +192,10 @@ def test_ingested_content_findable_via_fts(service):
                     text="The cranberry indexer reconciles zeppelin metrics nightly.",
                     source="notes.md",
                 ),
-                IngestDocument(text="Unrelated prose about ordinary kettle maintenance.",
-                               source="other.md"),
+                IngestDocument(
+                    text="Unrelated prose about ordinary kettle maintenance.",
+                    source="other.md",
+                ),
             ],
             chunk=False,
         )
@@ -209,19 +212,31 @@ def test_ingested_content_findable_via_fts(service):
 
 
 def test_ingest_paths_all_formats(tmp_path):
-    (tmp_path / "a.md").write_text("# Alpha\n\nMarkdown body about kestrels.", encoding="utf-8")
+    (tmp_path / "a.md").write_text(
+        "# Alpha\n\nMarkdown body about kestrels.", encoding="utf-8"
+    )
     (tmp_path / "b.txt").write_text("Plain text about falcons.", encoding="utf-8")
     (tmp_path / "c.json").write_text(
         json.dumps(
             [
-                {"text": "json list doc about merlins", "source": "c.json", "metadata": {"k": 1}},
+                {
+                    "text": "json list doc about merlins",
+                    "source": "c.json",
+                    "metadata": {"k": 1},
+                },
                 {"text": "second json doc about harriers", "source": "c2.json"},
             ]
         ),
         encoding="utf-8",
     )
     (tmp_path / "d.json").write_text(
-        json.dumps({"documents": [{"text": "wrapped json doc about ospreys", "source": "d.json"}]}),
+        json.dumps(
+            {
+                "documents": [
+                    {"text": "wrapped json doc about ospreys", "source": "d.json"}
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     (tmp_path / "e.jsonl").write_text(
@@ -233,7 +248,9 @@ def test_ingest_paths_all_formats(tmp_path):
     (tmp_path / "f.exe").write_bytes(b"MZ")
 
     cfg = GragConfig(db_path=tmp_path / "paths.lbdb")
-    files = [tmp_path / n for n in ("a.md", "b.txt", "c.json", "d.json", "e.jsonl", "f.exe")]
+    files = [
+        tmp_path / n for n in ("a.md", "b.txt", "c.json", "d.json", "e.jsonl", "f.exe")
+    ]
     summary = ingest_paths(cfg, files)
 
     # 7 documents from 5 files (md/txt one each, json list two, wrapped one, jsonl two)
@@ -273,7 +290,9 @@ def test_example_scripts_run_end_to_end():
         timeout=300,
         check=False,
     )
-    assert build.returncode == 0, f"build_example failed:\n{build.stdout}\n{build.stderr}"
+    assert build.returncode == 0, (
+        f"build_example failed:\n{build.stdout}\n{build.stderr}"
+    )
     assert "MENTIONS edges" in build.stdout
 
     demo = subprocess.run(

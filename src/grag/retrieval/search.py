@@ -146,16 +146,16 @@ def _rrf_fuse(lists: dict[str, list[ScoredNode]]) -> list[ScoredNode]:
         fts_r = src_ranks.get("fts")
         vec_r = src_ranks.get("vector")
         match: Literal["fts", "vector"] = (
-            "fts" if (fts_r is not None and (vec_r is None or fts_r <= vec_r)) else "vector"
+            "fts"
+            if (fts_r is not None and (vec_r is None or fts_r <= vec_r))
+            else "vector"
         )
         fused.append(ScoredNode(node=nodes[nid], score=score, match=match))
     fused.sort(key=lambda s: s.score, reverse=True)
     return fused
 
 
-def _diversify(
-    fused: list[ScoredNode], top_k: int, cap: int
-) -> list[ScoredNode]:
+def _diversify(fused: list[ScoredNode], top_k: int, cap: int) -> list[ScoredNode]:
     """Cap how many fused top_k seeds one label may occupy. A label over the cap
     defers its extra seeds to a hold pool; after the main pass each label takes
     its best remaining held seeds (rank order) until top_k is filled. This keeps
@@ -188,9 +188,7 @@ def _diversify(
 # ---------------------------------------------------------------------------
 
 
-def _seed_refs(
-    seeds: list[ScoredNode], pk: dict[str, str]
-) -> list[tuple[str, Any]]:
+def _seed_refs(seeds: list[ScoredNode], pk: dict[str, str]) -> list[tuple[str, Any]]:
     """(label, pk value) for each seed, deduped in fused order. Seeds whose
     table has no known pk are skipped (they still appear in the subgraph)."""
     refs: list[tuple[str, Any]] = []

@@ -189,7 +189,9 @@ def allocate_bits(dim: int, bits_per_dim: float = DEFAULT_BITS_PER_DIM) -> np.nd
     for i in range(n - 1):  # last angle stays 0 (uniform: support*peak == 1)
         m = dim - 2 - i
         log_peak = (
-            math.lgamma((m + 2) / 2.0) - math.lgamma((m + 1) / 2.0) - 0.5 * math.log(math.pi)
+            math.lgamma((m + 2) / 2.0)
+            - math.lgamma((m + 1) / 2.0)
+            - 0.5 * math.log(math.pi)
         )
         w[i] = log2_pi + log_peak / math.log(2.0)
     if w.sum() <= 0.0:
@@ -347,7 +349,9 @@ def decode(blob: bytes, dim: int, bits_per_dim: float | None = None) -> np.ndarr
     return rows
 
 
-def decode_many(blobs: list[bytes], dim: int, bits_per_dim: float | None = None) -> np.ndarray:
+def decode_many(
+    blobs: list[bytes], dim: int, bits_per_dim: float | None = None
+) -> np.ndarray:
     """Vectorized decode: list of blobs -> (n, d-1) angle matrix."""
     if not blobs:
         return np.zeros((0, max(dim - 1, 0)), dtype=np.float64)
@@ -360,7 +364,9 @@ def decode_many(blobs: list[bytes], dim: int, bits_per_dim: float | None = None)
     for i, raw in enumerate(blobs):
         blob = bytes(raw)
         if len(blob) != _HEADER + t.nbytes:
-            raise _bad_blob(f"blob {i} has {len(blob)} bytes, expected {_HEADER + t.nbytes}")
+            raise _bad_blob(
+                f"blob {i} has {len(blob)} bytes, expected {_HEADER + t.nbytes}"
+            )
         payload[i] = np.frombuffer(blob, dtype=np.uint8, count=t.nbytes, offset=_HEADER)
     if t.total_bits:
         bitarr = np.unpackbits(payload, axis=1, count=t.total_bits)  # (n, total_bits)

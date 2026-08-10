@@ -46,12 +46,26 @@ def _create_meta(engine: Engine) -> None:
     )
 
 
-def _meta_row(engine: Engine, name: str, kind: str, pk: str,
-              searchable: bool, from_label: str = "", to_label: str = "") -> None:
+def _meta_row(
+    engine: Engine,
+    name: str,
+    kind: str,
+    pk: str,
+    searchable: bool,
+    from_label: str = "",
+    to_label: str = "",
+) -> None:
     engine.execute_write(
         f"CREATE (m:{META_TABLE} {{name: $n, kind: $k, pk: $p, "
         "searchable: $s, from_label: $f, to_label: $t})",
-        {"n": name, "k": kind, "p": pk, "s": searchable, "f": from_label, "t": to_label},
+        {
+            "n": name,
+            "k": kind,
+            "p": pk,
+            "s": searchable,
+            "f": from_label,
+            "t": to_label,
+        },
     )
 
 

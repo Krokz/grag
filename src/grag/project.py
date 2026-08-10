@@ -54,6 +54,10 @@ def _stdio_entry(db_path: Path) -> dict:
     return {"command": _grag_bin(), "args": ["--db", str(db_path.resolve()), "mcp"]}
 
 
+def _url_entry(port: int) -> dict:
+    return {"url": f"http://127.0.0.1:{port}/mcp/"}
+
+
 # ---------------------------------------------------------------------------
 # write-op plan
 # ---------------------------------------------------------------------------
@@ -78,29 +82,38 @@ class SkipOp(NamedTuple):
 # ---------------------------------------------------------------------------
 
 
-def _op_claude(project_root: Path, db_path: Path) -> WriteOp:
+def _op_claude(project_root: Path, db_path: Path, stdio: bool, port: int) -> WriteOp:
     path = project_root / ".mcp.json"
     data = _load_json(path)
-    data.setdefault("mcpServers", {})["grag"] = _stdio_entry(db_path)
+    data.setdefault("mcpServers", {})["grag"] = (
+        _stdio_entry(db_path) if stdio else _url_entry(port)
+    )
     return WriteOp(path, _dump_json(data), not path.exists())
 
 
-def _op_cursor(project_root: Path, db_path: Path) -> WriteOp:
+def _op_cursor(project_root: Path, db_path: Path, stdio: bool, port: int) -> WriteOp:
     path = project_root / ".cursor" / "mcp.json"
     data = _load_json(path)
-    data.setdefault("mcpServers", {})["grag"] = _stdio_entry(db_path)
+    data.setdefault("mcpServers", {})["grag"] = (
+        _stdio_entry(db_path) if stdio else _url_entry(port)
+    )
     return WriteOp(path, _dump_json(data), not path.exists())
 
 
-def _op_windsurf(db_path: Path) -> WriteOp:
+def _op_windsurf(db_path: Path, stdio: bool, port: int) -> WriteOp:
     path = Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
     data = _load_json(path)
-    data.setdefault("mcpServers", {})["grag"] = _stdio_entry(db_path)
+    data.setdefault("mcpServers", {})["grag"] = (
+        _stdio_entry(db_path) if stdio else _url_entry(port)
+    )
     return WriteOp(path, _dump_json(data), not path.exists())
 
 
 def _op_zed(db_path: Path) -> WriteOp | SkipOp:
-    """Zed settings are JSONC; only write when the file is absent or plain JSON."""
+    """Zed context_servers only support stdio; always writes stdio regardless of transport mode.
+
+    Also skips when settings.json contains JSONC comments — merge would lose them.
+    """
     path = Path.home() / ".config" / "zed" / "settings.json"
     if path.exists():
         raw = path.read_text(encoding="utf-8")
@@ -155,18 +168,34 @@ def detect_clients(project_root: Path) -> list[str]:
 
 
 def plan_mcp_ops(
-    clients: list[str], project_root: Path, db_path: Path
+    clients: list[str],
+    project_root: Path,
+    db_path: Path,
+    *,
+    stdio: bool = False,
+    port: int = 8471,
 ) -> list[WriteOp | SkipOp]:
+    """Plan MCP config write-ops.
+
+    Default transport is URL (http://127.0.0.1:<port>/mcp/) — requires one
+    'grag serve --with-mcp' process to be running, but avoids write-lock
+    conflicts when the browser UI and an LLM client both need simultaneous
+    access to the same .lbdb.
+
+    Pass stdio=True for the simpler single-client stdio mode: the client
+    starts 'grag mcp' automatically, but holding the write lock means no
+    other process (including 'grag serve') can open the same file.
+    """
     ops: list[WriteOp | SkipOp] = []
     for client in clients:
         if client == "claude":
-            ops.append(_op_claude(project_root, db_path))
+            ops.append(_op_claude(project_root, db_path, stdio, port))
         elif client == "cursor":
-            ops.append(_op_cursor(project_root, db_path))
+            ops.append(_op_cursor(project_root, db_path, stdio, port))
         elif client == "windsurf":
-            ops.append(_op_windsurf(db_path))
+            ops.append(_op_windsurf(db_path, stdio, port))
         elif client == "zed":
-            ops.append(_op_zed(db_path))
+            ops.append(_op_zed(db_path))  # Zed context_servers are stdio-only
     return ops
 
 
@@ -175,23 +204,24 @@ def plan_mcp_ops(
 # ---------------------------------------------------------------------------
 
 
-def _claude_md_block(db_path: Path) -> str:
+def _claude_md_block(db_path: Path, port: int = 8471) -> str:
     db = db_path.resolve()
     return (
         f"{_BLOCK_START}\n"
         "## grag\n\n"
         f"Database: `{db}`  \n"
-        f"Run: `grag --db {db} serve --with-mcp`\n\n"
+        f"Start: `GRAG_EMBED_PROVIDER=fastembed grag --db {db} serve --with-mcp --port {port}`  \n"
+        f"MCP endpoint: `http://127.0.0.1:{port}/mcp/` (Claude Code connects here automatically)\n\n"
         "**Always call `search_knowledge` before answering questions about this project.**  \n"
         "Unfamiliar code: `ingest_code` first. New facts: `upsert_nodes` / `upsert_edges`.\n"
         f"{_BLOCK_END}"
     )
 
 
-def plan_claude_md_op(project_root: Path, db_path: Path) -> WriteOp:
+def plan_claude_md_op(project_root: Path, db_path: Path, port: int = 8471) -> WriteOp:
     """Build a write-op that inserts or replaces the grag block in CLAUDE.md."""
     path = project_root / "CLAUDE.md"
-    block = _claude_md_block(db_path)
+    block = _claude_md_block(db_path, port)
     if path.exists():
         text = path.read_text(encoding="utf-8")
         start = text.find(_BLOCK_START)

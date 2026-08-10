@@ -52,7 +52,12 @@ REL_TABLES = [
 
 PERSONS = [
     {"label": "Person", "key": "ada", "properties": {"age": 36}, "source": "people.md"},
-    {"label": "Person", "key": "grace", "properties": {"age": 85}, "source": "people.md"},
+    {
+        "label": "Person",
+        "key": "grace",
+        "properties": {"age": 85},
+        "source": "people.md",
+    },
     {"label": "Person", "key": "edsger", "properties": {"age": 72}},
 ]
 DOCS = [
@@ -183,7 +188,9 @@ def test_cypher_query_limit_and_truncation(service: GragService):
     assert out["row_count"] == 2
     assert out["truncated"] is True
 
-    full = json.loads(mcp_server.cypher_query(service, "MATCH (p:Person) RETURN p.name"))
+    full = json.loads(
+        mcp_server.cypher_query(service, "MATCH (p:Person) RETURN p.name")
+    )
     assert full["row_count"] == 3
     assert full["truncated"] is False
 
@@ -195,7 +202,9 @@ def test_cypher_query_rejects_write_keywords(service: GragService):
     assert "read-only" in out
     assert "HINT:" in out and "upsert" in out
     # guardrail fired before anything was written
-    check = json.loads(mcp_server.cypher_query(service, "MATCH (p:Person) RETURN count(p)"))
+    check = json.loads(
+        mcp_server.cypher_query(service, "MATCH (p:Person) RETURN count(p)")
+    )
     assert check["rows"] == [[0]]
 
 
@@ -232,7 +241,9 @@ def test_upsert_is_idempotent_and_warns_on_unknown_props(service: GragService):
     )
     assert second["nodes"] == 1
     assert any("nickname" in w for w in second["warnings"])
-    rows = json.loads(mcp_server.cypher_query(service, "MATCH (p:Person) RETURN p.age"))["rows"]
+    rows = json.loads(
+        mcp_server.cypher_query(service, "MATCH (p:Person) RETURN p.age")
+    )["rows"]
     assert rows == [[37]]
 
 
@@ -314,9 +325,7 @@ def test_ingest_code_tool(service: GragService, tmp_path):
     pkg = tmp_path / "mcpkg"
     pkg.mkdir()
     (pkg / "mod.py").write_text(
-        "def f(x: int) -> int:\n"
-        '    """Identity-ish."""\n'
-        "    return x\n",
+        'def f(x: int) -> int:\n    """Identity-ish."""\n    return x\n',
         encoding="utf-8",
     )
 
@@ -338,7 +347,9 @@ def test_ingest_code_tool(service: GragService, tmp_path):
     # re-run is idempotent
     again = json.loads(mcp_server.ingest_code(service, [str(pkg)]))
     assert again["modules"] == 1
-    check = json.loads(mcp_server.cypher_query(service, "MATCH (m:Module) RETURN count(m)"))
+    check = json.loads(
+        mcp_server.cypher_query(service, "MATCH (m:Module) RETURN count(m)")
+    )
     assert check["rows"] == [[1]]
 
 
@@ -377,21 +388,23 @@ def test_mcp_end_to_end_tool_calls(tmp_path):
         assert "Person" in res.content[0].text
 
         res = asyncio.run(
-            server.call_tool("upsert_nodes", {"nodes": [{"label": "Person", "key": "ada"}]})
+            server.call_tool(
+                "upsert_nodes", {"nodes": [{"label": "Person", "key": "ada"}]}
+            )
         )
         assert json.loads(res.content[0].text)["nodes"] == 1
 
         # expected failures arrive as readable output, not protocol errors
         res = asyncio.run(
-            server.call_tool("cypher_query", {"cypher": "CREATE (p:Person {name: 'x'})"})
+            server.call_tool(
+                "cypher_query", {"cypher": "CREATE (p:Person {name: 'x'})"}
+            )
         )
         assert not res.is_error
         assert res.content[0].text.startswith("ERROR:")
 
         res = asyncio.run(
-            server.call_tool(
-                "search_knowledge", {"query": "ada", "labels": ["Person"]}
-            )
+            server.call_tool("search_knowledge", {"query": "ada", "labels": ["Person"]})
         )
         assert not res.is_error
         assert "Person:ada" in res.content[0].text

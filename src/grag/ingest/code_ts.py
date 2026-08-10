@@ -81,7 +81,9 @@ def _build_parser(suffix: str) -> Any:
         return parser
 
 
-def parse_file(suffix: str, path: Path, source: str, *, repo: str, rel_path: str) -> _ParsedModule:
+def parse_file(
+    suffix: str, path: Path, source: str, *, repo: str, rel_path: str
+) -> _ParsedModule:
     """Parse one ts/js/cs/tf file into a _ParsedModule.
 
     `calls` is part of the `_PARSERS` dispatch signature but unused: CALLS is
@@ -163,9 +165,7 @@ def _docstring(anchor: Any, src: bytes) -> str:
     sib = anchor.prev_named_sibling
     next_start = anchor.start_point[0]
     while (
-        sib is not None
-        and sib.type == "comment"
-        and sib.end_point[0] == next_start - 1
+        sib is not None and sib.type == "comment" and sib.end_point[0] == next_start - 1
     ):
         comments.append(_clean_comment(_text(sib, src)))
         next_start = sib.start_point[0]
@@ -247,7 +247,9 @@ def _add_function(
         )
     )
     if parent_class is not None:
-        parsed.contains.append(("CONTAINS_CLASS_FUNCTION", f"{module_id}#{parent_class}", fid))
+        parsed.contains.append(
+            ("CONTAINS_CLASS_FUNCTION", f"{module_id}#{parent_class}", fid)
+        )
         parsed.method_ids.setdefault(parent_class, {})[name] = fid
     else:
         parsed.contains.append(("CONTAINS_MODULE_FUNCTION", module_id, fid))
@@ -255,7 +257,9 @@ def _add_function(
             parsed.func_ids.setdefault(name, fid)
 
 
-def _path_import_refs(spec: str, rel_path: str, *, index_name: str | None = "index") -> list[str]:
+def _path_import_refs(
+    spec: str, rel_path: str, *, index_name: str | None = "index"
+) -> list[str]:
     """Normalize an import specifier to candidate module-index keys.
 
     Relative specifiers ('./lib/x', '../pkg') resolve against the importing
@@ -296,7 +300,9 @@ def _string_value(node: Any, src: bytes) -> str:
 _TSJS_CLASS_TYPES = frozenset(
     {"class_declaration", "abstract_class_declaration", "interface_declaration"}
 )
-_TSJS_FUNCTION_TYPES = frozenset({"function_declaration", "generator_function_declaration"})
+_TSJS_FUNCTION_TYPES = frozenset(
+    {"function_declaration", "generator_function_declaration"}
+)
 _TSJS_METHOD_TYPES = frozenset(
     {"method_definition", "abstract_method_signature", "method_signature"}
 )
@@ -304,12 +310,17 @@ _TSJS_FUNC_EXPR_TYPES = frozenset(
     {"arrow_function", "function_expression", "generator_function"}
 )
 _TSJS_NAMESPACE_TYPES = frozenset({"internal_module", "module"})
-_TSJS_DECL_TYPES = _TSJS_CLASS_TYPES | _TSJS_FUNCTION_TYPES | frozenset(
-    {"lexical_declaration", "variable_declaration"}
-) | _TSJS_NAMESPACE_TYPES
+_TSJS_DECL_TYPES = (
+    _TSJS_CLASS_TYPES
+    | _TSJS_FUNCTION_TYPES
+    | frozenset({"lexical_declaration", "variable_declaration"})
+    | _TSJS_NAMESPACE_TYPES
+)
 
 
-def _walk_tsjs(root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_path: str) -> None:
+def _walk_tsjs(
+    root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_path: str
+) -> None:
     language = str(parsed.module.properties["language"])
     source_path = str(path)
 
@@ -344,9 +355,15 @@ def _walk_tsjs(root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_pat
                     continue
                 qual = f"{prefix}.{name}" if prefix else name
                 _add_class(
-                    parsed, target, anchor, src,
-                    name=name, qual=qual, rel_path=rel_path,
-                    language=language, source_path=source_path,
+                    parsed,
+                    target,
+                    anchor,
+                    src,
+                    name=name,
+                    qual=qual,
+                    rel_path=rel_path,
+                    language=language,
+                    source_path=source_path,
                 )
                 body = target.child_by_field_name("body")
                 if body is not None:
@@ -355,19 +372,32 @@ def _walk_tsjs(root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_pat
                             mname = name_of(member)
                             if mname:
                                 _add_function(
-                                    parsed, member, member, src,
-                                    name=mname, qual=f"{qual}.{mname}",
-                                    parent_class=qual, rel_path=rel_path,
-                                    language=language, source_path=source_path,
+                                    parsed,
+                                    member,
+                                    member,
+                                    src,
+                                    name=mname,
+                                    qual=f"{qual}.{mname}",
+                                    parent_class=qual,
+                                    rel_path=rel_path,
+                                    language=language,
+                                    source_path=source_path,
                                 )
             elif target.type in _TSJS_FUNCTION_TYPES:
                 name = name_of(target)
                 if name:
                     qual = f"{prefix}.{name}" if prefix else name
                     _add_function(
-                        parsed, target, anchor, src,
-                        name=name, qual=qual, parent_class=None,
-                        rel_path=rel_path, language=language, source_path=source_path,
+                        parsed,
+                        target,
+                        anchor,
+                        src,
+                        name=name,
+                        qual=qual,
+                        parent_class=None,
+                        rel_path=rel_path,
+                        language=language,
+                        source_path=source_path,
                     )
             elif target.type in ("lexical_declaration", "variable_declaration"):
                 # `const f = (x) => ...` / `const f = function ...`
@@ -386,15 +416,26 @@ def _walk_tsjs(root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_pat
                     name = _text(name_node, src)
                     qual = f"{prefix}.{name}" if prefix else name
                     _add_function(
-                        parsed, decl, anchor, src,
-                        name=name, qual=qual, parent_class=None,
-                        rel_path=rel_path, language=language, source_path=source_path,
+                        parsed,
+                        decl,
+                        anchor,
+                        src,
+                        name=name,
+                        qual=qual,
+                        parent_class=None,
+                        rel_path=rel_path,
+                        language=language,
+                        source_path=source_path,
                     )
             elif target.type in _TSJS_NAMESPACE_TYPES:
                 ns = None
                 body = None
                 for child in target.named_children:
-                    if ns is None and child.type in ("identifier", "property_identifier", "string"):
+                    if ns is None and child.type in (
+                        "identifier",
+                        "property_identifier",
+                        "string",
+                    ):
                         ns = _text(child, src).strip("\"'")
                     elif child.type == "statement_block":
                         body = child
@@ -416,9 +457,17 @@ def _walk_tsjs(root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_pat
                 )
         elif node.type == "call_expression":
             fn = node.child_by_field_name("function")
-            if fn is not None and fn.type == "identifier" and _text(fn, src) == "require":
+            if (
+                fn is not None
+                and fn.type == "identifier"
+                and _text(fn, src) == "require"
+            ):
                 args = node.child_by_field_name("arguments")
-                first = args.named_children[0] if args is not None and args.named_children else None
+                first = (
+                    args.named_children[0]
+                    if args is not None and args.named_children
+                    else None
+                )
                 if first is not None and first.type == "string":
                     parsed.import_refs.extend(
                         _path_import_refs(_string_value(first, src), rel_path)
@@ -428,12 +477,19 @@ def _walk_tsjs(root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_pat
 # --- c# ----------------------------------------------------------------------------
 
 _CS_CLASS_TYPES = frozenset(
-    {"class_declaration", "interface_declaration", "record_declaration", "struct_declaration"}
+    {
+        "class_declaration",
+        "interface_declaration",
+        "record_declaration",
+        "struct_declaration",
+    }
 )
 _CS_METHOD_TYPES = frozenset({"method_declaration", "constructor_declaration"})
 
 
-def _walk_csharp(root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_path: str) -> None:
+def _walk_csharp(
+    root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_path: str
+) -> None:
     language = "csharp"
     source_path = str(path)
 
@@ -441,7 +497,11 @@ def _walk_csharp(root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_p
         name = node.child_by_field_name("name")
         if name is None:  # e.g. qualified_name on namespaces
             name = next(
-                (c for c in node.named_children if c.type in ("identifier", "qualified_name")),
+                (
+                    c
+                    for c in node.named_children
+                    if c.type in ("identifier", "qualified_name")
+                ),
                 None,
             )
         return _text(name, src) if name is not None else None
@@ -454,9 +514,15 @@ def _walk_csharp(root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_p
                     continue
                 qual = f"{prefix}.{name}" if prefix else name
                 _add_class(
-                    parsed, node, node, src,
-                    name=name, qual=qual, rel_path=rel_path,
-                    language=language, source_path=source_path,
+                    parsed,
+                    node,
+                    node,
+                    src,
+                    name=name,
+                    qual=qual,
+                    rel_path=rel_path,
+                    language=language,
+                    source_path=source_path,
                 )
                 body = node.child_by_field_name("body")  # None for positional records
                 if body is not None:
@@ -466,10 +532,16 @@ def _walk_csharp(root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_p
                             mname = name_of(member)
                             if mname:
                                 _add_function(
-                                    parsed, member, member, src,
-                                    name=mname, qual=f"{qual}.{mname}",
-                                    parent_class=qual, rel_path=rel_path,
-                                    language=language, source_path=source_path,
+                                    parsed,
+                                    member,
+                                    member,
+                                    src,
+                                    name=mname,
+                                    qual=f"{qual}.{mname}",
+                                    parent_class=qual,
+                                    rel_path=rel_path,
+                                    language=language,
+                                    source_path=source_path,
                                 )
             elif node.type == "namespace_declaration":
                 ns = name_of(node)
@@ -519,7 +591,11 @@ def _walk_hcl(root: Any, src: bytes, parsed: _ParsedModule, rel_path: str) -> No
         if node.type != "block":
             continue
         children = node.named_children
-        if not children or children[0].type != "identifier" or _text(children[0], src) != "module":
+        if (
+            not children
+            or children[0].type != "identifier"
+            or _text(children[0], src) != "module"
+        ):
             continue
         body = next((c for c in children if c.type == "body"), None)
         if body is None:

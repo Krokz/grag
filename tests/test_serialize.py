@@ -95,7 +95,9 @@ def test_edge_line_format(docs_graph: Subgraph):
 def test_edge_props_omitted_when_empty():
     sub = Subgraph(
         nodes=[_node("Doc:a"), _node("Doc:b")],
-        edges=[EdgeRecord(id="R:Doc:a->Doc:b", type="R", source="Doc:a", target="Doc:b")],
+        edges=[
+            EdgeRecord(id="R:Doc:a->Doc:b", type="R", source="Doc:a", target="Doc:b")
+        ],
     )
     packed = pack_context(sub, token_budget=10_000)
     assert "Doc:a -[R]-> Doc:b" in packed.text
@@ -145,7 +147,11 @@ def test_datetime_rendered_isoformat():
 
 def test_seed_ids_come_first_in_given_order():
     sub = Subgraph(
-        nodes=[_node("Doc:a", title="a"), _node("Doc:b", title="b"), _node("Doc:c", title="c")]
+        nodes=[
+            _node("Doc:a", title="a"),
+            _node("Doc:b", title="b"),
+            _node("Doc:c", title="c"),
+        ]
     )
     packed = pack_context(sub, token_budget=10_000, seed_ids=["Doc:c", "Doc:a"])
     lines = packed.text.splitlines()
@@ -217,7 +223,9 @@ def test_edge_truncation_after_all_nodes_fit():
     budget = estimate_tokens(two_nodes) + estimate_tokens(line_edge) - 1
     sub = Subgraph(
         nodes=[_node("Doc:a", title="a"), _node("Doc:b", title="b")],
-        edges=[EdgeRecord(id="R:Doc:a->Doc:b", type="R", source="Doc:a", target="Doc:b")],
+        edges=[
+            EdgeRecord(id="R:Doc:a->Doc:b", type="R", source="Doc:a", target="Doc:b")
+        ],
     )
     packed = pack_context(sub, token_budget=budget)
     assert packed.included_node_ids == ["Doc:a", "Doc:b"]

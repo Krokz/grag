@@ -128,7 +128,11 @@ def test_define_schema_and_roundtrip(client):
 def test_upsert_nodes_and_edges(seeded_client):
     res = seeded_client.post(
         "/api/nodes/upsert",
-        json={"nodes": [{"label": "Person", "key": "carol", "properties": {"name": "Carol"}}]},
+        json={
+            "nodes": [
+                {"label": "Person", "key": "carol", "properties": {"name": "Carol"}}
+            ]
+        },
     )
     assert res.status_code == 200
     summary = MutationSummary.model_validate(res.json())
@@ -178,9 +182,7 @@ def test_query_excludes_internal_tables(seeded_client):
     assert all(not n.label.startswith("_") for n in q.subgraph.nodes)
     assert all(not e.type.startswith("_") for e in q.subgraph.edges)
 
-    sample = GraphSample.model_validate(
-        seeded_client.get("/api/graph/sample").json()
-    )
+    sample = GraphSample.model_validate(seeded_client.get("/api/graph/sample").json())
     assert all(not n.label.startswith("_") for n in sample.subgraph.nodes)
     assert all(not k.startswith("_") for k in sample.stats.labels)
 
@@ -211,9 +213,7 @@ def test_context_endpoint(seeded_client):
     node_ids = [s.node.id for s in seeds]
     assert node_ids
 
-    res = seeded_client.post(
-        "/api/context", json={"node_ids": node_ids, "hops": 1}
-    )
+    res = seeded_client.post("/api/context", json={"node_ids": node_ids, "hops": 1})
     assert res.status_code == 200
     ctx = ContextResponse.model_validate(res.json())
     assert ctx.context
@@ -230,7 +230,9 @@ def test_graph_sample(seeded_client):
     assert sample.stats.labels.get("Person") == 2
     assert {n.id for n in sample.subgraph.nodes} >= {"Person:alice", "Person:bob"}
 
-    labeled = seeded_client.get("/api/graph/sample", params={"limit": 1, "label": "Person"})
+    labeled = seeded_client.get(
+        "/api/graph/sample", params={"limit": 1, "label": "Person"}
+    )
     assert labeled.status_code == 200
     ls = GraphSample.model_validate(labeled.json())
     assert all(n.label == "Person" for n in ls.subgraph.nodes)
@@ -468,9 +470,7 @@ def test_single_db_mode_ignores_db_selector(client):
 
 
 def _make_db(path: Path, row_key: str, row_name: str) -> None:
-    svc = GragService(
-        GragConfig(db_path=path, buffer_pool_size=128 * 1024 * 1024)
-    )
+    svc = GragService(GragConfig(db_path=path, buffer_pool_size=128 * 1024 * 1024))
     try:
         svc.define_schema(
             DefineSchemaRequest(
@@ -624,7 +624,7 @@ def _sse_json(text: str):
     payload = None
     for line in text.splitlines():
         if line.startswith("data:"):
-            payload = line[len("data:"):].strip()
+            payload = line[len("data:") :].strip()
     assert payload, f"no SSE data in reply: {text[:200]}"
     return _json.loads(payload)
 
@@ -716,7 +716,10 @@ def test_serve_with_mcp_mount_shares_one_db(tmp_path):
         # The MCP surface reads the SAME write (shared registry/service).
         call = mcp(
             "tools/call",
-            {"name": "cypher_query", "arguments": {"cypher": "MATCH (n:Note) RETURN count(n)"}},
+            {
+                "name": "cypher_query",
+                "arguments": {"cypher": "MATCH (n:Note) RETURN count(n)"},
+            },
             2,
         )
         text = call["result"]["content"][0]["text"]

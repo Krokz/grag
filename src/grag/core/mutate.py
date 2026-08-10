@@ -76,7 +76,9 @@ def _connection_of(engine: Engine, rel: str) -> tuple[str, str] | None:
     return None
 
 
-def _meta_rows(engine: Engine, tables: dict[str, str] | None = None) -> dict[str, dict[str, Any]]:
+def _meta_rows(
+    engine: Engine, tables: dict[str, str] | None = None
+) -> dict[str, dict[str, Any]]:
     tables = tables if tables is not None else _table_index(engine)
     if META_TABLE not in tables:
         return {}
@@ -389,7 +391,9 @@ def _sanitize_props(
         declared = columns.get(name)
         if declared is None:
             visible = sorted(
-                c for c in columns if not c.startswith(RESERVED_PREFIX) and c not in VECTOR_PROPS
+                c
+                for c in columns
+                if not c.startswith(RESERVED_PREFIX) and c not in VECTOR_PROPS
             )
             warnings.append(
                 f"{owner}: no column '{name}' declared; skipped. "
@@ -492,7 +496,10 @@ def upsert_edges(
     missing: list[str] = []
     checked: list[tuple[str, Any]] = []
     for edge in req.edges:
-        for label, key in ((edge.from_label, edge.from_key), (edge.to_label, edge.to_key)):
+        for label, key in (
+            (edge.from_label, edge.from_key),
+            (edge.to_label, edge.to_key),
+        ):
             if (label, key) in checked:
                 continue
             checked.append((label, key))
@@ -550,18 +557,23 @@ def upsert_edges(
 # --- fallback schema document (until grag.core.schema lands) -------------------------
 
 
-def _render_schema_text(node_docs: list[NodeTableDoc], rel_docs: list[RelTableDoc]) -> str:
+def _render_schema_text(
+    node_docs: list[NodeTableDoc], rel_docs: list[RelTableDoc]
+) -> str:
     lines = ["Node tables:"]
     for d in node_docs:
         props = ", ".join(
-            f"{p.name} {p.type}{' PK' if p.is_primary_key else ''}" for p in d.properties
+            f"{p.name} {p.type}{' PK' if p.is_primary_key else ''}"
+            for p in d.properties
         )
         lines.append(f"  {d.name}({props}) [{d.row_count} rows]")
     lines.append("Rel tables:")
     for r in rel_docs:
         props = ", ".join(f"{p.name} {p.type}" for p in r.properties)
         rel = f"{r.name}({props})" if props else r.name
-        lines.append(f"  ({r.from_label})-[:{rel}]->({r.to_label}) [{r.row_count} rows]")
+        lines.append(
+            f"  ({r.from_label})-[:{rel}]->({r.to_label}) [{r.row_count} rows]"
+        )
     return "\n".join(lines)
 
 
@@ -592,7 +604,9 @@ def _fallback_schema_document(engine: Engine) -> SchemaDocument:
             )
         else:
             conn = _connection_of(engine, name) or ("", "")
-            count = engine.execute(f"MATCH ()-[r:{name}]->() RETURN count(*)").rows[0][0]
+            count = engine.execute(f"MATCH ()-[r:{name}]->() RETURN count(*)").rows[0][
+                0
+            ]
             rel_docs.append(
                 RelTableDoc(
                     name=name,

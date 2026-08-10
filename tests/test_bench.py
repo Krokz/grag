@@ -26,12 +26,28 @@ def test_run_bench_int8_small(tmp_path, capsys):
 
 def test_format_bench_table():
     fake = {
-        "params": {"n_docs": 10, "dim": 8, "seed": 7, "n_queries": 3, "codecs": ["fp32", "polar"]},
+        "params": {
+            "n_docs": 10,
+            "dim": 8,
+            "seed": 7,
+            "n_queries": 3,
+            "codecs": ["fp32", "polar"],
+        },
         "results": {
-            "fp32": {"recall_at_10": 1.0, "mean_query_ms": 0.5, "mean_encode_us": 0.2,
-                     "rss_delta_mb": 1.0, "code_bytes": 32},
-            "polar": {"recall_at_10": 0.7, "mean_query_ms": 0.6, "mean_encode_us": 3.0,
-                      "rss_delta_mb": 2.0, "code_bytes": 8},
+            "fp32": {
+                "recall_at_10": 1.0,
+                "mean_query_ms": 0.5,
+                "mean_encode_us": 0.2,
+                "rss_delta_mb": 1.0,
+                "code_bytes": 32,
+            },
+            "polar": {
+                "recall_at_10": 0.7,
+                "mean_query_ms": 0.6,
+                "mean_encode_us": 3.0,
+                "rss_delta_mb": 2.0,
+                "code_bytes": 8,
+            },
         },
     }
     table = format_bench(fake)

@@ -41,26 +41,165 @@ N_QUERIES = 50
 _UPSERT_BATCH = 250
 
 _TOPICS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("databases", ("graph", "cypher", "index", "query", "storage", "transaction",
-                   "schema", "join", "table", "node", "edge", "traversal")),
-    ("ml", ("embedding", "vector", "model", "training", "inference", "tensor",
-            "gradient", "transformer", "attention", "tokenizer", "latency", "benchmark")),
-    ("web", ("http", "server", "request", "response", "route", "handler",
-             "middleware", "cookie", "session", "cache", "proxy", "tls")),
-    ("devops", ("deploy", "container", "kubernetes", "pipeline", "build", "artifact",
-                "rollback", "cluster", "monitoring", "alert", "uptime", "replica")),
-    ("security", ("token", "encryption", "certificate", "vulnerability", "audit",
-                  "permission", "firewall", "secret", "hash", "signature", "threat", "policy")),
-    ("data", ("pipeline", "etl", "warehouse", "parquet", "stream", "batch",
-              "schema", "ingest", "partition", "catalog", "lineage", "quality")),
-    ("lang", ("compiler", "parser", "syntax", "runtime", "garbage", "collector",
-              "bytecode", "typing", "macro", "closure", "iterator", "coroutine")),
-    ("os", ("kernel", "scheduler", "memory", "page", "syscall", "thread",
-            "mutex", "filesystem", "socket", "driver", "interrupt", "virtual")),
+    (
+        "databases",
+        (
+            "graph",
+            "cypher",
+            "index",
+            "query",
+            "storage",
+            "transaction",
+            "schema",
+            "join",
+            "table",
+            "node",
+            "edge",
+            "traversal",
+        ),
+    ),
+    (
+        "ml",
+        (
+            "embedding",
+            "vector",
+            "model",
+            "training",
+            "inference",
+            "tensor",
+            "gradient",
+            "transformer",
+            "attention",
+            "tokenizer",
+            "latency",
+            "benchmark",
+        ),
+    ),
+    (
+        "web",
+        (
+            "http",
+            "server",
+            "request",
+            "response",
+            "route",
+            "handler",
+            "middleware",
+            "cookie",
+            "session",
+            "cache",
+            "proxy",
+            "tls",
+        ),
+    ),
+    (
+        "devops",
+        (
+            "deploy",
+            "container",
+            "kubernetes",
+            "pipeline",
+            "build",
+            "artifact",
+            "rollback",
+            "cluster",
+            "monitoring",
+            "alert",
+            "uptime",
+            "replica",
+        ),
+    ),
+    (
+        "security",
+        (
+            "token",
+            "encryption",
+            "certificate",
+            "vulnerability",
+            "audit",
+            "permission",
+            "firewall",
+            "secret",
+            "hash",
+            "signature",
+            "threat",
+            "policy",
+        ),
+    ),
+    (
+        "data",
+        (
+            "pipeline",
+            "etl",
+            "warehouse",
+            "parquet",
+            "stream",
+            "batch",
+            "schema",
+            "ingest",
+            "partition",
+            "catalog",
+            "lineage",
+            "quality",
+        ),
+    ),
+    (
+        "lang",
+        (
+            "compiler",
+            "parser",
+            "syntax",
+            "runtime",
+            "garbage",
+            "collector",
+            "bytecode",
+            "typing",
+            "macro",
+            "closure",
+            "iterator",
+            "coroutine",
+        ),
+    ),
+    (
+        "os",
+        (
+            "kernel",
+            "scheduler",
+            "memory",
+            "page",
+            "syscall",
+            "thread",
+            "mutex",
+            "filesystem",
+            "socket",
+            "driver",
+            "interrupt",
+            "virtual",
+        ),
+    ),
 )
-_FILLER = ("the", "of", "and", "in", "to", "for", "with", "on", "a", "an",
-           "system", "using", "based", "modern", "efficient", "scalable",
-           "distributed", "practical", "robust", "simple")
+_FILLER = (
+    "the",
+    "of",
+    "and",
+    "in",
+    "to",
+    "for",
+    "with",
+    "on",
+    "a",
+    "an",
+    "system",
+    "using",
+    "based",
+    "modern",
+    "efficient",
+    "scalable",
+    "distributed",
+    "practical",
+    "robust",
+    "simple",
+)
 
 
 class HashEmbedder:
@@ -114,7 +253,9 @@ def _rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
-def _doc_vectors(embedder: HashEmbedder, docs: list[tuple[int, str, str]], dim: int) -> np.ndarray:
+def _doc_vectors(
+    embedder: HashEmbedder, docs: list[tuple[int, str, str]], dim: int
+) -> np.ndarray:
     # embed_pending_nodes concatenates STRING props in column order: title, text
     texts = [f"{title}\n{text}" for _, title, text in docs]
     return np.asarray(embedder.embed(texts), dtype=np.float32)
@@ -134,7 +275,9 @@ def _bench_codec(
         cfg = base_config.model_copy(deep=True)
         cfg.db_path = Path(tmp) / "bench.lbdb"
         cfg.vector_codec = codec  # type: ignore[assignment]
-        cfg.embedder = EmbedderConfig(provider="fastembed", model=embedder.model_id, dim=dim)
+        cfg.embedder = EmbedderConfig(
+            provider="fastembed", model=embedder.model_id, dim=dim
+        )
 
         eng = Engine(cfg)
         orig_get_embedder = vectors.get_embedder
@@ -164,7 +307,9 @@ def _bench_codec(
                     cfg,
                     UpsertNodesRequest(
                         nodes=[
-                            UpsertNode(label="Doc", key=key, properties={"title": t, "text": x})
+                            UpsertNode(
+                                label="Doc", key=key, properties={"title": t, "text": x}
+                            )
                             for key, t, x in batch
                         ]
                     ),
@@ -233,7 +378,9 @@ def run_bench(
 
     results: dict[str, Any] = {}
     for c in codecs:
-        results[c] = _bench_codec(c, config, embedder, docs, doc_vecs, queries, truth, dim)
+        results[c] = _bench_codec(
+            c, config, embedder, docs, doc_vecs, queries, truth, dim
+        )
 
     out = {
         "params": {

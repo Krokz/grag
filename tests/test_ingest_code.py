@@ -58,9 +58,7 @@ def _count(engine, cypher: str) -> int:
 
 
 def _edge_pairs(engine, rel: str) -> set[tuple[str, str]]:
-    rows = engine.execute(
-        f"MATCH (a)-[r:{rel}]->(b) RETURN a.id, b.id"
-    ).rows
+    rows = engine.execute(f"MATCH (a)-[r:{rel}]->(b) RETURN a.id, b.id").rows
     return {(r[0], r[1]) for r in rows}
 
 
@@ -78,14 +76,18 @@ def test_ingest_code_builds_expected_graph(engine, tmp_path):
     assert resp.edges == 13
 
     # node ids follow <repo>:<relative/path> and <module_id>#<qualname>
-    rows = engine.execute("MATCH (m:Module) RETURN m.id, m.name, m.language ORDER BY m.id").rows
+    rows = engine.execute(
+        "MATCH (m:Module) RETURN m.id, m.name, m.language ORDER BY m.id"
+    ).rows
     assert rows == [
         ["pkg:core.py", "core", "python"],
         ["pkg:main.py", "main", "python"],
     ]
     rows = engine.execute("MATCH (c:Class) RETURN c.id ORDER BY c.id").rows
     assert [r[0] for r in rows] == ["pkg:core.py#Base", "pkg:core.py#Greeter"]
-    rows = engine.execute("MATCH (f:Function) RETURN f.id, f.is_method ORDER BY f.id").rows
+    rows = engine.execute(
+        "MATCH (f:Function) RETURN f.id, f.is_method ORDER BY f.id"
+    ).rows
     assert [r[0] for r in rows] == [
         "pkg:core.py#Greeter.greet",
         "pkg:core.py#Greeter.greet_loudly",
@@ -126,9 +128,15 @@ def test_ingest_code_builds_expected_graph(engine, tmp_path):
         ("pkg:core.py#Greeter", "pkg:core.py#Base")
     }
     assert _edge_pairs(engine, "CALLS") == {
-        ("pkg:core.py#Greeter.greet", "pkg:core.py#helper"),  # bare name call (same module)
+        (
+            "pkg:core.py#Greeter.greet",
+            "pkg:core.py#helper",
+        ),  # bare name call (same module)
         ("pkg:core.py#Greeter.greet_loudly", "pkg:core.py#Greeter.greet"),  # self.<m>
-        ("pkg:main.py#run", "pkg:core.py#helper"),  # bare call to from-imported function
+        (
+            "pkg:main.py#run",
+            "pkg:core.py#helper",
+        ),  # bare call to from-imported function
     }
 
 
@@ -174,14 +182,18 @@ def test_ingest_code_multiple_repos_and_cross_repo_inherits(engine, tmp_path):
         encoding="utf-8",
     )
     resp = ingest_code(
-        engine, engine.config, CodeIngestRequest(paths=[str(tmp_path / "pkg"), str(other)])
+        engine,
+        engine.config,
+        CodeIngestRequest(paths=[str(tmp_path / "pkg"), str(other)]),
     )
 
     assert resp.repos == 2 and resp.modules == 3
     # `from pkg.core import Greeter` resolves by dotted suffix across repos
     assert ("other:sub.py", "pkg:core.py") in _edge_pairs(engine, "IMPORTS")
     # base `Greeter` is globally unique across the scanned set
-    assert ("other:sub.py#Loud", "pkg:core.py#Greeter") in _edge_pairs(engine, "INHERITS")
+    assert ("other:sub.py#Loud", "pkg:core.py#Greeter") in _edge_pairs(
+        engine, "INHERITS"
+    )
 
 
 # --- walk filters and warnings ------------------------------------------------------
@@ -190,7 +202,9 @@ def test_ingest_code_multiple_repos_and_cross_repo_inherits(engine, tmp_path):
 def test_walk_skips_and_warns(engine, tmp_path):
     pkg = _write_pkg(tmp_path)
     (pkg / ".git").mkdir()
-    (pkg / ".git" / "ignored.py").write_text("def nope():\n    pass\n", encoding="utf-8")
+    (pkg / ".git" / "ignored.py").write_text(
+        "def nope():\n    pass\n", encoding="utf-8"
+    )
     (pkg / "__pycache__").mkdir()
     (pkg / "__pycache__" / "cached.py").write_text("x = 1\n", encoding="utf-8")
     (pkg / "big.py").write_text("x = 1\n" * 500, encoding="utf-8")  # ~3KB
@@ -284,6 +298,7 @@ def test_calls_resolve_function_local_lazy_import_inside_try(engine, tmp_path):
         encoding="utf-8",
     )
     ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
-    assert ("pkg:search.py#search_knowledge", "pkg:engine.py#vector_candidates") in _edge_pairs(
-        engine, "CALLS"
-    )
+    assert (
+        "pkg:search.py#search_knowledge",
+        "pkg:engine.py#vector_candidates",
+    ) in _edge_pairs(engine, "CALLS")

@@ -130,7 +130,9 @@ def test_define_schema_invalid_property_and_pk(engine: Engine):
             engine.config,
             DefineSchemaRequest(
                 node_tables=[
-                    NodeTableSpec(name="Doc", properties=[PropertySpec(name="bad-prop")])
+                    NodeTableSpec(
+                        name="Doc", properties=[PropertySpec(name="bad-prop")]
+                    )
                 ]
             ),
         )
@@ -138,7 +140,9 @@ def test_define_schema_invalid_property_and_pk(engine: Engine):
         define_schema(
             engine,
             engine.config,
-            DefineSchemaRequest(node_tables=[NodeTableSpec(name="Doc", primary_key="1id")]),
+            DefineSchemaRequest(
+                node_tables=[NodeTableSpec(name="Doc", primary_key="1id")]
+            ),
         )
 
 
@@ -149,7 +153,9 @@ def test_define_schema_reserved_node_props_rejected(engine: Engine, prop: str):
             engine,
             engine.config,
             DefineSchemaRequest(
-                node_tables=[NodeTableSpec(name="Doc", properties=[PropertySpec(name=prop)])]
+                node_tables=[
+                    NodeTableSpec(name="Doc", properties=[PropertySpec(name=prop)])
+                ]
             ),
         )
     assert prop in str(exc.value)
@@ -181,7 +187,9 @@ def test_define_schema_rel_endpoint_must_exist(engine: Engine):
             engine.config,
             DefineSchemaRequest(
                 node_tables=[_person_spec()],
-                rel_tables=[RelTableSpec(name="LIKES", from_label="Person", to_label="Ghost")],
+                rel_tables=[
+                    RelTableSpec(name="LIKES", from_label="Person", to_label="Ghost")
+                ],
             ),
         )
     assert "Ghost" in str(exc.value)
@@ -225,7 +233,11 @@ def test_upsert_nodes_create_then_update_is_idempotent(engine: Engine):
         engine,
         engine.config,
         UpsertNodesRequest(
-            nodes=[UpsertNode(label="Doc", key="d1", properties={"title": "b"}, source="src2")]
+            nodes=[
+                UpsertNode(
+                    label="Doc", key="d1", properties={"title": "b"}, source="src2"
+                )
+            ]
         ),
     )
     assert s2.nodes == 1
@@ -331,7 +343,10 @@ def _people(engine: Engine) -> None:
         engine,
         engine.config,
         UpsertNodesRequest(
-            nodes=[UpsertNode(label="Person", key="a"), UpsertNode(label="Person", key="b")]
+            nodes=[
+                UpsertNode(label="Person", key="a"),
+                UpsertNode(label="Person", key="b"),
+            ]
         ),
     )
 
@@ -406,9 +421,7 @@ def test_upsert_edges_missing_endpoint(engine: Engine):
 
 def test_upsert_edges_wrong_label_pair(engine: Engine):
     _people(engine)
-    define_schema(
-        engine, engine.config, DefineSchemaRequest(node_tables=[_doc_spec()])
-    )
+    define_schema(engine, engine.config, DefineSchemaRequest(node_tables=[_doc_spec()]))
     with pytest.raises(SchemaError) as exc:
         upsert_edges(
             engine,
@@ -527,7 +540,8 @@ def test_write_after_search_fresh_engine(tmp_path):
     try:
         define_schema(eng1, cfg, DefineSchemaRequest(node_tables=[_doc_spec()]))
         upsert_nodes(
-            eng1, cfg,
+            eng1,
+            cfg,
             UpsertNodesRequest(
                 nodes=[UpsertNode(label="Doc", key="d1", properties={"title": "graph"})]
             ),
@@ -541,9 +555,14 @@ def test_write_after_search_fresh_engine(tmp_path):
     eng2 = Engine(cfg)
     try:
         summary = upsert_nodes(
-            eng2, cfg,
+            eng2,
+            cfg,
             UpsertNodesRequest(
-                nodes=[UpsertNode(label="Doc", key="d2", properties={"title": "fresh write"})]
+                nodes=[
+                    UpsertNode(
+                        label="Doc", key="d2", properties={"title": "fresh write"}
+                    )
+                ]
             ),
         )
         assert summary.nodes == 1

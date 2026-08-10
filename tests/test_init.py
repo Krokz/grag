@@ -43,7 +43,8 @@ def test_detect_clients_does_not_duplicate(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_claude_op_creates_mcp_json(tmp_path):
+def test_claude_op_creates_mcp_json_url(tmp_path):
+    """Default transport is URL (no subprocess, no lock conflict)."""
     db = tmp_path / "test.lbdb"
     ops = plan_mcp_ops(["claude"], tmp_path, db)
     assert len(ops) == 1
@@ -52,6 +53,18 @@ def test_claude_op_creates_mcp_json(tmp_path):
     assert op.path == tmp_path / ".mcp.json"
     assert op.created
     data = json.loads(op.content)
+    entry = data["mcpServers"]["grag"]
+    assert "url" in entry
+    assert "127.0.0.1:8471" in entry["url"]
+    assert "/mcp/" in entry["url"]
+
+
+def test_claude_op_creates_mcp_json_stdio(tmp_path):
+    """stdio=True writes the command/args entry."""
+    db = tmp_path / "test.lbdb"
+    ops = plan_mcp_ops(["claude"], tmp_path, db, stdio=True)
+    assert len(ops) == 1
+    data = json.loads(ops[0].content)
     entry = data["mcpServers"]["grag"]
     assert str(db.resolve()) in entry["args"]
     assert "mcp" in entry["args"]
@@ -69,6 +82,7 @@ def test_claude_op_merges_with_existing(tmp_path):
 
 
 def test_claude_op_overwrites_existing_grag_entry(tmp_path):
+    """Old stdio entry is replaced with URL entry (default transport)."""
     db = tmp_path / "new.lbdb"
     mcp_json = tmp_path / ".mcp.json"
     mcp_json.write_text(
@@ -76,7 +90,9 @@ def test_claude_op_overwrites_existing_grag_entry(tmp_path):
     )
     ops = plan_mcp_ops(["claude"], tmp_path, db)
     data = json.loads(ops[0].content)
-    assert str(db.resolve()) in data["mcpServers"]["grag"]["args"]
+    entry = data["mcpServers"]["grag"]
+    assert "url" in entry
+    assert "command" not in entry  # old stdio entry fully replaced
 
 
 # ---------------------------------------------------------------------------

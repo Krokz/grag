@@ -108,8 +108,12 @@ _CODE_NODE_TABLES = [
 _CODE_REL_TABLES = [
     RelTableSpec(name="CONTAINS_REPO_MODULE", from_label="Repo", to_label="Module"),
     RelTableSpec(name="CONTAINS_MODULE_CLASS", from_label="Module", to_label="Class"),
-    RelTableSpec(name="CONTAINS_MODULE_FUNCTION", from_label="Module", to_label="Function"),
-    RelTableSpec(name="CONTAINS_CLASS_FUNCTION", from_label="Class", to_label="Function"),
+    RelTableSpec(
+        name="CONTAINS_MODULE_FUNCTION", from_label="Module", to_label="Function"
+    ),
+    RelTableSpec(
+        name="CONTAINS_CLASS_FUNCTION", from_label="Class", to_label="Function"
+    ),
     RelTableSpec(name="IMPORTS", from_label="Module", to_label="Module"),
     RelTableSpec(name="INHERITS", from_label="Class", to_label="Class"),
     RelTableSpec(name="CALLS", from_label="Function", to_label="Function"),
@@ -143,15 +147,34 @@ def _skip_file(name: str) -> bool:
         _HASHED_BUNDLE_RE.match(name)
     )
 
+
 # Known code suffixes WITHOUT a registered parser: walked files with these
 # extensions collect one grouped warning instead of being silently ignored
 # (truly unknown extensions — docs, images, lockfiles — are skipped as
 # non-code). Parsed suffixes (.py + the tree-sitter set) are not listed here.
 _UNSUPPORTED_CODE_SUFFIXES = frozenset(
     {
-        ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".go", ".java", ".kt",
-        ".kts", ".lua", ".m", ".php", ".pl", ".rb", ".rs", ".scala", ".sh",
-        ".sql", ".swift", ".vue",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".h",
+        ".hpp",
+        ".go",
+        ".java",
+        ".kt",
+        ".kts",
+        ".lua",
+        ".m",
+        ".php",
+        ".pl",
+        ".rb",
+        ".rs",
+        ".scala",
+        ".sh",
+        ".sql",
+        ".swift",
+        ".vue",
     }
 )
 
@@ -159,7 +182,9 @@ _UNSUPPORTED_CODE_SUFFIXES = frozenset(
 # --- walk -----------------------------------------------------------------------
 
 
-def _walk(paths: list[Path], max_file_kb: int, warnings: list[str]) -> Iterator[tuple[Path, Path]]:
+def _walk(
+    paths: list[Path], max_file_kb: int, warnings: list[str]
+) -> Iterator[tuple[Path, Path]]:
     """Yield (repo_root, file) for every ingestable file under `paths`.
 
     Recursive; each path may be a directory (walked, repo root) or a single
@@ -175,7 +200,9 @@ def _walk(paths: list[Path], max_file_kb: int, warnings: list[str]) -> Iterator[
             candidates = []
             for dirpath, dirnames, filenames in os.walk(path):
                 dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
-                candidates.extend((path, Path(dirpath) / name) for name in sorted(filenames))
+                candidates.extend(
+                    (path, Path(dirpath) / name) for name in sorted(filenames)
+                )
         else:
             warnings.append(f"skipped {path}: no such file or directory")
             continue
@@ -207,15 +234,23 @@ class _ParsedModule:
     dotted: str  # repo-relative dotted module path, e.g. "grag.ingest.code"
     classes: list[UpsertNode] = field(default_factory=list)
     functions: list[UpsertNode] = field(default_factory=list)
-    contains: list[tuple[str, str, str]] = field(default_factory=list)  # (rel, from_key, to_key)
+    contains: list[tuple[str, str, str]] = field(
+        default_factory=list
+    )  # (rel, from_key, to_key)
     import_refs: list[str] = field(default_factory=list)  # dotted names to resolve
     # local name -> dotted base module, for `from X import name` (used to
     # resolve bare `name(...)` calls to imported functions, e.g. lazy imports).
     from_imports: dict[str, str] = field(default_factory=dict)
-    class_bases: list[tuple[str, str]] = field(default_factory=list)  # (class qualname, base expr)
+    class_bases: list[tuple[str, str]] = field(
+        default_factory=list
+    )  # (class qualname, base expr)
     class_ids: dict[str, str] = field(default_factory=dict)  # simple name -> class id
-    func_ids: dict[str, str] = field(default_factory=dict)  # simple name -> module-level function id
-    method_ids: dict[str, dict[str, str]] = field(default_factory=dict)  # class qual -> {name -> id}
+    func_ids: dict[str, str] = field(
+        default_factory=dict
+    )  # simple name -> module-level function id
+    method_ids: dict[str, dict[str, str]] = field(
+        default_factory=dict
+    )  # class qual -> {name -> id}
     # (caller qualname, "name" | "self_attr", called name)
     call_refs: list[tuple[str, str, str]] = field(default_factory=list)
     # Extra module-index keys for non-Python import resolution (C# namespace
@@ -228,7 +263,11 @@ def _signature(node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> s
     if isinstance(node, ast.ClassDef):
         parts = [ast.unparse(b) for b in node.bases]
         parts.extend(ast.unparse(k) for k in node.keywords)
-        return f"class {node.name}({', '.join(parts)}):" if parts else f"class {node.name}:"
+        return (
+            f"class {node.name}({', '.join(parts)}):"
+            if parts
+            else f"class {node.name}:"
+        )
     prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
     sig = f"{prefix} {node.name}({ast.unparse(node.args)})"
     if node.returns is not None:
@@ -325,7 +364,9 @@ def _parse_python(
         parsed.class_bases.extend((qual, ast.unparse(b)) for b in node.bases)
 
     def add_function(
-        node: ast.FunctionDef | ast.AsyncFunctionDef, qual: str, parent_class: str | None
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        qual: str,
+        parent_class: str | None,
     ) -> None:
         fid = f"{module_id}#{qual}"
         is_method = parent_class is not None
@@ -347,7 +388,9 @@ def _parse_python(
             )
         )
         if parent_class is not None:
-            parsed.contains.append(("CONTAINS_CLASS_FUNCTION", f"{module_id}#{parent_class}", fid))
+            parsed.contains.append(
+                ("CONTAINS_CLASS_FUNCTION", f"{module_id}#{parent_class}", fid)
+            )
             parsed.method_ids.setdefault(parent_class, {})[node.name] = fid
         else:
             # Nested functions (def inside def) attach to the Module: there is
@@ -368,7 +411,9 @@ def _parse_python(
                 visit(node.body, qual, qual)
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 qual = f"{prefix}.{node.name}" if prefix else node.name
-                add_function(node, qual, parent_class if prefix == parent_class else None)
+                add_function(
+                    node, qual, parent_class if prefix == parent_class else None
+                )
                 visit(node.body, qual, parent_class)
 
     visit(tree.body, "", None)
@@ -379,7 +424,11 @@ def _parse_python(
         elif isinstance(node, ast.ImportFrom):
             base = node.module or ""
             if node.level:  # relative import: anchor at this module's package
-                pkg = dotted.split(".") if rel_path.endswith("__init__.py") else dotted.split(".")[:-1]
+                pkg = (
+                    dotted.split(".")
+                    if rel_path.endswith("__init__.py")
+                    else dotted.split(".")[:-1]
+                )
                 keep = max(0, len(pkg) - (node.level - 1))
                 base = ".".join(pkg[:keep] + (base.split(".") if base else []))
             if base:
@@ -488,7 +537,9 @@ def _resolve_base(
 # --- public: ingest_code ----------------------------------------------------------
 
 
-def ingest_code(engine: Engine, config: GragConfig, req: CodeIngestRequest) -> CodeIngestResponse:
+def ingest_code(
+    engine: Engine, config: GragConfig, req: CodeIngestRequest
+) -> CodeIngestResponse:
     """Walk `req.paths`, parse code structure, and upsert the code graph.
 
     The schema is defined idempotently on every call; all nodes go in via one
@@ -581,7 +632,9 @@ def ingest_code(engine: Engine, config: GragConfig, req: CodeIngestRequest) -> C
 
     edges: dict[tuple[str, str, str], UpsertEdge] = {}
 
-    def add_edge(type_: str, from_label: str, from_key: str, to_label: str, to_key: str, src: str) -> None:
+    def add_edge(
+        type_: str, from_label: str, from_key: str, to_label: str, to_key: str, src: str
+    ) -> None:
         if from_key == to_key and from_label == to_label:
             return
         edges.setdefault(
@@ -599,7 +652,9 @@ def ingest_code(engine: Engine, config: GragConfig, req: CodeIngestRequest) -> C
     for pm in parsed_modules:
         mid = str(pm.module.key)
         src = str(pm.module.source)
-        add_edge("CONTAINS_REPO_MODULE", "Repo", mid.split(":", 1)[0], "Module", mid, src)
+        add_edge(
+            "CONTAINS_REPO_MODULE", "Repo", mid.split(":", 1)[0], "Module", mid, src
+        )
         for rel, from_key, to_key in pm.contains:
             to_label = "Class" if rel == "CONTAINS_MODULE_CLASS" else "Function"
             from_label = "Class" if rel == "CONTAINS_CLASS_FUNCTION" else "Module"
@@ -618,7 +673,9 @@ def ingest_code(engine: Engine, config: GragConfig, req: CodeIngestRequest) -> C
                 target = pm.func_ids.get(name)
                 if target is None and name in pm.from_imports:
                     # `from base import name`; `name(...)` -> the imported function
-                    target = _resolve_imported_func(name, pm.from_imports[name], module_index, by_module)
+                    target = _resolve_imported_func(
+                        name, pm.from_imports[name], module_index, by_module
+                    )
                 if target is None:
                     # Unique global match across the scanned set (guarded/lazy calls).
                     matches = func_index.get(name, [])
@@ -639,7 +696,9 @@ def ingest_code(engine: Engine, config: GragConfig, req: CodeIngestRequest) -> C
     for label, nodes in nodes_by_label:
         counts[label] = len(nodes)
         if nodes:
-            summary = upsert_nodes(engine, config, UpsertNodesRequest(nodes=list(nodes.values())))
+            summary = upsert_nodes(
+                engine, config, UpsertNodesRequest(nodes=list(nodes.values()))
+            )
             warnings.extend(summary.warnings)
 
     edges_by_type: dict[str, list[UpsertEdge]] = {}
@@ -666,7 +725,11 @@ def ingest_code(engine: Engine, config: GragConfig, req: CodeIngestRequest) -> C
 
 
 def ingest_code_paths(
-    config: GragConfig, paths: list[Path], *, calls: bool = True, max_file_kb: int = 1024
+    config: GragConfig,
+    paths: list[Path],
+    *,
+    calls: bool = True,
+    max_file_kb: int = 1024,
 ) -> str:
     """Ingest code structure from `paths` and return a human-readable summary
     for the CLI (mirrors loaders.ingest_paths)."""

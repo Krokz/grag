@@ -210,9 +210,7 @@ def test_ingest_csharp(engine, tmp_path):
     assert resp.warnings == []
     assert (resp.repos, resp.modules, resp.classes, resp.functions) == (1, 2, 4, 3)
 
-    rows = engine.execute(
-        "MATCH (m:Module) RETURN m.id, m.language ORDER BY m.id"
-    ).rows
+    rows = engine.execute("MATCH (m:Module) RETURN m.id, m.language ORDER BY m.id").rows
     assert rows == [
         ["svc:Models/Widget.cs", "csharp"],
         ["svc:Services/Greeter.cs", "csharp"],
@@ -274,9 +272,7 @@ def test_ingest_terraform(engine, tmp_path):
     assert resp.warnings == []
     # HCL has no class/function declarations: Module nodes + IMPORTS only
     assert (resp.repos, resp.modules, resp.classes, resp.functions) == (1, 2, 0, 0)
-    rows = engine.execute(
-        "MATCH (m:Module) RETURN m.id, m.language ORDER BY m.id"
-    ).rows
+    rows = engine.execute("MATCH (m:Module) RETURN m.id, m.language ORDER BY m.id").rows
     assert rows == [
         ["infra:child/main.tf", "hcl"],
         ["infra:main.tf", "hcl"],

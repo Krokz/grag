@@ -99,6 +99,21 @@ def main(argv: list[str] | None = None) -> int:
         help="LLM client to configure (default: auto-detect)",
     )
     init.add_argument(
+        "--port",
+        type=int,
+        default=8471,
+        help="port for the grag serve --with-mcp server (default 8471, used in the MCP URL)",
+    )
+    init.add_argument(
+        "--stdio",
+        action="store_true",
+        help=(
+            "write stdio transport instead of URL — the client starts 'grag mcp' "
+            "automatically but holds the write lock, preventing 'grag serve' on the "
+            "same file. Prefer URL (default) when you also want the browser UI."
+        ),
+    )
+    init.add_argument(
         "--no-mcp",
         action="store_true",
         help="skip MCP config — only update CLAUDE.md",
@@ -197,9 +212,17 @@ def main(argv: list[str] | None = None) -> int:
 
         ops: list[WriteOp | SkipOp] = []
         if not args.no_mcp:
-            ops.extend(plan_mcp_ops(clients, project_root, db_path))
+            ops.extend(
+                plan_mcp_ops(
+                    clients,
+                    project_root,
+                    db_path,
+                    stdio=args.stdio,
+                    port=args.port,
+                )
+            )
         if not args.no_claude_md:
-            ops.append(plan_claude_md_op(project_root, db_path))
+            ops.append(plan_claude_md_op(project_root, db_path, port=args.port))
 
         if not ops:
             print("Nothing to do (both --no-mcp and --no-claude-md were given).")

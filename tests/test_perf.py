@@ -39,9 +39,12 @@ def test_search_latency_and_rss(tmp_path):
     svc = _service(tmp_path)
     docs = [
         IngestDocument(
-            text=f"note {i}: " + ("graph databases store relationships "
-                                  "and enable grounded retrieval "
-                                  "with provenance " * 10),
+            text=f"note {i}: "
+            + (
+                "graph databases store relationships "
+                "and enable grounded retrieval "
+                "with provenance " * 10
+            ),
             source=f"note-{i}.md",
         )
         for i in range(500)
@@ -58,16 +61,16 @@ def test_search_latency_and_rss(tmp_path):
     for i in range(20):
         start = time.perf_counter()
         res = svc.search_knowledge(
-            SearchRequest(query=f"relationships grounded retrieval {i % 3}", top_k=8, hops=1)
+            SearchRequest(
+                query=f"relationships grounded retrieval {i % 3}", top_k=8, hops=1
+            )
         )
         latencies.append(time.perf_counter() - start)
         assert res.seeds, "expected FTS seeds"
 
     p95 = statistics.quantiles(latencies, n=20)[-1]
-    rss_mb = (
-        resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - rss_before
-    ) / 1024
+    rss_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - rss_before) / 1024
     svc.close()
 
-    assert p95 < 0.25, f"search p95 {p95*1000:.0f}ms exceeds 250ms guardrail"
+    assert p95 < 0.25, f"search p95 {p95 * 1000:.0f}ms exceeds 250ms guardrail"
     assert rss_mb < 400, f"RSS delta {rss_mb:.0f}MB exceeds 400MB guardrail"

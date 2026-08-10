@@ -46,7 +46,9 @@ def _resolve_bare_key(
     return None
 
 
-def get_context(engine: Engine, config: GragConfig, req: ContextRequest) -> ContextResponse:
+def get_context(
+    engine: Engine, config: GragConfig, req: ContextRequest
+) -> ContextResponse:
     """Look up req.node_ids ('Label:key'), expand k hops, and pack the result
     into a token budget. Node ids that don't resolve are excluded; unknown
     *labels* are a SchemaError."""

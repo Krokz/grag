@@ -46,7 +46,9 @@ _SUPPORTED_SUFFIXES = {".md", ".txt", ".json", ".jsonl"}
 # --- public: ingest_documents ---------------------------------------------------
 
 
-def ingest_documents(engine: Engine, config: GragConfig, req: IngestRequest) -> IngestResponse:
+def ingest_documents(
+    engine: Engine, config: GragConfig, req: IngestRequest
+) -> IngestResponse:
     """Chunk documents and upsert them as nodes under `req.label`.
 
     The chunk table (id PK, text/meta, searchable) is defined idempotently on
@@ -104,7 +106,9 @@ def _embed_pending(engine: Engine, config: GragConfig, label: str) -> None:
 
         embed_pending_nodes(engine, config, label)
     except (ImportError, ConfigurationError) as exc:
-        log.warning("Embedding skipped for label '%s'; continuing FTS-only: %s", label, exc)
+        log.warning(
+            "Embedding skipped for label '%s'; continuing FTS-only: %s", label, exc
+        )
 
 
 # --- public: ingest_paths (CLI) ---------------------------------------------------
@@ -211,7 +215,9 @@ def _chunk_text(text: str, size: int, overlap: int) -> list[str]:
     return [c for c in chunks if c.strip()]
 
 
-def _append_piece(chunks: list[str], piece: str, sep: str, size: int, overlap: int) -> None:
+def _append_piece(
+    chunks: list[str], piece: str, sep: str, size: int, overlap: int
+) -> None:
     if not chunks:
         chunks.append(piece)
         return

@@ -44,7 +44,9 @@ def hybrid_config(docs_engine, monkeypatch):
 
 def test_search_fts_only_finds_doc(docs_engine):
     cfg = docs_engine.config  # no embedder configured
-    resp = search_knowledge(docs_engine, cfg, SearchRequest(query="graph relationships", hops=0))
+    resp = search_knowledge(
+        docs_engine, cfg, SearchRequest(query="graph relationships", hops=0)
+    )
     assert resp.seeds
     top = resp.seeds[0]
     assert top.node.id == "Doc:doc-0"
@@ -100,7 +102,9 @@ def test_hybrid_fusion_includes_vector_only_hits(docs_engine, hybrid_config):
         "text: 'car maintenance and repair basics'})"
     )
     resp = search_knowledge(
-        docs_engine, hybrid_config, SearchRequest(query="automobile graph", top_k=4, hops=0)
+        docs_engine,
+        hybrid_config,
+        SearchRequest(query="automobile graph", top_k=4, hops=0),
     )
     by_id = {s.node.id: s for s in resp.seeds}
     assert "Doc:doc-car" in by_id
@@ -153,7 +157,9 @@ def test_label_cap_surfaces_underrepresented_label(tmp_path):
     eng = Engine(GragConfig(db_path=tmp_path / "cap.lbdb", search_label_cap=2))
     try:
         _make_flood(eng)
-        resp = search_knowledge(eng, eng.config, SearchRequest(query="python backend", top_k=4, hops=0))
+        resp = search_knowledge(
+            eng, eng.config, SearchRequest(query="python backend", top_k=4, hops=0)
+        )
         labels = [s.node.label for s in resp.seeds]
         assert "Decision" in labels  # the lone knowledge node surfaces
         # within the first `cap` positions per label, Func holds at most 2
@@ -170,7 +176,9 @@ def test_label_cap_zero_disables_diversity(tmp_path):
     eng = Engine(GragConfig(db_path=tmp_path / "nocap.lbdb", search_label_cap=0))
     try:
         _make_flood(eng)
-        resp = search_knowledge(eng, eng.config, SearchRequest(query="python backend", top_k=4, hops=0))
+        resp = search_knowledge(
+            eng, eng.config, SearchRequest(query="python backend", top_k=4, hops=0)
+        )
         assert all(s.node.label == "Func" for s in resp.seeds)  # pure RRF flood
     finally:
         eng.close()
@@ -181,9 +189,15 @@ def test_label_cap_zero_disables_diversity(tmp_path):
 
 def test_search_hops_expansion(docs_engine):
     cfg = docs_engine.config
-    r0 = search_knowledge(docs_engine, cfg, SearchRequest(query="graph relationships", top_k=1, hops=0))
-    r1 = search_knowledge(docs_engine, cfg, SearchRequest(query="graph relationships", top_k=1, hops=1))
-    r2 = search_knowledge(docs_engine, cfg, SearchRequest(query="graph relationships", top_k=1, hops=2))
+    r0 = search_knowledge(
+        docs_engine, cfg, SearchRequest(query="graph relationships", top_k=1, hops=0)
+    )
+    r1 = search_knowledge(
+        docs_engine, cfg, SearchRequest(query="graph relationships", top_k=1, hops=1)
+    )
+    r2 = search_knowledge(
+        docs_engine, cfg, SearchRequest(query="graph relationships", top_k=1, hops=2)
+    )
     assert {n.id for n in r0.subgraph.nodes} == {"Doc:doc-0"}
     assert {n.id for n in r1.subgraph.nodes} == {"Doc:doc-0", "Doc:doc-1"}
     assert {n.id for n in r2.subgraph.nodes} == {"Doc:doc-0", "Doc:doc-1", "Doc:doc-2"}
@@ -219,28 +233,38 @@ def test_get_context_missing_nodes_skipped(docs_engine):
 
 def test_get_context_unknown_label_raises(docs_engine):
     with pytest.raises(SchemaError) as exc_info:
-        get_context(docs_engine, docs_engine.config, ContextRequest(node_ids=["Ghost:1"]))
+        get_context(
+            docs_engine, docs_engine.config, ContextRequest(node_ids=["Ghost:1"])
+        )
     assert "Doc" in str(exc_info.value)
 
 
 def test_get_context_invalid_node_id_raises(docs_engine):
     with pytest.raises(SchemaError):
-        get_context(docs_engine, docs_engine.config, ContextRequest(node_ids=["nocolon"]))
+        get_context(
+            docs_engine, docs_engine.config, ContextRequest(node_ids=["nocolon"])
+        )
 
 
 def test_get_context_budget_truncation(docs_engine):
     cfg = docs_engine.config
     ids = ["Doc:doc-0", "Doc:doc-1", "Doc:doc-2"]
-    tight = get_context(docs_engine, cfg, ContextRequest(node_ids=ids, hops=0, token_budget=30))
+    tight = get_context(
+        docs_engine, cfg, ContextRequest(node_ids=ids, hops=0, token_budget=30)
+    )
     assert tight.truncated
     assert len(tight.included_node_ids) < 3
-    room = get_context(docs_engine, cfg, ContextRequest(node_ids=ids, hops=0, token_budget=100_000))
+    room = get_context(
+        docs_engine, cfg, ContextRequest(node_ids=ids, hops=0, token_budget=100_000)
+    )
     assert not room.truncated
     assert set(room.included_node_ids) == set(ids)
 
 
 def test_get_context_empty_ids(docs_engine):
-    resp = get_context(docs_engine, docs_engine.config, ContextRequest(node_ids=[], hops=1))
+    resp = get_context(
+        docs_engine, docs_engine.config, ContextRequest(node_ids=[], hops=1)
+    )
     assert resp.context == ""
     assert resp.subgraph.nodes == []
 
@@ -254,15 +278,15 @@ def test_get_context_accepts_bare_code_graph_ids(engine, tmp_path):
 
     pkg = tmp_path / "pkg"
     pkg.mkdir()
-    (pkg / "core.py").write_text(
-        "def helper(x):\n    return x * 2\n", encoding="utf-8"
-    )
+    (pkg / "core.py").write_text("def helper(x):\n    return x * 2\n", encoding="utf-8")
     ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
 
     bare = "pkg:core.py#helper"  # no Label prefix
     prefixed = f"Function:{bare}"
     r_bare = get_context(engine, engine.config, ContextRequest(node_ids=[bare], hops=0))
-    r_prefixed = get_context(engine, engine.config, ContextRequest(node_ids=[prefixed], hops=0))
+    r_prefixed = get_context(
+        engine, engine.config, ContextRequest(node_ids=[prefixed], hops=0)
+    )
     assert prefixed in r_bare.included_node_ids
     assert r_bare.included_node_ids == r_prefixed.included_node_ids
 
@@ -288,7 +312,9 @@ def test_search_and_context_via_service(tmp_path, monkeypatch):
         assert resp.seeds
         assert resp.seeds[0].node.id == "Doc:doc-1"
         assert {n.id for n in resp.subgraph.nodes} >= {"Doc:doc-0", "Doc:doc-1"}
-        ctx = svc.get_context(ContextRequest(node_ids=["Doc:doc-2"], hops=5))  # clamped to max_hops
+        ctx = svc.get_context(
+            ContextRequest(node_ids=["Doc:doc-2"], hops=5)
+        )  # clamped to max_hops
         assert "Doc:doc-2" in {n.id for n in ctx.subgraph.nodes}
     finally:
         svc.close()
