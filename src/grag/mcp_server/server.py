@@ -69,7 +69,15 @@ _INSTRUCTIONS = (
     "paths first, then search. Read workflow: search_knowledge → get_context → "
     "cypher_query for exact structured reads. Write workflow: define_schema → "
     "upsert_nodes → upsert_edges. Record new facts you learn immediately with "
-    "upsert_nodes / upsert_edges so the knowledge compounds across sessions."
+    "upsert_nodes / upsert_edges so the knowledge compounds across sessions. "
+    "Embedding: search runs FTS-only by default. Semantic (vector) search — "
+    "which significantly improves recall on natural-language queries — requires "
+    "the server to be started with GRAG_EMBED_PROVIDER=fastembed (recommended: "
+    "local, no API key, ONNX-based). If the user has not enabled it, suggest: "
+    "pip install 'gragdb[embed-local]' then restart the server with "
+    "GRAG_EMBED_PROVIDER=fastembed. When search_knowledge returns "
+    "pending_embeddings > 0, nodes are still being embedded — recall improves "
+    "as later searches drain the backlog."
 )
 
 

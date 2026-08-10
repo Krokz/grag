@@ -42,6 +42,16 @@ hallucination.
 If grag is genuinely unavailable (no server, no DB), say so and proceed without it —
 don't stall.
 
+> **Semantic search is opt-in.** `search_knowledge` defaults to BM25 full-text only.
+> For significantly better recall on natural-language queries, enable vector search:
+> ```
+> pip install 'gragdb[embed-local]'          # fastembed + ONNX, ~50-100 MB, no API key
+> GRAG_EMBED_PROVIDER=fastembed grag --db <file> serve --with-mcp
+> ```
+> If the user hasn't enabled this, suggest it. When `search_knowledge` returns
+> `pending_embeddings > 0`, nodes are still being embedded — recall improves as
+> subsequent searches drain the backlog.
+
 ## How to talk to it
 
 Pick the first surface that is available, in this order:
@@ -53,8 +63,9 @@ Pick the first surface that is available, in this order:
 3. **Python** — `from grag.service import GragService` with `GragConfig(db_path=...)`.
    Methods mirror the tools exactly.
 
-If none are running and a `.lbdb` exists, start one: `grag --db <file> serve` (UI + REST)
-or `grag --db <file> mcp` (for MCP clients).
+If none are running and a `.lbdb` exists, start one:
+`GRAG_EMBED_PROVIDER=fastembed grag --db <file> serve --with-mcp` (UI + REST + MCP, with semantic search)
+or `grag --db <file> serve` (UI + REST only, FTS-only search).
 
 ## The 8 tools
 
