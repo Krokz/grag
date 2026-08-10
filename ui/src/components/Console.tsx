@@ -23,6 +23,7 @@ interface Props {
   applyMode: ApplyMode;
   onApplyModeChange: (m: ApplyMode) => void;
   appliedNote: string | null;
+  height?: number;
 }
 
 export function Console({
@@ -37,6 +38,7 @@ export function Console({
   applyMode,
   onApplyModeChange,
   appliedNote,
+  height,
 }: Props) {
   const [expanded, setExpanded] = useState<ExpandedCell | null>(null);
   const table = useMemo(
@@ -44,7 +46,7 @@ export function Console({
     [result],
   );
   return (
-    <section className="console">
+    <section className="console" style={height != null ? { height } : undefined}>
       <div className="console-main">
         <div className="editor-pane">
           <div

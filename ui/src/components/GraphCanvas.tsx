@@ -191,6 +191,81 @@ export function GraphCanvas({
     ctx.fill();
   }, []);
 
+  // IDs of edges touching the selected node — used to highlight + label them.
+  const selectedEdgeIds = useMemo(() => {
+    if (!selectedId) return new Set<string>();
+    return new Set(
+      data.links
+        .filter((e) => {
+          const src = typeof e.source === 'object' ? (e.source as FgNode).id : e.source;
+          const tgt = typeof e.target === 'object' ? (e.target as FgNode).id : e.target;
+          return src === selectedId || tgt === selectedId;
+        })
+        .map((e) => e.id),
+    );
+  }, [selectedId, data.links]);
+
+  const linkColor = useCallback(
+    (link: object) => {
+      if (!selectedId) return 'rgba(107, 114, 128, 0.55)';
+      return selectedEdgeIds.has((link as EdgeRecord).id)
+        ? 'rgba(56, 189, 248, 0.85)'   // accent — highlighted edge
+        : 'rgba(107, 114, 128, 0.18)'; // dimmed
+    },
+    [selectedId, selectedEdgeIds],
+  );
+
+  const linkWidth = useCallback(
+    (link: object) =>
+      selectedId && selectedEdgeIds.has((link as EdgeRecord).id) ? 2 : 1,
+    [selectedId, selectedEdgeIds],
+  );
+
+  const drawLink = useCallback(
+    (link: object, ctx: CanvasRenderingContext2D, globalScale: number) => {
+      const e = link as EdgeRecord & { source: FgNode; target: FgNode };
+      if (!selectedEdgeIds.has(e.id)) return;
+      const sx = e.source.x ?? 0;
+      const sy = e.source.y ?? 0;
+      const tx = e.target.x ?? 0;
+      const ty = e.target.y ?? 0;
+      const mx = (sx + tx) / 2;
+      const my = (sy + ty) / 2;
+
+      const fontSize = Math.min(3.5, Math.max(2, 10 / globalScale));
+      ctx.font = `600 ${fontSize}px -apple-system, sans-serif`;
+      const text = e.type;
+      const w = ctx.measureText(text).width;
+      const pad = 1.2;
+
+      // pill background
+      ctx.fillStyle = 'rgba(14, 116, 144, 0.82)';
+      const rx = 1.5;
+      const bx = mx - w / 2 - pad;
+      const by = my - fontSize / 2 - pad;
+      const bw = w + pad * 2;
+      const bh = fontSize + pad * 2;
+      ctx.beginPath();
+      ctx.moveTo(bx + rx, by);
+      ctx.lineTo(bx + bw - rx, by);
+      ctx.quadraticCurveTo(bx + bw, by, bx + bw, by + rx);
+      ctx.lineTo(bx + bw, by + bh - rx);
+      ctx.quadraticCurveTo(bx + bw, by + bh, bx + bw - rx, by + bh);
+      ctx.lineTo(bx + rx, by + bh);
+      ctx.quadraticCurveTo(bx, by + bh, bx, by + bh - rx);
+      ctx.lineTo(bx, by + rx);
+      ctx.quadraticCurveTo(bx, by, bx + rx, by);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = '#e0f2fe';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, mx, my);
+    },
+    [selectedEdgeIds],
+  );
+
   const labels = useMemo(
     () => [...new Set(subgraph.nodes.map((n) => n.label).filter((l) => !l.startsWith('_')))].sort(),
     [subgraph],
@@ -290,10 +365,12 @@ export function GraphCanvas({
           nodeCanvasObject={drawNode}
           nodePointerAreaPaint={paintPointerArea}
           linkLabel={(link: object) => (link as EdgeRecord).type}
-          linkColor={() => 'rgba(107, 114, 128, 0.55)'}
-          linkWidth={1}
+          linkColor={linkColor}
+          linkWidth={linkWidth}
           linkDirectionalArrowLength={3.5}
           linkDirectionalArrowRelPos={1}
+          linkCanvasObjectMode={() => 'after'}
+          linkCanvasObject={drawLink}
           onNodeClick={handleClick}
           onNodeHover={(node: object | null) =>
             setHoverId(node ? (node as FgNode).id : null)

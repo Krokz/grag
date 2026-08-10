@@ -163,11 +163,40 @@ button.primary:hover {
   background: var(--ok);
 }
 
+/* ---------- resize handles ---------- */
+
+.resize-handle {
+  background: transparent;
+  flex: none;
+  z-index: 10;
+  transition: background 0.15s;
+}
+
+.resize-handle:hover,
+.resize-handle:active {
+  background: var(--accent-dim);
+}
+
+/* Vertical bar between sidebar and center — drag left/right */
+.resize-handle-x {
+  width: 4px;
+  cursor: ew-resize;
+  align-self: stretch;
+}
+
+/* Horizontal bar between graph canvas and console — drag up/down */
+.resize-handle-y {
+  height: 4px;
+  cursor: ns-resize;
+  width: 100%;
+}
+
 /* ---------- main layout ---------- */
 
 .main {
   display: grid;
-  grid-template-columns: 264px minmax(0, 1fr);
+  /* sidebar width + 4px handle + center — controlled via inline style from App */
+  grid-template-columns: 264px 4px minmax(0, 1fr);
   min-height: 0;
 }
 
@@ -579,7 +608,7 @@ pre.raw {
 /* ---------- console ---------- */
 
 .console {
-  height: 292px;
+  height: 260px; /* default; overridden by inline style from App when resizing */
   flex: none;
   border-top: 1px solid var(--border);
   background: var(--panel);

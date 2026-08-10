@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useResizable } from './hooks';
 import { api, hasToken, setDb, setToken, setUnauthorizedHandler, toFailure } from './api';
 import type {
   ApiFailure,
@@ -51,6 +52,9 @@ export default function App() {
   const tokenWasSet = hasToken(); // a 401 with a stored token means it was rejected
 
   const pkMap = useMemo(() => pkMapFromSchema(schema), [schema]);
+
+  const [sidebarWidth, sidebarHandleDown] = useResizable(264, 140, 520, 'x');
+  const [consoleHeight, consoleHandleDown] = useResizable(260, 100, 560, 'y', true);
 
   const loadSchema = useCallback(async () => {
     setSchemaLoading(true);
@@ -278,12 +282,17 @@ export default function App() {
         />
       )}
 
-      <div className="main">
+      <div className="main" style={{ gridTemplateColumns: `${sidebarWidth}px 4px minmax(0, 1fr)` }}>
         <SchemaPanel
           schema={schema}
           loading={schemaLoading}
           onRefresh={loadSchema}
           onSelectLabel={selectLabel}
+        />
+        <div
+          className="resize-handle resize-handle-x"
+          onPointerDown={sidebarHandleDown}
+          title="Drag to resize sidebar"
         />
         <div className="center">
           <GraphCanvas
@@ -309,6 +318,11 @@ export default function App() {
               onExpand={expandNode}
             />
           )}
+          <div
+            className="resize-handle resize-handle-y"
+            onPointerDown={consoleHandleDown}
+            title="Drag to resize console"
+          />
           <Console
             query={query}
             onQueryChange={setQuery}
@@ -321,6 +335,7 @@ export default function App() {
             applyMode={applyMode}
             onApplyModeChange={setApplyMode}
             appliedNote={appliedNote}
+            height={consoleHeight}
           />
         </div>
       </div>
