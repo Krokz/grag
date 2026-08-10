@@ -59,8 +59,10 @@ async def run_proxy(db_path: Path, port: int) -> None:
     from mcp.client.streamable_http import streamable_http_client
     from mcp.server.stdio import stdio_server
 
-    url = f"http://127.0.0.1:{port}/mcp/"
-    await _ensure_server(db_path, port, url)
+    mcp_url = f"http://127.0.0.1:{port}/mcp/"
+    # Ping the REST health endpoint — GET /mcp/ opens an SSE stream and hangs.
+    health_url = f"http://127.0.0.1:{port}/api/health"
+    await _ensure_server(db_path, port, health_url)
 
     async def _forward(src, dst, scope: anyio.CancelScope) -> None:
         try:
@@ -73,10 +75,14 @@ async def run_proxy(db_path: Path, port: int) -> None:
         finally:
             scope.cancel()
 
-    async with (
-        stdio_server() as (stdio_read, stdio_write),
-        streamable_http_client(url) as (http_read, http_write),
-        anyio.create_task_group() as tg,
-    ):
-        tg.start_soon(_forward, stdio_read, http_write, tg.cancel_scope)
-        tg.start_soon(_forward, http_read, stdio_write, tg.cancel_scope)
+    async with stdio_server() as (stdio_read, stdio_write):
+        async with streamable_http_client(mcp_url) as (http_read, http_write):
+            try:
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(_forward, stdio_read, http_write, tg.cancel_scope)
+                    tg.start_soon(_forward, http_read, stdio_write, tg.cancel_scope)
+            finally:
+                # Close write ends so internal cleanup tasks (post_writer,
+                # stdout_writer) see EndOfStream and exit cleanly.
+                await http_write.aclose()
+                await stdio_write.aclose()
