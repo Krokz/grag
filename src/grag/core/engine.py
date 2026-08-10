@@ -13,7 +13,9 @@ Verified LadybugDB value formats (see tests/test_engine_smoke.py):
 
 from __future__ import annotations
 
+import logging
 import queue
+import sys
 import threading
 from contextlib import suppress
 from dataclasses import dataclass
@@ -33,6 +35,8 @@ from grag.core.types import (
     Subgraph,
     make_node_id,
 )
+
+logger = logging.getLogger("grag")
 
 # Never exposed inside NodeRecord.properties: internal identifiers and bulky
 # vector payloads (retrieval reads vectors via explicit Cypher projections).
@@ -55,14 +59,11 @@ class EngineResult:
 class Engine:
     def __init__(self, config: GragConfig):
         self.config = config
+        self.wal_recovered: bool = False
         db_path = str(config.db_path)
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self._db = lb.Database(db_path, buffer_pool_size=config.buffer_pool_size)
-        except TypeError:
-            # Older/newer bindings without the buffer_pool_size kwarg.
-            self._db = lb.Database(db_path)
+        self._db = self._open_db(db_path, config)
         self._write_conn = lb.Connection(self._db)
         self._write_lock = threading.Lock()
         self._readers: queue.Queue = queue.Queue()
@@ -70,6 +71,85 @@ class Engine:
         self._readers_lock = threading.Lock()
         self._set_timeout(self._write_conn)
         self._preload_extensions()
+        if self.wal_recovered:
+            self._drop_stale_vector_indexes()
+
+    def _open_db(self, db_path: str, config: GragConfig) -> lb.Database:
+        """Open the database, offering WAL auto-recovery when a TTY is attached.
+
+        A corrupted WAL causes lb.Database() to raise. On an interactive terminal
+        we explain the consequences and ask before proceeding; non-interactive
+        callers (the API server, CI) get a log message and the original exception
+        so the operator can run 'grag reindex' deliberately.
+        """
+        try:
+            try:
+                return lb.Database(db_path, buffer_pool_size=config.buffer_pool_size)
+            except TypeError:
+                return lb.Database(db_path)
+        except Exception as exc:
+            if db_path == ":memory:" or "wal" not in str(exc).lower():
+                raise
+            if not sys.stdin.isatty():
+                logger.warning(
+                    "WAL replay failed (%s). Run 'grag reindex' to repair the database.",
+                    exc,
+                )
+                raise
+            print(
+                f"\nWARNING: WAL replay failed:\n  {exc}\n\n"
+                "Auto-recovery will reopen the database in failure-tolerant mode.\n"
+                "Writes since the last checkpoint are lost, and all HNSW vector\n"
+                "indexes will be dropped so they can be rebuilt from clean data.\n"
+                "Run 'grag reindex' afterwards to restore full search performance.\n",
+                file=sys.stderr,
+            )
+            if input("Attempt auto-recovery? [y/N]: ").strip().lower() != "y":
+                raise
+            logger.warning("WAL auto-recovery approved by user for %s", db_path)
+            self.wal_recovered = True
+            try:
+                return lb.Database(
+                    db_path,
+                    throw_on_wal_replay_failure=False,
+                    buffer_pool_size=config.buffer_pool_size,
+                )
+            except TypeError:
+                return lb.Database(db_path, throw_on_wal_replay_failure=False)
+
+    def _drop_stale_vector_indexes(self) -> None:
+        """After WAL recovery, drop all grag HNSW indexes (potentially stale).
+
+        Stale HNSW entries (nodes whose embedding writes were rolled back by WAL
+        recovery) cause SIGSEGV in LadybugDB's HNSW maintenance when a new
+        embedding write triggers a neighbor search over NULL pointers.  Dropping
+        here is safe: _ensure_vector_index() recreates the index on first search,
+        building it from the embeddings that survived recovery.
+        """
+        try:
+            res = self._run(self._write_conn, "CALL SHOW_TABLES() RETURN *", None)
+        except GragError as exc:
+            logger.warning(
+                "WAL recovery: could not list tables to drop HNSW indexes: %s", exc
+            )
+            return
+        for row in res.rows:
+            table_name = str(row[1])
+            table_type = str(row[2]).upper()
+            if table_type != "NODE":
+                continue
+            idx = f"grag_vec__{table_name}"
+            with suppress(GragError):
+                self._run(
+                    self._write_conn,
+                    f"CALL DROP_VECTOR_INDEX('{table_name}', '{idx}')",
+                    None,
+                )
+                logger.warning(
+                    "WAL recovery: dropped stale HNSW index on %s", table_name
+                )
+        with suppress(GragError):
+            self._run(self._write_conn, "CHECKPOINT", None)
 
     def _preload_extensions(self) -> None:
         """LOAD FTS and VECTOR once at startup so no operation path has to.
@@ -92,7 +172,9 @@ class Engine:
 
     # -- execution -------------------------------------------------------------
 
-    def execute(self, cypher: str, params: dict[str, Any] | None = None) -> EngineResult:
+    def execute(
+        self, cypher: str, params: dict[str, Any] | None = None
+    ) -> EngineResult:
         """Run a read query on a pooled connection."""
         conn = self._borrow_reader()
         try:
@@ -100,7 +182,9 @@ class Engine:
         finally:
             self._readers.put(conn)
 
-    def execute_write(self, cypher: str, params: dict[str, Any] | None = None) -> EngineResult:
+    def execute_write(
+        self, cypher: str, params: dict[str, Any] | None = None
+    ) -> EngineResult:
         """Run a write or DDL statement, serialized on the write connection."""
         with self._write_lock:
             return self._run(self._write_conn, cypher, params)
@@ -163,6 +247,12 @@ class Engine:
                 setter(self.config.statement_timeout_ms)
 
     def close(self) -> None:
+        # Flush the WAL to the main database file so that if the process is
+        # restarted immediately there is no WAL to replay (and no replay failure
+        # risk). Suppress failures: the write connection may already be closed or
+        # the DB may be read-only.
+        with suppress(Exception):
+            self._run(self._write_conn, "CHECKPOINT", None)
         conns = [self._write_conn]
         while True:
             try:
@@ -249,9 +339,7 @@ def edge_record_from_value(v: dict, id_of_internal: dict[tuple, str]) -> EdgeRec
     src = id_of_internal.get(_internal_key(v.get("_SRC")), _fallback_ref(v.get("_SRC")))
     dst = id_of_internal.get(_internal_key(v.get("_DST")), _fallback_ref(v.get("_DST")))
     props = {
-        k: val
-        for k, val in v.items()
-        if k not in _HIDDEN_REL_PROPS and val is not None
+        k: val for k, val in v.items() if k not in _HIDDEN_REL_PROPS and val is not None
     }
     return EdgeRecord(
         id=f"{rtype}:{src}->{dst}", type=rtype, source=src, target=dst, properties=props

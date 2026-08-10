@@ -72,15 +72,21 @@ def main(argv: list[str] | None = None) -> int:
         "ingest-code", help="ingest code structure (Repo/Module/Class/Function)"
     )
     ingest_code.add_argument("paths", nargs="+")
-    ingest_code.add_argument(
-        "--no-calls", action="store_true", help="skip CALLS edges"
-    )
+    ingest_code.add_argument("--no-calls", action="store_true", help="skip CALLS edges")
     ingest_code.add_argument(
         "--max-file-kb", type=int, default=1024, help="skip files larger than this (KB)"
     )
 
     bench = sub.add_parser("bench", help="codec benchmark (recall / latency / RSS)")
     bench.add_argument("--codec", default=None)
+
+    reindex = sub.add_parser(
+        "reindex",
+        help="drop and rebuild vector indexes from scratch (use after a crash or WAL recovery)",
+    )
+    reindex.add_argument(
+        "--batch-size", type=int, default=128, help="embedding batch size (default 128)"
+    )
 
     args = parser.parse_args(argv)
     cfg = _config(args)
@@ -99,7 +105,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "mcp":
         from grag.mcp_server.server import run
 
-        run(cfg, transport=args.transport, host=args.host, port=args.port, path=args.path)
+        run(
+            cfg,
+            transport=args.transport,
+            host=args.host,
+            port=args.port,
+            path=args.path,
+        )
     elif args.cmd == "ingest":
         from grag.ingest.loaders import ingest_paths
 
@@ -119,6 +131,23 @@ def main(argv: list[str] | None = None) -> int:
         from grag.retrieval.bench import run_bench
 
         print(run_bench(cfg, codec=args.codec))
+    elif args.cmd == "reindex":
+        from grag.core.engine import Engine
+        from grag.retrieval.vectors import node_tables, reindex_embeddings
+
+        engine = Engine(cfg)
+        try:
+            tables = node_tables(engine)
+            total = 0
+            for table in tables:
+                print(f"Reindexing {table} ...", flush=True)
+                n = reindex_embeddings(engine, cfg, table, batch_size=args.batch_size)
+                print(f"  {table}: {n} node(s) re-embedded")
+                total += n
+            engine.execute_write("CHECKPOINT")
+            print(f"\nDone. {total} node(s) re-embedded across {len(tables)} table(s).")
+        finally:
+            engine.close()
     return 0
 
 

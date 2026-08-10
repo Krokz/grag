@@ -49,7 +49,11 @@ class FakeEmbedder:
 
 
 DOCS = [
-    ("doc-0", "graph databases", "graph databases store relationships between entities"),
+    (
+        "doc-0",
+        "graph databases",
+        "graph databases store relationships between entities",
+    ),
     ("doc-1", "vector search", "vector embeddings enable semantic retrieval"),
     ("doc-2", "context packing", "token budgets matter for llm prompts"),
 ]
@@ -268,7 +272,11 @@ def test_embed_pending_nodes_fills_columns(vengine, vconfig, codec):
         f"d.{EMBEDDING_PROP}"
     )
     assert len(res.rows) == 3
-    expected_code_len = {"fp32": 4 * FAKE_DIM, "int8": 4 + FAKE_DIM, "binary": FAKE_DIM // 8}
+    expected_code_len = {
+        "fp32": 4 * FAKE_DIM,
+        "int8": 4 + FAKE_DIM,
+        "binary": FAKE_DIM // 8,
+    }
     for _id, r, code, model, emb in res.rows:
         assert r > 0
         assert model == f"fake-hash-{FAKE_DIM}"
@@ -306,13 +314,36 @@ def test_pending_embedding_count_without_vector_columns(engine):
     assert vectors.pending_embedding_count(engine, engine.config, "Doc") == 0
 
 
+def test_reindex_embeddings_embeds_all_nodes(vengine, vconfig):
+    # Initial call: no embeddings exist yet — reindex embeds all 3 docs.
+    n = vectors.reindex_embeddings(vengine, vconfig, "Doc")
+    assert n == 3
+    assert vectors.pending_embedding_count(vengine, vconfig, "Doc") == 0
+
+
+def test_reindex_embeddings_clears_and_rebuilds(vengine, vconfig):
+    # Pre-embed normally, then reindex — must clear and re-embed all nodes.
+    vectors.embed_pending_nodes(vengine, vconfig, "Doc")
+    assert vectors.pending_embedding_count(vengine, vconfig, "Doc") == 0
+
+    n = vectors.reindex_embeddings(vengine, vconfig, "Doc")
+    assert n == 3
+    assert vectors.pending_embedding_count(vengine, vconfig, "Doc") == 0
+
+
+def test_reindex_embeddings_no_embedder(engine):
+    assert vectors.reindex_embeddings(engine, engine.config, "Doc") == 0
+
+
 # --- vector candidates ----------------------------------------------------------
 
 
 @pytest.mark.parametrize("codec", ["fp32", "int8", "binary"])
 def test_vector_candidates_finds_semantic_doc(vengine, vconfig, codec):
     vconfig.vector_codec = codec
-    hits = vectors.vector_candidates(vengine, vconfig, "semantic vector retrieval", None, 2)
+    hits = vectors.vector_candidates(
+        vengine, vconfig, "semantic vector retrieval", None, 2
+    )
     assert hits
     assert hits[0].node.id == "Doc:doc-1"
     assert all(h.match == "vector" for h in hits)
@@ -325,9 +356,16 @@ def test_vector_candidates_no_embedder_returns_empty(engine):
 
 
 def test_vector_candidates_labels_filter(vengine, vconfig):
-    hits = vectors.vector_candidates(vengine, vconfig, "semantic vector retrieval", ["Doc", "Nope"], 3)
+    hits = vectors.vector_candidates(
+        vengine, vconfig, "semantic vector retrieval", ["Doc", "Nope"], 3
+    )
     assert hits and hits[0].node.id == "Doc:doc-1"
-    assert vectors.vector_candidates(vengine, vconfig, "semantic vector retrieval", ["Nope"], 3) == []
+    assert (
+        vectors.vector_candidates(
+            vengine, vconfig, "semantic vector retrieval", ["Nope"], 3
+        )
+        == []
+    )
 
 
 def test_vector_candidates_exact_scan_fallback(vengine, vconfig, monkeypatch):
@@ -337,7 +375,9 @@ def test_vector_candidates_exact_scan_fallback(vengine, vconfig, monkeypatch):
         raise GragError("vector index unavailable in this build")
 
     monkeypatch.setattr(vectors, "_query_vector_index", boom)
-    hits = vectors.vector_candidates(vengine, vconfig, "semantic vector retrieval", None, 2)
+    hits = vectors.vector_candidates(
+        vengine, vconfig, "semantic vector retrieval", None, 2
+    )
     assert hits and hits[0].node.id == "Doc:doc-1"
 
 
@@ -366,7 +406,9 @@ def test_codec_candidates_fetch_full_nodes_only_for_shortlist(
         return orig_execute(cypher, params)
 
     monkeypatch.setattr(vengine, "execute", spy)
-    hits = vectors.vector_candidates(vengine, vconfig, "semantic vector retrieval", None, 1)
+    hits = vectors.vector_candidates(
+        vengine, vconfig, "semantic vector retrieval", None, 1
+    )
     assert hits and hits[0].node.id == "Doc:doc-1"
     doc_matches = [c for c in seen if c.strip().startswith("MATCH (n:Doc)")]
     bare_node_returns = [
@@ -380,6 +422,8 @@ def test_codec_candidates_fetch_full_nodes_only_for_shortlist(
 
 def test_vector_candidates_caps_in_request_embedding(vengine, vconfig):
     vconfig.max_embed_per_search = 2
-    hits = vectors.vector_candidates(vengine, vconfig, "semantic vector retrieval", None, 2)
+    hits = vectors.vector_candidates(
+        vengine, vconfig, "semantic vector retrieval", None, 2
+    )
     assert hits  # the capped batch is already searchable
     assert vectors.pending_embedding_count(vengine, vconfig, "Doc") == 1

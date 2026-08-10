@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import weakref
 from typing import Any, Protocol
 
@@ -80,14 +81,27 @@ class FastembedEmbedder:
                 "fastembed is not installed.",
                 hint="Install the local embedding extra: pip install gragdb[embed-local]",
             ) from exc
-        self._model = TextEmbedding(model_name=cfg.model)
+        # threads=1: restrict ONNX Runtime to single-threaded (both intra-op and
+        # inter-op). The default (one thread per CPU core) causes SIGSEGV on
+        # macOS arm64 with onnxruntime 1.28.x, even on the first inference call.
+        # enable_cpu_mem_arena=False: disable the memory arena allocator, another
+        # source of instability observed on macOS with recent ONNX versions.
+        self._model = TextEmbedding(
+            model_name=cfg.model,
+            threads=1,
+            enable_cpu_mem_arena=False,
+        )
         self.dim = cfg.dim
         self.model_id = cfg.model
+        # Belt-and-suspenders: serialize Python-level calls even though threads=1
+        # means only one ONNX thread exists. Guards against future thread-count changes.
+        self._lock = threading.Lock()
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        return [[float(x) for x in vec] for vec in self._model.embed(texts)]
+        with self._lock:
+            return [[float(x) for x in vec] for vec in self._model.embed(texts)]
 
 
 class RemoteEmbedder:
@@ -276,7 +290,9 @@ def candidate_scores(codes: list[bytes], codec: str, u_query: np.ndarray) -> np.
         Q = np.stack([np.frombuffer(bytes(c[4:]), dtype=np.int8) for c in codes])
         return (Q.astype(np.float32) @ uq) * (scales / 127.0)
     if codec == "polar":
-        M = polar.reconstruct_many([bytes(c) for c in codes], dim, _polar_bits_per_dim())
+        M = polar.reconstruct_many(
+            [bytes(c) for c in codes], dim, _polar_bits_per_dim()
+        )
         return (M @ uq).astype(np.float32)
     nbytes = (dim + 7) // 8
     C = np.stack([np.frombuffer(bytes(c), dtype=np.uint8) for c in codes])
@@ -403,7 +419,9 @@ def string_props(engine: Engine, table: str) -> list[str]:
 # extension + index bookkeeping
 # ---------------------------------------------------------------------------
 
-_LOADED_EXTENSIONS: weakref.WeakKeyDictionary[Engine, set[str]] = weakref.WeakKeyDictionary()
+_LOADED_EXTENSIONS: weakref.WeakKeyDictionary[Engine, set[str]] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _ensure_extension(engine: Engine, name: str) -> None:
@@ -487,9 +505,7 @@ def ensure_vector_storage(engine: Engine, config: GragConfig, table: str) -> Non
             kind = "BLOB"
         CODE_COLUMN_KINDS[(str(config.db_path), table)] = kind
     if EMB_MODEL_PROP not in existing:
-        engine.execute_write(
-            f"ALTER TABLE {_ident(table)} ADD {EMB_MODEL_PROP} STRING"
-        )
+        engine.execute_write(f"ALTER TABLE {_ident(table)} ADD {EMB_MODEL_PROP} STRING")
 
 
 def embed_pending_nodes(
@@ -530,7 +546,9 @@ def embed_pending_nodes(
     text_props = [
         p
         for p, t in props.items()
-        if t.upper() == "STRING" and not p.startswith(RESERVED_PREFIX) and p not in VECTOR_PROPS
+        if t.upper() == "STRING"
+        and not p.startswith(RESERVED_PREFIX)
+        and p not in VECTOR_PROPS
     ]
     code_kind = props.get(EMB_CODE_PROP, "UINT8[]").upper()
     projection = f"n.{_ident(pk)}"
@@ -599,6 +617,62 @@ def pending_embedding_count(engine: Engine, config: GragConfig, table: str) -> i
         f"MATCH (n:{_ident(table)}) WHERE n.{EMBEDDING_PROP} IS NULL RETURN count(n)"
     )
     return int(res.rows[0][0]) if res.rows else 0
+
+
+def reindex_embeddings(
+    engine: Engine,
+    config: GragConfig,
+    table: str,
+    batch_size: int = 128,
+) -> int:
+    """Drop the HNSW vector index, clear all embeddings, and re-embed all nodes.
+
+    Safe to call after WAL recovery when the HNSW index may reference nodes
+    whose embedding writes were rolled back. Dropping the index before any write
+    to the embedding column prevents LadybugDB's HNSW auto-maintenance from
+    dereferencing stale NULL embedding handles — the mechanism that causes
+    SIGSEGV in simsimd_cos_f32_neon.
+
+    Sequence: drop index → clear embeddings → embed all nodes (no HNSW fires
+    during writes) → recreate index from clean data.
+
+    Returns the number of nodes re-embedded; 0 if no embedder is configured.
+    """
+    if config.embedder is None:
+        return 0
+    _ident(table)
+    _ensure_extension(engine, "VECTOR")
+    index = vector_index_name(table)
+    try:
+        engine.execute_write(f"CALL DROP_VECTOR_INDEX('{_ident(table)}', '{index}')")
+    except GragError as exc:
+        # Tolerate "doesn't have an index with name" (index never existed or
+        # was already dropped) — the goal is to ensure it's gone before writes.
+        if (
+            "doesn't have" not in str(exc).lower()
+            and "not exist" not in str(exc).lower()
+        ):
+            raise
+    # Invalidate the process-local set so _ensure_vector_index recreates the index.
+    ensured = _VEC_INDEXES.get(engine)
+    if ensured is not None:
+        ensured.discard(index)
+    ensure_vector_storage(engine, config, table)
+    props = table_properties(engine, table)
+    to_clear = [
+        p
+        for p in (EMBEDDING_PROP, EMB_MAGNITUDE_PROP, EMB_CODE_PROP, EMB_MODEL_PROP)
+        if p in props
+    ]
+    if to_clear:
+        sets = ", ".join(f"n.{_ident(p)} = NULL" for p in to_clear)
+        engine.execute_write(f"MATCH (n:{_ident(table)}) SET {sets}")
+    n = embed_pending_nodes(
+        engine, config, table, batch_size=batch_size, max_nodes=None
+    )
+    if config.vector_codec == "fp32" and n > 0:
+        _ensure_vector_index(engine, table, index)
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +771,9 @@ def _fp32_candidates(
     for node_val, dist in res.rows:
         score = max(-1.0, min(1.0, 1.0 - float(dist)))
         out.append(
-            ScoredNode(node=node_record_from_value(node_val, pk), score=score, match="vector")
+            ScoredNode(
+                node=node_record_from_value(node_val, pk), score=score, match="vector"
+            )
         )
     return out
 
@@ -743,9 +819,7 @@ def _exact_scan(
     order = np.argsort(-scores)[:top_k]
     by_key = {
         nv.get(pk_prop): nv
-        for nv in _fetch_nodes_by_keys(
-            engine, table, pk_prop, [keys[i] for i in order]
-        )
+        for nv in _fetch_nodes_by_keys(engine, table, pk_prop, [keys[i] for i in order])
     }
     out = []
     for i in order:
@@ -795,9 +869,7 @@ def _codec_candidates(
     approx = candidate_scores(codes, codec, u_q)
     pre = np.argsort(-approx)[: 4 * top_k]
     nodes, vecs = [], []
-    for nv in _fetch_nodes_by_keys(
-        engine, table, pk_prop, [keys[i] for i in pre]
-    ):
+    for nv in _fetch_nodes_by_keys(engine, table, pk_prop, [keys[i] for i in pre]):
         emb = nv.get(EMBEDDING_PROP)
         if emb is None:
             continue
