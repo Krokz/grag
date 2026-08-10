@@ -75,7 +75,7 @@ async def run_proxy(db_path: Path, port: int) -> None:
         finally:
             scope.cancel()
 
-    async with stdio_server() as (stdio_read, stdio_write):
+    async with stdio_server() as (stdio_read, stdio_write):  # noqa: SIM117
         async with streamable_http_client(mcp_url) as (http_read, http_write):
             try:
                 async with anyio.create_task_group() as tg:
