@@ -63,11 +63,13 @@ _F = TypeVar("_F", bound=Callable[..., str])
 _COMPACT = (",", ":")  # json.dumps separators: tools return token-lean JSON
 
 _INSTRUCTIONS = (
-    "grag is a graph knowledgebase. Typical workflow: describe_schema to see "
-    "tables; define_schema to create new ones; upsert_nodes / upsert_edges to "
-    "write; search_knowledge to find relevant nodes by text; get_context to "
-    "expand known node ids; cypher_query for exact read-only lookups; "
-    "ingest_code to index a codebase's structure (Repo/Module/Class/Function)."
+    "Always call search_knowledge before answering any question about this "
+    "project's code, architecture, entities, or history — even when you think "
+    "you already know. On an unfamiliar repository, call ingest_code on the "
+    "paths first, then search. Read workflow: search_knowledge → get_context → "
+    "cypher_query for exact structured reads. Write workflow: define_schema → "
+    "upsert_nodes → upsert_edges. Record new facts you learn immediately with "
+    "upsert_nodes / upsert_edges so the knowledge compounds across sessions."
 )
 
 
@@ -171,7 +173,8 @@ def define_schema(
 
 @_return_errors
 def upsert_nodes(service: GragService, nodes: list[dict]) -> str:
-    """Create or update nodes. Identity is (label, key) where key is the
+    """Record facts you discover about the project. Create or update nodes.
+    Identity is (label, key) where key is the
     table's primary-key value: an existing key merges properties, a new key
     creates the node, so re-upserts are idempotent. Properties not declared on
     the table are skipped with a warning (declare them via define_schema
@@ -196,7 +199,8 @@ def upsert_nodes(service: GragService, nodes: list[dict]) -> str:
 
 @_return_errors
 def upsert_edges(service: GragService, edges: list[dict]) -> str:
-    """Create or update relationships between existing nodes. Both endpoint
+    """Record relationships between facts you discover. Create or update
+    relationships between existing nodes. Both endpoint
     nodes must exist already (upsert_nodes first) and the direction must match
     the rel table's declared from/to labels. Identity is (type, from, to), so
     re-upserting the same edge merges properties idempotently.
@@ -257,12 +261,12 @@ def search_knowledge(
     labels: list[str] | None = None,
     token_budget: int | None = None,
 ) -> str:
-    """Search the knowledge graph for information relevant to a natural-language
-    query: full-text seeds (plus vector seeds if an embedder is configured),
-    k-hop graph expansion, packed into a token budget. This is the primary
-    "what do we know about X?" tool — use it when you don't know exact node
-    ids. Use get_context when you already have ids; use cypher_query for
-    exact structured reads.
+    """Call this first for any question about what exists in the knowledge
+    graph — even when you think you already know. Full-text seeds (plus vector
+    seeds if an embedder is configured), k-hop graph expansion, packed into a
+    token budget. This is the primary "what do we know about X?" tool — use it
+    when you don't know exact node ids. Use get_context when you already have
+    ids; use cypher_query for exact structured reads.
 
     Args:
         query: free-text query, e.g. "payment outage postmortem".
@@ -282,7 +286,11 @@ def search_knowledge(
     """
     resp = service.search_knowledge(
         SearchRequest(
-            query=query, top_k=top_k, hops=hops, labels=labels, token_budget=token_budget
+            query=query,
+            top_k=top_k,
+            hops=hops,
+            labels=labels,
+            token_budget=token_budget,
         )
     )
     payload: dict[str, Any] = {
@@ -332,7 +340,8 @@ def ingest_code(
     calls: bool = True,
     max_file_kb: int = 1024,
 ) -> str:
-    """Index the STRUCTURE of one or more code repositories into the graph:
+    """Call this on any repository or file tree before answering questions about
+    its code structure. Indexes the STRUCTURE of one or more code repositories into the graph:
     Repo/Module/Class/Function nodes (path, line range, signature, docstring —
     never source bodies) plus CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Use it
     to answer "what calls X / what inherits from Y / what does module Z
@@ -454,7 +463,9 @@ def create_server(
         token_budget: int | None = None,
         ctx: Context | None = None,
     ) -> str:
-        return get_context(_resolve_service(registry, ctx), node_ids, hops, token_budget)
+        return get_context(
+            _resolve_service(registry, ctx), node_ids, hops, token_budget
+        )
 
     @server.tool(name="ingest_code", description=_doc(ingest_code))
     @_return_errors

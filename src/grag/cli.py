@@ -88,6 +88,32 @@ def main(argv: list[str] | None = None) -> int:
         "--batch-size", type=int, default=128, help="embedding batch size (default 128)"
     )
 
+    init = sub.add_parser(
+        "init",
+        help="register grag with your LLM client (MCP config) and update CLAUDE.md",
+    )
+    init.add_argument(
+        "--client",
+        default="auto",
+        choices=["auto", "claude", "cursor", "windsurf", "zed"],
+        help="LLM client to configure (default: auto-detect)",
+    )
+    init.add_argument(
+        "--no-mcp",
+        action="store_true",
+        help="skip MCP config — only update CLAUDE.md",
+    )
+    init.add_argument(
+        "--no-claude-md",
+        action="store_true",
+        help="skip CLAUDE.md — only write MCP config",
+    )
+    init.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show what would be written without writing anything",
+    )
+
     args = parser.parse_args(argv)
     cfg = _config(args)
 
@@ -148,6 +174,48 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nDone. {total} node(s) re-embedded across {len(tables)} table(s).")
         finally:
             engine.close()
+    elif args.cmd == "init":
+        from grag.project import (
+            SkipOp,
+            WriteOp,
+            apply_ops,
+            detect_clients,
+            plan_claude_md_op,
+            plan_mcp_ops,
+        )
+
+        project_root = Path.cwd()
+        # Explicit --db wins; otherwise default to ~/.grag/<project-name>.lbdb
+        if getattr(args, "db", None):
+            db_path = Path(args.db).resolve()
+        else:
+            db_path = Path.home() / ".grag" / f"{project_root.name}.lbdb"
+
+        clients = (
+            detect_clients(project_root) if args.client == "auto" else [args.client]
+        )
+
+        ops: list[WriteOp | SkipOp] = []
+        if not args.no_mcp:
+            ops.extend(plan_mcp_ops(clients, project_root, db_path))
+        if not args.no_claude_md:
+            ops.append(plan_claude_md_op(project_root, db_path))
+
+        if not ops:
+            print("Nothing to do (both --no-mcp and --no-claude-md were given).")
+            return 0
+
+        if args.dry_run:
+            print("Would write (dry run):")
+            for op in ops:
+                if isinstance(op, SkipOp):
+                    print(f"  skip:   {op.path}  ({op.reason})")
+                else:
+                    verb = "create" if op.created else "update"
+                    print(f"  {verb}: {op.path}")
+        else:
+            print("Writing:")
+            apply_ops(ops)
     return 0
 
 
