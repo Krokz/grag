@@ -50,8 +50,22 @@ def _dump_json(data: dict) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
-def _stdio_entry(db_path: Path) -> dict:
-    return {"command": _grag_bin(), "args": ["--db", str(db_path.resolve()), "mcp"]}
+def _stdio_entry(db_path: Path, port: int = 8471) -> dict:
+    """Stdio entry with --auto-serve: starts grag serve --with-mcp if needed, then proxies.
+
+    The proxy process holds no write lock, so the browser UI and LLM tools work simultaneously.
+    """
+    return {
+        "command": _grag_bin(),
+        "args": [
+            "--db",
+            str(db_path.resolve()),
+            "mcp",
+            "--auto-serve",
+            "--port",
+            str(port),
+        ],
+    }
 
 
 def _url_entry(port: int) -> dict:
@@ -86,7 +100,7 @@ def _op_claude(project_root: Path, db_path: Path, stdio: bool, port: int) -> Wri
     path = project_root / ".mcp.json"
     data = _load_json(path)
     data.setdefault("mcpServers", {})["grag"] = (
-        _stdio_entry(db_path) if stdio else _url_entry(port)
+        _stdio_entry(db_path, port) if stdio else _url_entry(port)
     )
     return WriteOp(path, _dump_json(data), not path.exists())
 
@@ -95,7 +109,7 @@ def _op_cursor(project_root: Path, db_path: Path, stdio: bool, port: int) -> Wri
     path = project_root / ".cursor" / "mcp.json"
     data = _load_json(path)
     data.setdefault("mcpServers", {})["grag"] = (
-        _stdio_entry(db_path) if stdio else _url_entry(port)
+        _stdio_entry(db_path, port) if stdio else _url_entry(port)
     )
     return WriteOp(path, _dump_json(data), not path.exists())
 
@@ -104,12 +118,12 @@ def _op_windsurf(db_path: Path, stdio: bool, port: int) -> WriteOp:
     path = Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
     data = _load_json(path)
     data.setdefault("mcpServers", {})["grag"] = (
-        _stdio_entry(db_path) if stdio else _url_entry(port)
+        _stdio_entry(db_path, port) if stdio else _url_entry(port)
     )
     return WriteOp(path, _dump_json(data), not path.exists())
 
 
-def _op_zed(db_path: Path) -> WriteOp | SkipOp:
+def _op_zed(db_path: Path, port: int = 8471) -> WriteOp | SkipOp:
     """Zed context_servers only support stdio; always writes stdio regardless of transport mode.
 
     Also skips when settings.json contains JSONC comments — merge would lose them.
@@ -118,7 +132,7 @@ def _op_zed(db_path: Path) -> WriteOp | SkipOp:
     if path.exists():
         raw = path.read_text(encoding="utf-8")
         if "//" in raw or "/*" in raw:
-            entry = _stdio_entry(db_path)
+            entry = _stdio_entry(db_path, port)
             snippet = json.dumps(
                 {
                     "context_servers": {
@@ -137,7 +151,7 @@ def _op_zed(db_path: Path) -> WriteOp | SkipOp:
         data = _load_json(path)
     else:
         data = {}
-    entry = _stdio_entry(db_path)
+    entry = _stdio_entry(db_path, port)
     data.setdefault("context_servers", {})["grag"] = {
         "command": {"path": entry["command"], "args": entry["args"]}
     }
@@ -172,19 +186,20 @@ def plan_mcp_ops(
     project_root: Path,
     db_path: Path,
     *,
-    stdio: bool = False,
+    stdio: bool = True,
     port: int = 8471,
 ) -> list[WriteOp | SkipOp]:
     """Plan MCP config write-ops.
 
-    Default transport is URL (http://127.0.0.1:<port>/mcp/) — requires one
-    'grag serve --with-mcp' process to be running, but avoids write-lock
-    conflicts when the browser UI and an LLM client both need simultaneous
-    access to the same .lbdb.
+    Default transport is stdio with ``--auto-serve``: the client starts
+    ``grag mcp --auto-serve`` which auto-starts ``grag serve --with-mcp``
+    as a background daemon if it is not running, then proxies the stdio
+    connection to it.  The proxy holds no write lock, so the browser UI and
+    LLM tools work simultaneously.
 
-    Pass stdio=True for the simpler single-client stdio mode: the client
-    starts 'grag mcp' automatically, but holding the write lock means no
-    other process (including 'grag serve') can open the same file.
+    Pass ``stdio=False`` for explicit URL transport: writes ``{"url": "http://..."}``
+    and requires the user to start ``grag serve --with-mcp`` manually before
+    connecting.
     """
     ops: list[WriteOp | SkipOp] = []
     for client in clients:
@@ -195,7 +210,7 @@ def plan_mcp_ops(
         elif client == "windsurf":
             ops.append(_op_windsurf(db_path, stdio, port))
         elif client == "zed":
-            ops.append(_op_zed(db_path))  # Zed context_servers are stdio-only
+            ops.append(_op_zed(db_path, port))  # Zed context_servers are stdio-only
     return ops
 
 
@@ -210,8 +225,7 @@ def _claude_md_block(db_path: Path, port: int = 8471) -> str:
         f"{_BLOCK_START}\n"
         "## grag\n\n"
         f"Database: `{db}`  \n"
-        f"Start: `GRAG_EMBED_PROVIDER=fastembed grag --db {db} serve --with-mcp --port {port}`  \n"
-        f"MCP endpoint: `http://127.0.0.1:{port}/mcp/` (Claude Code connects here automatically)\n\n"
+        f"Run: `GRAG_EMBED_PROVIDER=fastembed grag --db {db} serve --with-mcp --port {port}`\n\n"
         "**Always call `search_knowledge` before answering questions about this project.**  \n"
         "Unfamiliar code: `ingest_code` first. New facts: `upsert_nodes` / `upsert_edges`.\n"
         f"{_BLOCK_END}"

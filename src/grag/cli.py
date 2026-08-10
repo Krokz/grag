@@ -60,9 +60,23 @@ def main(argv: list[str] | None = None) -> int:
         "streamable-http (one shared server many clients connect to)",
     )
     mcp.add_argument("--host", default="127.0.0.1")
-    mcp.add_argument("--port", type=int, default=8472)
+    mcp.add_argument(
+        "--port",
+        type=int,
+        default=8471,
+        help="port for streamable-http transport or the --auto-serve target port (default 8471)",
+    )
     mcp.add_argument(
         "--path", default="/mcp", help="HTTP endpoint path (streamable-http)"
+    )
+    mcp.add_argument(
+        "--auto-serve",
+        action="store_true",
+        help=(
+            "proxy stdio to 'grag serve --with-mcp' at --port, starting it as a "
+            "background daemon if not already running; the proxy holds no write lock "
+            "so the browser UI and LLM tools work simultaneously"
+        ),
     )
 
     ingest = sub.add_parser("ingest", help="ingest files into the graph")
@@ -105,12 +119,12 @@ def main(argv: list[str] | None = None) -> int:
         help="port for the grag serve --with-mcp server (default 8471, used in the MCP URL)",
     )
     init.add_argument(
-        "--stdio",
+        "--url",
         action="store_true",
         help=(
-            "write stdio transport instead of URL — the client starts 'grag mcp' "
-            "automatically but holds the write lock, preventing 'grag serve' on the "
-            "same file. Prefer URL (default) when you also want the browser UI."
+            "write URL transport instead of stdio+auto-serve — requires 'grag serve "
+            "--with-mcp' to be running before the LLM client connects; the client "
+            "will not auto-start grag."
         ),
     )
     init.add_argument(
@@ -144,15 +158,22 @@ def main(argv: list[str] | None = None) -> int:
         cfg.host = args.host
         uvicorn.run(create_app(cfg), host=args.host, port=args.port, workers=1)
     elif args.cmd == "mcp":
-        from grag.mcp_server.server import run
+        if getattr(args, "auto_serve", False):
+            import asyncio
 
-        run(
-            cfg,
-            transport=args.transport,
-            host=args.host,
-            port=args.port,
-            path=args.path,
-        )
+            from grag.proxy import run_proxy
+
+            asyncio.run(run_proxy(cfg.db_path, args.port))
+        else:
+            from grag.mcp_server.server import run
+
+            run(
+                cfg,
+                transport=args.transport,
+                host=args.host,
+                port=args.port,
+                path=args.path,
+            )
     elif args.cmd == "ingest":
         from grag.ingest.loaders import ingest_paths
 
@@ -217,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
                     clients,
                     project_root,
                     db_path,
-                    stdio=args.stdio,
+                    stdio=not args.url,
                     port=args.port,
                 )
             )
