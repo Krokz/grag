@@ -253,9 +253,97 @@ Two honest costs of the codec path: candidate generation for non-fp32 codecs is 
 
 ## Configuration
 
-Env vars: `GRAG_DB_PATH`, `GRAG_DB_DIR`, `GRAG_BUFFER_POOL_MB` (default 256), `GRAG_VECTOR_CODEC`, `GRAG_TOKEN_BUDGET`, `GRAG_SEARCH_LABEL_CAP`, `GRAG_MAX_EMBED_PER_SEARCH` (default 256), `GRAG_API_TOKEN`, `GRAG_CORS_ORIGINS`, `GRAG_EMBED_PROVIDER` (`fastembed`|`remote`), `GRAG_EMBED_MODEL`, `GRAG_EMBED_DIM`, `GRAG_EMBED_BASE_URL`, `GRAG_EMBED_API_KEY_ENV`.
+The CLI starts from `GragConfig.from_env()`, then an explicitly supplied CLI
+option wins where that command offers one. Constructing `GragConfig(...)` in Python
+uses the values you pass plus the model defaults; it does **not** read the environment
+unless you call `GragConfig.from_env()`.
 
-`GRAG_SEARCH_LABEL_CAP` (default `2`) is the per-label diversity cap on `search_knowledge`: no single node label may occupy more than this many of the fused top_k seeds before other labels get a turn (leftover slots then backfill by rank). It stops a large table — e.g. an ingested repo's `Function` nodes — from crowding out knowledge tables (`Decision`/`Concept`) on a general query. Set `0` to disable and get pure RRF rank order.
+### Environment variables
+
+| Variable | Accepted values | Default | What it affects |
+|---|---|---|---|
+| `GRAG_DB_PATH` | Filesystem path | `knowledge.lbdb` | Database used in single-database mode. In multi-db mode, its filename identifies the preferred default database. Overridden by global CLI option `--db`. |
+| `GRAG_DB_DIR` | Directory path | unset | Enables multi-database mode: short database names resolve to `<dir>/<name>.lbdb`. Overridden by global CLI option `--db-dir`. |
+| `GRAG_BUFFER_POOL_MB` | Integer MiB | `256` | LadybugDB buffer-pool memory. Raise it for large imports/index builds; lower it to reduce resident-memory pressure. This is not the database file size. |
+| `GRAG_TOKEN_BUDGET` | Integer | `2000` | Default maximum token budget used when packing cited context for `search_knowledge`/`get_context`; request-level `token_budget` wins. |
+| `GRAG_SEARCH_LABEL_CAP` | Integer | `2` | Maximum fused search seeds contributed by one node label before other labels get a turn. Prevents large tables such as `Function` from crowding out `Decision`/`Concept`. Set `0` or a negative value to disable diversity capping and use pure fused rank order. |
+| `GRAG_VECTOR_CODEC` | `fp32`, `int8`, `binary`, `polar` | `fp32` | Storage/candidate-generation codec for newly embedded vectors. `fp32` uses native HNSW; compressed codecs scan compact codes for candidates and exactly rescore shortlisted fp32 vectors. Keep this consistent with existing stored codes or reindex. |
+| `GRAG_POLAR_BITS_PER_DIM` | Float in `(0, 8]` | `1.0` | Approximate angular bits per vector dimension when `GRAG_VECTOR_CODEC=polar`. Higher values improve reconstruction at the cost of larger codes. Read directly by the polar codec. |
+| `GRAG_MAX_EMBED_PER_SEARCH` | Non-negative integer | `256` | Maximum pending nodes embedded synchronously by one search. Remaining work is reported as `pending_embeddings` and drains over later searches. Ingest operations embed their own writes in full. |
+| `GRAG_EMBED_PROVIDER` | `fastembed` or `remote` | unset | Enables vector search. Unset means BM25/FTS-only retrieval. `fastembed` is local; `remote` sends embedding input to the configured OpenAI-compatible service. |
+| `GRAG_EMBED_MODEL` | Provider model name | `BAAI/bge-small-en-v1.5` | Embedding model identifier, used only when `GRAG_EMBED_PROVIDER` is set. Changing it invalidates/rebuilds affected embeddings lazily. |
+| `GRAG_EMBED_DIM` | Positive integer | `384` | Embedding vector width. It must match the selected model's actual output dimension and the stored vector column. |
+| `GRAG_EMBED_BASE_URL` | URL | unset | OpenAI-compatible endpoint root for the `remote` provider; required when using a remote embedding service. |
+| `GRAG_EMBED_API_KEY_ENV` | Name of another environment variable | unset | Tells the remote provider which environment variable contains its bearer API key. This value is a variable **name**, not the secret itself. No authorization header is sent when unset. |
+| `GRAG_API_TOKEN` | Non-empty bearer token | unset | Requires `Authorization: Bearer <token>` on REST routes except `/api/health`, and on HTTP MCP. A non-loopback standalone HTTP MCP bind is rejected when this is unset. The built-in UI stores a supplied token in that browser only. |
+| `GRAG_CORS_ORIGINS` | Comma-separated origins | unset (no cross-origin access) | Adds allowed browser origins for separately hosted clients, for example `https://app.example.com,http://localhost:5173`. The built-in same-origin UI needs no entry; credentials remain disabled. |
+
+Embedding-specific variables are ignored until `GRAG_EMBED_PROVIDER` is set. For
+local semantic search, install the optional dependency first:
+
+```bash
+pip install 'gragdb[embed-local]'
+GRAG_EMBED_PROVIDER=fastembed grag --db knowledge.lbdb serve
+```
+
+### Python-only `GragConfig` options
+
+These controls currently have no `GRAG_*` environment equivalent. Pass them when
+embedding grag as a Python library; the CLI exposes the server-related subset shown
+in the next table.
+
+| `GragConfig` field | Type | Default | What it affects |
+|---|---|---|---|
+| `max_read_conns` | `int` | `4` | Maximum pooled read connections. Writes still serialize through one write connection. |
+| `default_query_limit` | `int` | `100` | Row limit applied when a query/request does not provide one. |
+| `max_query_limit` | `int` | `1000` | Server-side ceiling for requested query/search limits. |
+| `max_hops` | `int` | `3` | Maximum graph-expansion depth accepted by retrieval/context requests. |
+| `statement_timeout_ms` | `int` | `30000` | Maximum LadybugDB statement execution time in milliseconds. |
+| `mcp_path` | `str \| None` | `None` | Mounts streamable HTTP MCP into the REST/UI app at this path. `None` leaves MCP unmounted. CLI equivalent: `serve --with-mcp --mcp-path /mcp`. |
+| `host` | `str` | `127.0.0.1` | Expected bind host used by Host-header/DNS-rebinding allow-lists. The CLI's `serve --host` or `mcp --host` sets the runtime bind. |
+
+The remaining `GragConfig` fields map directly to the environment table:
+`db_path`, `db_dir`, `buffer_pool_size` (bytes rather than MiB),
+`default_token_budget`, `search_label_cap`, `vector_codec`, `embedder`,
+`api_token`, `cors_origins`, and `max_embed_per_search`. `EmbedderConfig` contains
+`provider`, `model`, `dim`, `base_url`, and `api_key_env`, with the same meanings and
+defaults listed above.
+
+### CLI options
+
+Use `grag --help` and `grag <command> --help` for the authoritative command syntax.
+The configuration-affecting options are:
+
+| Command/option | Default | What it affects |
+|---|---|---|
+| global `--db PATH` | `GRAG_DB_PATH` or `knowledge.lbdb` | Selects one database file for any command. Mutually exclusive with `--db-dir`. |
+| global `--db-dir DIR` | `GRAG_DB_DIR` or unset | Selects a directory of databases for multi-db serving. Mutually exclusive with `--db`. |
+| `serve --host HOST` | `127.0.0.1` | REST/UI bind address and Host-header allow-list. Set `GRAG_API_TOKEN` before using a non-loopback address. |
+| `serve --port PORT` | `8471` | REST/UI listening port. |
+| `serve --with-mcp` | off | Mounts MCP in the REST/UI process so all surfaces safely share the embedded database's one writer. |
+| `serve --mcp-path PATH` | `/mcp` | Mount path used with `--with-mcp`. |
+| `mcp --transport MODE` | `stdio` | Chooses `stdio` or `streamable-http`. |
+| `mcp --host HOST` | `127.0.0.1` | Standalone HTTP MCP bind address. A non-loopback address requires `GRAG_API_TOKEN`. |
+| `mcp --port PORT` | `8471` | Standalone HTTP MCP port, or the shared server target for `--auto-serve`. |
+| `mcp --path PATH` | `/mcp` | Standalone streamable HTTP endpoint path. |
+| `mcp --auto-serve` | off | Keeps the client transport on stdio but proxies it to a shared `serve --with-mcp` process, starting that process when needed. |
+| `ingest-code --no-calls` | off | Skips Python `CALLS` edge extraction. |
+| `ingest-code --max-file-kb N` | `1024` | Skips source files larger than this many KiB. |
+| `bench --codec CODEC` | all codecs | Benchmarks only the named codec; without it, the benchmark runs `fp32`, `int8`, `binary`, and `polar`. |
+| `reindex --batch-size N` | `128` | Number of nodes embedded per reindex batch. |
+| `init --client CLIENT` | `auto` | MCP client to configure: `claude`, `cursor`, `windsurf`, `zed`, or auto-detection. |
+| `init --port PORT` | `8471` | Port written into generated MCP/shared-server configuration. |
+| `init --url` | off | Writes direct HTTP URL transport instead of stdio plus auto-serve; the shared server must already be running. |
+| `init --no-mcp` | off | Skips MCP client configuration. |
+| `init --no-claude-md` | off | Skips the `CLAUDE.md` guidance block. |
+| `init --dry-run` | off | Shows planned configuration writes without changing files. |
+
+`grag init` has one intentional database-path exception: without an explicit global
+`--db`, it writes `~/.grag/<current-project-name>.lbdb` into the generated client
+configuration rather than using `knowledge.lbdb`. The CLI prevents `--db` and
+`--db-dir` from appearing together, but it cannot prevent mixing an environment
+variable with the opposite flag; clear `GRAG_DB_DIR` before using `--db` when you
+intend to switch back to single-database mode.
 
 ## Performance budget
 
