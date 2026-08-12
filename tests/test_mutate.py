@@ -330,6 +330,52 @@ def test_upsert_nodes_raw_table_without_meta(engine: Engine):
     assert engine.execute("MATCH (r:Raw {id: 'r1'}) RETURN r.v").rows == [["x"]]
 
 
+def test_upsert_nodes_invalidates_embeddings_only_when_text_changes(engine: Engine):
+    engine.execute_write(
+        "CREATE NODE TABLE Doc(id STRING PRIMARY KEY, title STRING, year INT64, "
+        "embedding FLOAT[2], _emb_model STRING)"
+    )
+    request = UpsertNodesRequest(
+        nodes=[
+            UpsertNode(
+                label="Doc", key="d1", properties={"title": "same", "year": 2024}
+            )
+        ]
+    )
+    upsert_nodes(engine, engine.config, request)
+    engine.execute_write(
+        "MATCH (d:Doc {id: 'd1'}) SET d.embedding = $embedding, d._emb_model = $model",
+        {"embedding": [0.25, 0.75], "model": "test-model"},
+    )
+
+    # Reingesting identical text and changing only a non-text field preserve
+    # the existing vector.
+    upsert_nodes(engine, engine.config, request)
+    upsert_nodes(
+        engine,
+        engine.config,
+        UpsertNodesRequest(
+            nodes=[UpsertNode(label="Doc", key="d1", properties={"year": 2025})]
+        ),
+    )
+    retained = engine.execute(
+        "MATCH (d:Doc {id: 'd1'}) RETURN d.embedding, d._emb_model"
+    ).rows[0]
+    assert retained == [[0.25, 0.75], "test-model"]
+
+    upsert_nodes(
+        engine,
+        engine.config,
+        UpsertNodesRequest(
+            nodes=[UpsertNode(label="Doc", key="d1", properties={"title": "changed"})]
+        ),
+    )
+    invalidated = engine.execute(
+        "MATCH (d:Doc {id: 'd1'}) RETURN d.embedding, d._emb_model"
+    ).rows[0]
+    assert invalidated == [None, None]
+
+
 # --- upsert_edges -------------------------------------------------------------------
 
 

@@ -81,6 +81,7 @@ export interface GraphSample {
 export interface HealthResponse {
   status: string;
   version: string;
+  database_id: string | null;
 }
 
 export interface DbsResponse {

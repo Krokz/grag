@@ -274,14 +274,14 @@ def test_get_context_accepts_bare_code_graph_ids(engine, tmp_path):
     split_node_id would misread as label='repo'. get_context must resolve the
     bare id to its table server-side. Regression for the dogfooding papercut."""
     from grag.core.types import CodeIngestRequest
-    from grag.ingest.code import ingest_code
+    from grag.ingest.code import _repo_id, ingest_code
 
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "core.py").write_text("def helper(x):\n    return x * 2\n", encoding="utf-8")
     ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
 
-    bare = "pkg:core.py#helper"  # no Label prefix
+    bare = f"{_repo_id(pkg)}:core.py#helper"  # no Label prefix
     prefixed = f"Function:{bare}"
     r_bare = get_context(engine, engine.config, ContextRequest(node_ids=[bare], hops=0))
     r_prefixed = get_context(

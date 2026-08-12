@@ -1,6 +1,6 @@
 """Polyglot code ingestion tests (Wave B): tree-sitter parsing of
 TypeScript/JavaScript/C#/Terraform into the same Repo/Module/Class/Function
-graph as Python — correct language props and <repo>:<path> / #qualname ids,
+graph as Python — correct language props and <repo-id>:<path> / #qualname ids,
 CONTAINS_* edges, path/namespace/module-dir IMPORTS resolution, and the
 ConfigurationError hint when the `code` extra is missing. The whole module
 skips gracefully when the tree-sitter grammars aren't importable."""
@@ -13,7 +13,7 @@ import pytest
 
 from grag.core.errors import ConfigurationError
 from grag.core.types import CodeIngestRequest
-from grag.ingest.code import ingest_code
+from grag.ingest.code import _repo_id, ingest_code
 
 pytest.importorskip("tree_sitter", reason="code extra (tree-sitter) not installed")
 for _grammar in (
@@ -32,6 +32,10 @@ def _count(engine, cypher: str) -> int:
 def _edge_pairs(engine, rel: str) -> set[tuple[str, str]]:
     rows = engine.execute(f"MATCH (a)-[r:{rel}]->(b) RETURN a.id, b.id").rows
     return {(r[0], r[1]) for r in rows}
+
+
+def _mid(root, relative: str) -> str:
+    return f"{_repo_id(root)}:{relative}"
 
 
 # --- typescript -----------------------------------------------------------------------
@@ -67,6 +71,8 @@ def test_ingest_typescript(engine, tmp_path):
     web.mkdir()
     (web / "helper.ts").write_text(HELPER_TS, encoding="utf-8")
     (web / "greeter.ts").write_text(GREETER_TS, encoding="utf-8")
+    greeter = _mid(web, "greeter.ts")
+    helper = _mid(web, "helper.ts")
 
     resp = ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(web)]))
 
@@ -77,55 +83,56 @@ def test_ingest_typescript(engine, tmp_path):
         "MATCH (m:Module) RETURN m.id, m.name, m.language ORDER BY m.id"
     ).rows
     assert rows == [
-        ["web:greeter.ts", "greeter", "typescript"],
-        ["web:helper.ts", "helper", "typescript"],
+        [greeter, "greeter", "typescript"],
+        [helper, "helper", "typescript"],
     ]
 
     # interface Speaker is a Class node; Greeter's method hangs off the class
     rows = engine.execute("MATCH (c:Class) RETURN c.id ORDER BY c.id").rows
-    assert [r[0] for r in rows] == ["web:greeter.ts#Greeter", "web:helper.ts#Speaker"]
+    assert [r[0] for r in rows] == [f"{greeter}#Greeter", f"{helper}#Speaker"]
     rows = engine.execute(
         "MATCH (f:Function) RETURN f.id, f.is_method ORDER BY f.id"
     ).rows
     assert [r[0] for r in rows] == [
-        "web:greeter.ts#Greeter.speak",
-        "web:greeter.ts#arrow",  # const arrow = ... is a module function
-        "web:helper.ts#Speaker.speak",  # interface method
-        "web:helper.ts#format",
+        f"{greeter}#Greeter.speak",
+        f"{greeter}#arrow",  # const arrow = ... is a module function
+        f"{helper}#Speaker.speak",  # interface method
+        f"{helper}#format",
     ]
     assert [r[1] for r in rows] == [True, False, True, False]
 
     # structure-only props: signature, leading comment as docstring, lines
     row = engine.execute(
-        "MATCH (f:Function) WHERE f.id = 'web:helper.ts#format' "
-        "RETURN f.signature, f.docstring, f.line_start, f.line_end, f.path"
+        "MATCH (f:Function) WHERE f.id = $id "
+        "RETURN f.signature, f.docstring, f.line_start, f.line_end, f.path",
+        {"id": f"{helper}#format"},
     ).rows[0]
     assert row[0] == "function format(name: string): string"
     assert row[1] == "Format a greeting."
     assert row[2] == 4 and row[3] == 6
     assert row[4] == "helper.ts"
     row = engine.execute(
-        "MATCH (c:Class) WHERE c.id = 'web:greeter.ts#Greeter' "
-        "RETURN c.signature, c.docstring, c.language"
+        "MATCH (c:Class) WHERE c.id = $id RETURN c.signature, c.docstring, c.language",
+        {"id": f"{greeter}#Greeter"},
     ).rows[0]
     assert row[0] == "class Greeter implements Speaker"
     assert row[1] == "Greeter class."
     assert row[2] == "typescript"
 
     assert _edge_pairs(engine, "CONTAINS_MODULE_CLASS") == {
-        ("web:greeter.ts", "web:greeter.ts#Greeter"),
-        ("web:helper.ts", "web:helper.ts#Speaker"),
+        (greeter, f"{greeter}#Greeter"),
+        (helper, f"{helper}#Speaker"),
     }
     assert _edge_pairs(engine, "CONTAINS_CLASS_FUNCTION") == {
-        ("web:greeter.ts#Greeter", "web:greeter.ts#Greeter.speak"),
-        ("web:helper.ts#Speaker", "web:helper.ts#Speaker.speak"),
+        (f"{greeter}#Greeter", f"{greeter}#Greeter.speak"),
+        (f"{helper}#Speaker", f"{helper}#Speaker.speak"),
     }
     assert _edge_pairs(engine, "CONTAINS_MODULE_FUNCTION") == {
-        ("web:greeter.ts", "web:greeter.ts#arrow"),
-        ("web:helper.ts", "web:helper.ts#format"),
+        (greeter, f"{greeter}#arrow"),
+        (helper, f"{helper}#format"),
     }
     # relative import './helper' resolves path-based within the scanned set
-    assert _edge_pairs(engine, "IMPORTS") == {("web:greeter.ts", "web:helper.ts")}
+    assert _edge_pairs(engine, "IMPORTS") == {(greeter, helper)}
     # CALLS/INHERITS are Python-only in Wave B
     assert _count(engine, "MATCH ()-[r:CALLS]->() RETURN count(*)") == 0
     assert _count(engine, "MATCH ()-[r:INHERITS]->() RETURN count(*)") == 0
@@ -154,15 +161,17 @@ def test_ingest_javascript_require(engine, tmp_path):
     )
 
     resp = ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(app)]))
+    legacy = _mid(app, "legacy.js")
+    helper = _mid(app, "helper.js")
 
     assert resp.warnings == []
     assert (resp.modules, resp.classes, resp.functions) == (2, 1, 2)
     rows = engine.execute("MATCH (m:Module) RETURN m.language").rows
     assert {r[0] for r in rows} == {"javascript"}
     rows = engine.execute("MATCH (f:Function) RETURN f.id ORDER BY f.id").rows
-    assert [r[0] for r in rows] == ["app:legacy.js#App.start", "app:legacy.js#run"]
+    assert [r[0] for r in rows] == [f"{legacy}#App.start", f"{legacy}#run"]
     # CommonJS require("./helper") resolves to the scanned helper.js module
-    assert _edge_pairs(engine, "IMPORTS") == {("app:legacy.js", "app:helper.js")}
+    assert _edge_pairs(engine, "IMPORTS") == {(legacy, helper)}
 
 
 # --- c# -----------------------------------------------------------------------------------
@@ -206,45 +215,45 @@ def test_ingest_csharp(engine, tmp_path):
     (svc / "Services" / "Greeter.cs").write_text(GREETER_CS, encoding="utf-8")
 
     resp = ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(svc)]))
+    widget = _mid(svc, "Models/Widget.cs")
+    greeter = _mid(svc, "Services/Greeter.cs")
 
     assert resp.warnings == []
     assert (resp.repos, resp.modules, resp.classes, resp.functions) == (1, 2, 4, 3)
 
     rows = engine.execute("MATCH (m:Module) RETURN m.id, m.language ORDER BY m.id").rows
     assert rows == [
-        ["svc:Models/Widget.cs", "csharp"],
-        ["svc:Services/Greeter.cs", "csharp"],
+        [widget, "csharp"],
+        [greeter, "csharp"],
     ]
     # qualnames are namespace-qualified (file-scoped and block forms alike)
     rows = engine.execute("MATCH (c:Class) RETURN c.id ORDER BY c.id").rows
     assert [r[0] for r in rows] == [
-        "svc:Models/Widget.cs#MyApp.Models.Widget",
-        "svc:Models/Widget.cs#MyApp.Models.WidgetConfig",
-        "svc:Services/Greeter.cs#MyApp.Services.Greeter",
-        "svc:Services/Greeter.cs#MyApp.Services.IGreeter",
+        f"{widget}#MyApp.Models.Widget",
+        f"{widget}#MyApp.Models.WidgetConfig",
+        f"{greeter}#MyApp.Services.Greeter",
+        f"{greeter}#MyApp.Services.IGreeter",
     ]
     rows = engine.execute(
         "MATCH (f:Function) RETURN f.id, f.is_method ORDER BY f.id"
     ).rows
     assert [r[0] for r in rows] == [
-        "svc:Models/Widget.cs#MyApp.Models.Widget.Run",
-        "svc:Services/Greeter.cs#MyApp.Services.Greeter.Greet",
-        "svc:Services/Greeter.cs#MyApp.Services.IGreeter.Greet",
+        f"{widget}#MyApp.Models.Widget.Run",
+        f"{greeter}#MyApp.Services.Greeter.Greet",
+        f"{greeter}#MyApp.Services.IGreeter.Greet",
     ]
     assert [r[1] for r in rows] == [True, True, True]
 
     # /// xmldoc becomes the docstring, tags stripped
     row = engine.execute(
-        "MATCH (c:Class) WHERE c.id = 'svc:Models/Widget.cs#MyApp.Models.Widget' "
-        "RETURN c.signature, c.docstring"
+        "MATCH (c:Class) WHERE c.id = $id RETURN c.signature, c.docstring",
+        {"id": f"{widget}#MyApp.Models.Widget"},
     ).rows[0]
     assert row[0] == "public class Widget"
     assert row[1] == "A widget."
 
     # `using MyApp.Models;` resolves to the file declaring that namespace
-    assert _edge_pairs(engine, "IMPORTS") == {
-        ("svc:Services/Greeter.cs", "svc:Models/Widget.cs")
-    }
+    assert _edge_pairs(engine, "IMPORTS") == {(greeter, widget)}
 
 
 # --- terraform --------------------------------------------------------------------------------
@@ -268,17 +277,19 @@ def test_ingest_terraform(engine, tmp_path):
     )
 
     resp = ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(infra)]))
+    child = _mid(infra, "child/main.tf")
+    main = _mid(infra, "main.tf")
 
     assert resp.warnings == []
     # HCL has no class/function declarations: Module nodes + IMPORTS only
     assert (resp.repos, resp.modules, resp.classes, resp.functions) == (1, 2, 0, 0)
     rows = engine.execute("MATCH (m:Module) RETURN m.id, m.language ORDER BY m.id").rows
     assert rows == [
-        ["infra:child/main.tf", "hcl"],
-        ["infra:main.tf", "hcl"],
+        [child, "hcl"],
+        [main, "hcl"],
     ]
     # module source "./child" resolves to the single .tf file in child/
-    assert _edge_pairs(engine, "IMPORTS") == {("infra:main.tf", "infra:child/main.tf")}
+    assert _edge_pairs(engine, "IMPORTS") == {(main, child)}
 
 
 # --- error handling ----------------------------------------------------------------------------

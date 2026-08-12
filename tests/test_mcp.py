@@ -322,6 +322,8 @@ def test_search_knowledge_empty_db_returns_empty_seeds(service: GragService):
 
 
 def test_ingest_code_tool(service: GragService, tmp_path):
+    from grag.ingest.code import _repo_id
+
     pkg = tmp_path / "mcpkg"
     pkg.mkdir()
     (pkg / "mod.py").write_text(
@@ -341,7 +343,7 @@ def test_ingest_code_tool(service: GragService, tmp_path):
     result = json.loads(
         mcp_server.cypher_query(service, "MATCH (f:Function) RETURN f.id, f.signature")
     )
-    assert result["rows"] == [["mcpkg:mod.py#f", "def f(x: int) -> int:"]]
+    assert result["rows"] == [[f"{_repo_id(pkg)}:mod.py#f", "def f(x: int) -> int:"]]
     assert "Module" in mcp_server.describe_schema(service)
 
     # re-run is idempotent
@@ -550,3 +552,47 @@ def test_streamable_http_app_builds_without_serving(tmp_path):
         assert isinstance(app, Starlette)
     finally:
         server.grag_registry.close()
+
+
+def test_standalone_http_rejects_unauthenticated_non_loopback_bind(tmp_path):
+    config = GragConfig(
+        db_path=tmp_path / "must-not-be-created.lbdb",
+        buffer_pool_size=POOL_128MB,
+    )
+
+    with pytest.raises(ConfigurationError, match="GRAG_API_TOKEN"):
+        mcp_server._validate_standalone_http_security(
+            config,
+            "0.0.0.0",  # noqa: S104 — deliberately test unsafe binding
+        )
+
+    assert not config.db_path.exists()
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+def test_standalone_http_allows_unauthenticated_loopback(host, tmp_path):
+    config = GragConfig(db_path=tmp_path / "loopback.lbdb")
+    mcp_server._validate_standalone_http_security(config, host)
+
+
+def test_standalone_http_bearer_middleware():
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    async def ok(_request):
+        return PlainTextResponse("ok")
+
+    app = mcp_server._BearerAuthMiddleware(
+        Starlette(routes=[Route("/mcp", ok)]),
+        "sekret",
+    )
+    client = TestClient(app)
+
+    assert client.get("/mcp").status_code == 401
+    wrong = client.get("/mcp", headers={"Authorization": "Bearer wrong"})
+    assert wrong.status_code == 401
+    response = client.get("/mcp", headers={"Authorization": "Bearer sekret"})
+    assert response.status_code == 200
+    assert response.text == "ok"

@@ -308,6 +308,7 @@ class IngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     label: str
     nodes_created: int
+    nodes_pruned: int = 0
 
 
 class CodeIngestRequest(BaseModel):
@@ -322,6 +323,8 @@ class CodeIngestResponse(BaseModel):
     classes: int = 0
     functions: int = 0
     edges: int = 0
+    nodes_pruned: int = 0
+    edges_pruned: int = 0
     warnings: list[str] = Field(default_factory=list)
 
 

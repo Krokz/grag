@@ -84,12 +84,14 @@ or `grag --db <file> serve` (UI + REST only, FTS-only search).
 `ingest_code` (the 8th tool) is the token-frugal way to explore a repo. The loop:
 
 1. **Index first**: call `ingest_code` on the repo path(s) BEFORE reading files.
-   Re-running is idempotent (MERGE by stable ids), so re-index after big changes.
+   Re-running synchronizes by stable ids and prunes removed files/symbols/edges,
+   so re-index after big changes.
 2. **Ask structural questions with `cypher_query`** over the code tables:
-   - what imports X: `MATCH (m:Module)-[:IMPORTS]->(x:Module) WHERE x.id = '<repo>:<path>' RETURN m.id`
-   - what calls Y: `MATCH (f:Function)-[:CALLS]->(y:Function) WHERE y.id = '<repo>:<path>#<qualname>' RETURN f.id`
+   - what imports X: `MATCH (m:Module)-[:IMPORTS]->(x:Module) WHERE x.path = '<path>' RETURN m.id`
+   - what calls Y: `MATCH (f:Function)-[:CALLS]->(y:Function) WHERE y.path = '<path>' AND y.name = '<name>' RETURN f.id`
    - subclass/implementor check: `MATCH (c:Class)-[:INHERITS]->(b:Class) WHERE b.name = 'Base' RETURN c.id`
-   - ids look like `Module:pkg:core.py` and `Function:pkg:core.py#Greeter.greet`;
+   - ids look like `Module:pkg-<path-hash>:core.py` and
+     `Function:pkg-<path-hash>:core.py#Greeter.greet`;
      nodes carry signature, docstring and line range — enough to navigate by.
 3. **Only fetch source bodies when truly needed** — read the file at the node's
    `path`/`line_start`/`line_end` instead of bulk-reading the repo.

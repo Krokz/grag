@@ -1,5 +1,5 @@
 """Code ingestion tests: Python AST parsing into Repo/Module/Class/Function
-nodes, stable <repo>:<path> / #qualname ids, CONTAINS/IMPORTS/INHERITS/CALLS
+nodes, stable <repo-id>:<path> / #qualname ids, CONTAINS/IMPORTS/INHERITS/CALLS
 edges, idempotent re-ingest, calls=False, and walk filters (skip dirs,
 oversized files, unsupported extensions)."""
 
@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from grag.core.types import CodeIngestRequest
-from grag.ingest.code import ingest_code
+from grag.ingest.code import _repo_id, ingest_code
 
 CORE_PY = '''"""Core module."""
 
@@ -62,11 +62,18 @@ def _edge_pairs(engine, rel: str) -> set[tuple[str, str]]:
     return {(r[0], r[1]) for r in rows}
 
 
+def _mid(root: Path, relative: str) -> str:
+    return f"{_repo_id(root)}:{relative}"
+
+
 # --- graph shape -----------------------------------------------------------------
 
 
 def test_ingest_code_builds_expected_graph(engine, tmp_path):
     pkg = _write_pkg(tmp_path)
+    repo = _repo_id(pkg)
+    core = _mid(pkg, "core.py")
+    main = _mid(pkg, "main.py")
     resp = ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
 
     assert resp.warnings == []
@@ -75,31 +82,32 @@ def test_ingest_code_builds_expected_graph(engine, tmp_path):
     # + 1 IMPORTS + 1 INHERITS + 3 CALLS (incl. cross-module run->core.helper)
     assert resp.edges == 13
 
-    # node ids follow <repo>:<relative/path> and <module_id>#<qualname>
+    # node ids follow <repo-id>:<relative/path> and <module_id>#<qualname>
     rows = engine.execute(
         "MATCH (m:Module) RETURN m.id, m.name, m.language ORDER BY m.id"
     ).rows
     assert rows == [
-        ["pkg:core.py", "core", "python"],
-        ["pkg:main.py", "main", "python"],
+        [core, "core", "python"],
+        [main, "main", "python"],
     ]
     rows = engine.execute("MATCH (c:Class) RETURN c.id ORDER BY c.id").rows
-    assert [r[0] for r in rows] == ["pkg:core.py#Base", "pkg:core.py#Greeter"]
+    assert [r[0] for r in rows] == [f"{core}#Base", f"{core}#Greeter"]
     rows = engine.execute(
         "MATCH (f:Function) RETURN f.id, f.is_method ORDER BY f.id"
     ).rows
     assert [r[0] for r in rows] == [
-        "pkg:core.py#Greeter.greet",
-        "pkg:core.py#Greeter.greet_loudly",
-        "pkg:core.py#helper",
-        "pkg:main.py#run",
+        f"{core}#Greeter.greet",
+        f"{core}#Greeter.greet_loudly",
+        f"{core}#helper",
+        f"{main}#run",
     ]
     assert [r[1] for r in rows] == [True, True, False, False]
 
     # structure-only nodes: signature/docstring/lines, no source bodies
     row = engine.execute(
-        "MATCH (f:Function) WHERE f.id = 'pkg:core.py#Greeter.greet' "
-        "RETURN f.signature, f.docstring, f.line_start, f.line_end, f.path"
+        "MATCH (f:Function) WHERE f.id = $id "
+        "RETURN f.signature, f.docstring, f.line_start, f.line_end, f.path",
+        {"id": f"{core}#Greeter.greet"},
     ).rows[0]
     assert row[0] == "def greet(self, name: str) -> str:"
     assert row[1] == "Greet someone."
@@ -108,34 +116,32 @@ def test_ingest_code_builds_expected_graph(engine, tmp_path):
 
     # edges
     assert _edge_pairs(engine, "CONTAINS_REPO_MODULE") == {
-        ("pkg", "pkg:core.py"),
-        ("pkg", "pkg:main.py"),
+        (repo, core),
+        (repo, main),
     }
     assert _edge_pairs(engine, "CONTAINS_MODULE_CLASS") == {
-        ("pkg:core.py", "pkg:core.py#Base"),
-        ("pkg:core.py", "pkg:core.py#Greeter"),
+        (core, f"{core}#Base"),
+        (core, f"{core}#Greeter"),
     }
     assert _edge_pairs(engine, "CONTAINS_CLASS_FUNCTION") == {
-        ("pkg:core.py#Greeter", "pkg:core.py#Greeter.greet"),
-        ("pkg:core.py#Greeter", "pkg:core.py#Greeter.greet_loudly"),
+        (f"{core}#Greeter", f"{core}#Greeter.greet"),
+        (f"{core}#Greeter", f"{core}#Greeter.greet_loudly"),
     }
     assert _edge_pairs(engine, "CONTAINS_MODULE_FUNCTION") == {
-        ("pkg:core.py", "pkg:core.py#helper"),
-        ("pkg:main.py", "pkg:main.py#run"),
+        (core, f"{core}#helper"),
+        (main, f"{main}#run"),
     }
-    assert _edge_pairs(engine, "IMPORTS") == {("pkg:main.py", "pkg:core.py")}
-    assert _edge_pairs(engine, "INHERITS") == {
-        ("pkg:core.py#Greeter", "pkg:core.py#Base")
-    }
+    assert _edge_pairs(engine, "IMPORTS") == {(main, core)}
+    assert _edge_pairs(engine, "INHERITS") == {(f"{core}#Greeter", f"{core}#Base")}
     assert _edge_pairs(engine, "CALLS") == {
         (
-            "pkg:core.py#Greeter.greet",
-            "pkg:core.py#helper",
+            f"{core}#Greeter.greet",
+            f"{core}#helper",
         ),  # bare name call (same module)
-        ("pkg:core.py#Greeter.greet_loudly", "pkg:core.py#Greeter.greet"),  # self.<m>
+        (f"{core}#Greeter.greet_loudly", f"{core}#Greeter.greet"),
         (
-            "pkg:main.py#run",
-            "pkg:core.py#helper",
+            f"{main}#run",
+            f"{core}#helper",
         ),  # bare call to from-imported function
     }
 
@@ -161,6 +167,88 @@ def test_ingest_code_is_idempotent(engine, tmp_path):
         assert _count(engine, f"MATCH ()-[r:{rel}]->() RETURN count(*)") == n
 
 
+def test_ingest_code_same_basename_repos_do_not_collide(engine, tmp_path):
+    left_parent = tmp_path / "left"
+    right_parent = tmp_path / "right"
+    left_parent.mkdir()
+    right_parent.mkdir()
+    left = _write_pkg(left_parent)
+    right = _write_pkg(right_parent)
+
+    resp = ingest_code(
+        engine,
+        engine.config,
+        CodeIngestRequest(paths=[str(left), str(right)]),
+    )
+
+    assert resp.repos == 2 and resp.modules == 4
+    repo_ids = {row[0] for row in engine.execute("MATCH (r:Repo) RETURN r.id").rows}
+    assert repo_ids == {_repo_id(left), _repo_id(right)}
+    assert _repo_id(left) != _repo_id(right)
+
+
+def test_reingest_prunes_removed_symbols_and_generated_edges(engine, tmp_path):
+    pkg = _write_pkg(tmp_path)
+    req = CodeIngestRequest(paths=[str(pkg)])
+    ingest_code(engine, engine.config, req)
+    removed_id = f"{_mid(pkg, 'core.py')}#Greeter.greet_loudly"
+    method = (
+        "\n    def greet_loudly(self, name: str) -> str:\n"
+        "        return self.greet(name).upper()\n"
+    )
+    (pkg / "core.py").write_text(CORE_PY.replace(method, ""), encoding="utf-8")
+
+    resp = ingest_code(engine, engine.config, req)
+
+    assert resp.nodes_pruned == 1
+    assert resp.edges_pruned == 2
+    assert engine.execute(
+        "MATCH (f:Function) WHERE f.id = $id RETURN count(f)", {"id": removed_id}
+    ).rows == [[0]]
+    assert _count(engine, "MATCH ()-[r:CALLS]->() RETURN count(*)") == 2
+
+
+def test_reingest_directory_prunes_deleted_source_file(engine, tmp_path):
+    pkg = _write_pkg(tmp_path)
+    req = CodeIngestRequest(paths=[str(pkg)])
+    ingest_code(engine, engine.config, req)
+    (pkg / "main.py").unlink()
+
+    resp = ingest_code(engine, engine.config, req)
+
+    assert resp.nodes_pruned == 2  # deleted Module + its Function
+    assert resp.edges_pruned == 4
+    assert _count(engine, "MATCH (m:Module) RETURN count(*)") == 1
+    assert _count(engine, "MATCH (f:Function) RETURN count(*)") == 3
+
+
+def test_reingest_migrates_legacy_basename_only_ids(engine, tmp_path):
+    pkg = _write_pkg(tmp_path)
+    req = CodeIngestRequest(paths=[str(pkg)])
+    ingest_code(engine, engine.config, req)
+    engine.execute_write(
+        "CREATE (r:Repo {id: $id, name: $name, path: $path})",
+        {"id": "pkg", "name": "pkg", "path": str(pkg.resolve())},
+    )
+    engine.execute_write(
+        "CREATE (m:Module {id: $id, path: $path, language: $language, "
+        "name: $name, _source: $source})",
+        {
+            "id": "pkg:legacy.py",
+            "path": "legacy.py",
+            "language": "python",
+            "name": "legacy",
+            "source": str(pkg / "legacy.py"),
+        },
+    )
+
+    resp = ingest_code(engine, engine.config, req)
+
+    assert resp.nodes_pruned == 2
+    ids = {row[0] for row in engine.execute("MATCH (m:Module) RETURN m.id").rows}
+    assert "pkg:legacy.py" not in ids
+
+
 def test_ingest_code_calls_false_skips_call_edges(engine, tmp_path):
     pkg = _write_pkg(tmp_path)
     resp = ingest_code(
@@ -173,8 +261,20 @@ def test_ingest_code_calls_false_skips_call_edges(engine, tmp_path):
     assert _count(engine, "MATCH (f:Function) RETURN count(*)") == 4
 
 
+def test_reingest_calls_false_prunes_previous_call_edges(engine, tmp_path):
+    pkg = _write_pkg(tmp_path)
+    ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
+
+    resp = ingest_code(
+        engine, engine.config, CodeIngestRequest(paths=[str(pkg)], calls=False)
+    )
+
+    assert resp.edges_pruned == 3
+    assert _count(engine, "MATCH ()-[r:CALLS]->() RETURN count(*)") == 0
+
+
 def test_ingest_code_multiple_repos_and_cross_repo_inherits(engine, tmp_path):
-    _write_pkg(tmp_path, "pkg")
+    pkg = _write_pkg(tmp_path, "pkg")
     other = tmp_path / "other"
     other.mkdir()
     (other / "sub.py").write_text(
@@ -189,11 +289,14 @@ def test_ingest_code_multiple_repos_and_cross_repo_inherits(engine, tmp_path):
 
     assert resp.repos == 2 and resp.modules == 3
     # `from pkg.core import Greeter` resolves by dotted suffix across repos
-    assert ("other:sub.py", "pkg:core.py") in _edge_pairs(engine, "IMPORTS")
-    # base `Greeter` is globally unique across the scanned set
-    assert ("other:sub.py#Loud", "pkg:core.py#Greeter") in _edge_pairs(
-        engine, "INHERITS"
+    assert (_mid(other, "sub.py"), _mid(pkg, "core.py")) in _edge_pairs(
+        engine, "IMPORTS"
     )
+    # base `Greeter` is globally unique across the scanned set
+    assert (
+        f"{_mid(other, 'sub.py')}#Loud",
+        f"{_mid(pkg, 'core.py')}#Greeter",
+    ) in _edge_pairs(engine, "INHERITS")
 
 
 # --- walk filters and warnings ------------------------------------------------------
@@ -245,7 +348,7 @@ def test_ingest_code_single_file_path(engine, tmp_path):
 
     assert (resp.repos, resp.modules, resp.functions) == (1, 1, 1)
     rows = engine.execute("MATCH (m:Module) RETURN m.id").rows
-    assert rows == [["pkg:main.py"]]  # repo is the file's parent dir
+    assert rows == [[_mid(pkg, "main.py")]]
 
 
 def test_walk_skips_built_bundle_and_minified(engine, tmp_path):
@@ -263,7 +366,7 @@ def test_walk_skips_built_bundle_and_minified(engine, tmp_path):
     assert resp.modules == 3  # core.py, main.py, real.py — not the bundles
     rows = engine.execute("MATCH (m:Module) RETURN m.id").rows
     ids = [r[0] for r in rows]
-    assert "pkg:real.py" in ids
+    assert _mid(pkg, "real.py") in ids
     assert not any("index-C2RYf8Fw" in i or "app.min" in i for i in ids)
 
 
@@ -275,7 +378,10 @@ def test_calls_resolve_from_imported_functions(engine, tmp_path):
     resolves across modules (the vector_candidates dogfooding case)."""
     pkg = _write_pkg(tmp_path)
     ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
-    assert ("pkg:main.py#run", "pkg:core.py#helper") in _edge_pairs(engine, "CALLS")
+    assert (
+        f"{_mid(pkg, 'main.py')}#run",
+        f"{_mid(pkg, 'core.py')}#helper",
+    ) in _edge_pairs(engine, "CALLS")
 
 
 def test_calls_resolve_function_local_lazy_import_inside_try(engine, tmp_path):
@@ -299,6 +405,6 @@ def test_calls_resolve_function_local_lazy_import_inside_try(engine, tmp_path):
     )
     ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
     assert (
-        "pkg:search.py#search_knowledge",
-        "pkg:engine.py#vector_candidates",
+        f"{_mid(pkg, 'search.py')}#search_knowledge",
+        f"{_mid(pkg, 'engine.py')}#vector_candidates",
     ) in _edge_pairs(engine, "CALLS")

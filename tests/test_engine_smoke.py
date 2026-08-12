@@ -3,8 +3,13 @@ python value formats that grag.core.serialize and friends rely on."""
 
 from __future__ import annotations
 
+import os
+import stat
+from pathlib import Path
+
 import pytest
 
+from grag.config import GragConfig
 from grag.core.engine import (
     Engine,
     drop_internal_rows,
@@ -13,6 +18,35 @@ from grag.core.engine import (
     is_rel_value,
 )
 from grag.core.types import make_node_id
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_database_and_wal_files_are_owner_only(tmp_path):
+    db_path = tmp_path / "private" / "graph.lbdb"
+    engine = Engine(GragConfig(db_path=db_path))
+    try:
+        assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+        engine.execute_write("CREATE NODE TABLE Doc(id STRING PRIMARY KEY)")
+        wal_path = Path(f"{db_path}.wal")
+        assert wal_path.exists()
+        assert stat.S_IMODE(wal_path.stat().st_mode) == 0o600
+    finally:
+        engine.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_engine_does_not_restrict_an_existing_database_parent(tmp_path):
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o755)
+    parent.chmod(0o755)
+
+    engine = Engine(GragConfig(db_path=parent / "graph.lbdb"))
+    try:
+        assert stat.S_IMODE(parent.stat().st_mode) == 0o755
+    finally:
+        engine.close()
 
 
 @pytest.fixture()

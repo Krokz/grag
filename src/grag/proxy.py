@@ -18,22 +18,44 @@ import subprocess
 import sys
 from pathlib import Path
 
+from grag.config import database_identity
 
-async def _ping(url: str) -> bool:
+
+async def _probe_server(url: str) -> tuple[bool, str | None]:
+    """Return ``(reachable, database_id)`` for a grag health endpoint."""
     import httpx2
 
     try:
         async with httpx2.AsyncClient() as c:
             r = await c.get(url, timeout=2.0)
-            return r.status_code < 500
+            if r.status_code >= 500:
+                return False, None
+            try:
+                body = r.json()
+            except (TypeError, ValueError):
+                return True, None
+            identity = body.get("database_id") if isinstance(body, dict) else None
+            return True, identity if isinstance(identity, str) else None
     except Exception:  # noqa: BLE001 — any network/OS error means not ready
-        return False
+        return False, None
+
+
+def _wrong_database(port: int) -> SystemExit:
+    return SystemExit(
+        f"grag proxy: port {port} is already serving a different or unidentified "
+        "database. Choose another --port, stop the existing server, or use "
+        "grag --db-dir for a shared multi-database server."
+    )
 
 
 async def _ensure_server(db_path: Path, port: int, url: str) -> None:
     """Start ``grag serve --with-mcp`` as a detached daemon if not running."""
-    if await _ping(url):
-        return
+    expected = database_identity(db_path)
+    reachable, actual = await _probe_server(url)
+    if reachable:
+        if actual == expected:
+            return
+        raise _wrong_database(port)
 
     grag = shutil.which("grag") or sys.argv[0]
     subprocess.Popen(  # noqa: S603 — grag is resolved from PATH, not user input
@@ -47,8 +69,11 @@ async def _ensure_server(db_path: Path, port: int, url: str) -> None:
 
     for _ in range(40):
         await asyncio.sleep(0.5)
-        if await _ping(url):
-            return
+        reachable, actual = await _probe_server(url)
+        if reachable:
+            if actual == expected:
+                return
+            raise _wrong_database(port)
 
     sys.exit(f"grag proxy: server at {url} did not become ready (waited 20 s)")
 

@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 import grag
-from grag.config import GragConfig
+from grag.config import GragConfig, database_identity
 from grag.core.errors import GragError, NotFoundError, ReadOnlyViolation
 from grag.core.types import (
     CodeIngestRequest,
@@ -194,7 +194,15 @@ def create_app(config: GragConfig) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict:
-        return {"status": "ok", "version": grag.__version__}
+        service = app.state.service
+        identity = (
+            database_identity(service.config.db_path) if service is not None else None
+        )
+        return {
+            "status": "ok",
+            "version": grag.__version__,
+            "database_id": identity,
+        }
 
     @app.get("/api/dbs")
     def list_dbs() -> dict:

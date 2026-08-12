@@ -59,7 +59,11 @@ def main(argv: list[str] | None = None) -> int:
         help="MCP transport: stdio (default, one process per client) or "
         "streamable-http (one shared server many clients connect to)",
     )
-    mcp.add_argument("--host", default="127.0.0.1")
+    mcp.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind host (non-loopback streamable-http requires GRAG_API_TOKEN)",
+    )
     mcp.add_argument(
         "--port",
         type=int,

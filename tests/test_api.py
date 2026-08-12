@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 import grag
 from grag.api.main import _STATIC_DIR, create_app
-from grag.config import GragConfig
+from grag.config import GragConfig, database_identity
 from grag.core.types import (
     CodeIngestResponse,
     ContextResponse,
@@ -91,7 +91,11 @@ def seeded_client(client):
 def test_health(client):
     res = client.get("/api/health")
     assert res.status_code == 200
-    assert res.json() == {"status": "ok", "version": grag.__version__}
+    assert res.json() == {
+        "status": "ok",
+        "version": grag.__version__,
+        "database_id": database_identity(client.app.state.service.config.db_path),
+    }
 
 
 def test_define_schema_and_roundtrip(client):
@@ -245,6 +249,25 @@ def test_graph_sample(seeded_client):
     assert any(e.type == "KNOWS" for e in ls2.subgraph.edges)
 
 
+def test_graph_sample_rejects_injected_label_without_mutating(seeded_client):
+    payload = "Person) RETURN n; MATCH (x:Person) DELETE x; //"
+    res = seeded_client.get("/api/graph/sample", params={"label": payload})
+    assert res.status_code == 400
+    assert "Invalid node label" in res.json()["error"]
+
+    count = seeded_client.post(
+        "/api/query", json={"cypher": "MATCH (n:Person) RETURN count(n)"}
+    )
+    assert count.status_code == 200
+    assert count.json()["rows"] == [[2]]
+
+
+def test_graph_sample_rejects_unknown_label(seeded_client):
+    res = seeded_client.get("/api/graph/sample", params={"label": "Missing"})
+    assert res.status_code == 400
+    assert "Unknown node label" in res.json()["error"]
+
+
 def test_ingest(client):
     res = client.post(
         "/api/ingest",
@@ -269,6 +292,8 @@ def test_ingest(client):
 
 
 def test_ingest_code(client, tmp_path):
+    from grag.ingest.code import _repo_id
+
     pkg = tmp_path / "apipkg"
     pkg.mkdir()
     (pkg / "mod.py").write_text(
@@ -283,7 +308,9 @@ def test_ingest_code(client, tmp_path):
 
     q = client.post("/api/query", json={"cypher": "MATCH (f:Function) RETURN f.id"})
     assert q.status_code == 200
-    assert QueryResponse.model_validate(q.json()).rows == [["apipkg:mod.py#f"]]
+    assert QueryResponse.model_validate(q.json()).rows == [
+        [f"{_repo_id(pkg)}:mod.py#f"]
+    ]
 
     # multi-db selectors are honored like on every other route (single-db: ignored)
     again = client.post("/api/ingest/code?db=anything", json={"paths": [str(pkg)]})

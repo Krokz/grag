@@ -8,11 +8,19 @@ export interface SeedInfo {
   match: string;
 }
 
+export interface FocusRequest {
+  nodeId: string;
+  revision: number;
+  /** Keep this node fixed while newly-added neighbors settle around it. */
+  keepStable: boolean;
+}
+
 interface Props {
   subgraph: Subgraph;
   pkMap: Map<string, string>;
   seeds: Map<string, SeedInfo>;
   selectedId: string | null;
+  focusRequest: FocusRequest | null;
   filter: string;
   stats: GraphStats | null;
   onFilterChange: (f: string) => void;
@@ -26,6 +34,8 @@ interface Props {
 interface FgNode extends NodeRecord {
   x?: number;
   y?: number;
+  fx?: number;
+  fy?: number;
 }
 
 /** Past this many visible nodes, per-node labels turn into hover/selection
@@ -64,6 +74,7 @@ export function GraphCanvas({
   pkMap,
   seeds,
   selectedId,
+  focusRequest,
   filter,
   stats,
   onFilterChange,
@@ -77,6 +88,7 @@ export function GraphCanvas({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fgRef = useRef<any>(null);
   const didFit = useRef(false);
+  const pinnedNode = useRef<FgNode | null>(null);
   const lastClick = useRef<{ id: string; t: number }>({ id: '', t: 0 });
   const [hoverId, setHoverId] = useState<string | null>(null);
   // Label bounding boxes already drawn this frame — cleared in
@@ -92,7 +104,10 @@ export function GraphCanvas({
       (!f ||
         n.id.toLowerCase().includes(f) ||
         JSON.stringify(n.properties).toLowerCase().includes(f));
-    const nodes: FgNode[] = subgraph.nodes.filter(visible).map((n) => ({ ...n }));
+    // ForceGraph writes simulation coordinates onto each node. Preserve those
+    // object identities across graph merges so adding neighbors does not reset
+    // every existing node (especially the selected one) to a random position.
+    const nodes = subgraph.nodes.filter(visible) as FgNode[];
     const ids = new Set(nodes.map((n) => n.id));
     const links = subgraph.edges
       .filter((e: EdgeRecord) => ids.has(e.source) && ids.has(e.target))
@@ -107,6 +122,65 @@ export function GraphCanvas({
       return () => clearTimeout(t);
     }
   }, [data.nodes.length]);
+
+  useEffect(() => {
+    if (!focusRequest) return;
+
+    let cancelled = false;
+    let pinnedByThisEffect: FgNode | null = null;
+    const timers: number[] = [];
+
+    const focusWhenReady = (attempt = 0) => {
+      if (cancelled) return;
+      const node = data.nodes.find((candidate) => candidate.id === focusRequest.nodeId);
+      const fg = fgRef.current;
+      if (!node || !fg || !Number.isFinite(node.x) || !Number.isFinite(node.y)) {
+        if (attempt < 12) {
+          timers.push(window.setTimeout(() => focusWhenReady(attempt + 1), 50));
+        }
+        return;
+      }
+
+      if (focusRequest.keepStable) {
+        // Expansion reheats the simulation. Anchor the selected node until the
+        // graph's 2.5s cooldown completes, while its new neighbors arrange
+        // themselves around the existing point of interest.
+        if (pinnedNode.current && pinnedNode.current !== node) {
+          delete pinnedNode.current.fx;
+          delete pinnedNode.current.fy;
+        }
+        node.fx = node.x;
+        node.fy = node.y;
+        pinnedNode.current = node;
+        pinnedByThisEffect = node;
+        timers.push(
+          window.setTimeout(() => {
+            if (pinnedNode.current === node) {
+              delete node.fx;
+              delete node.fy;
+              pinnedNode.current = null;
+            }
+          }, 2700),
+        );
+      }
+
+      fg.centerAt(node.x, node.y, 450);
+      if (!focusRequest.keepStable && fg.zoom() < 2.5) {
+        fg.zoom(2.5, 450);
+      }
+    };
+
+    timers.push(window.setTimeout(() => focusWhenReady(), 0));
+    return () => {
+      cancelled = true;
+      timers.forEach(window.clearTimeout);
+      if (pinnedByThisEffect && pinnedNode.current === pinnedByThisEffect) {
+        delete pinnedByThisEffect.fx;
+        delete pinnedByThisEffect.fy;
+        pinnedNode.current = null;
+      }
+    };
+  }, [focusRequest]);
 
   const handleClick = useCallback(
     (node: object) => {

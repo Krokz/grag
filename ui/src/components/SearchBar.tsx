@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ApiFailure, SearchResponse } from '../types';
+import type { ApiFailure, NodeRecord, SearchResponse } from '../types';
 
 interface BarProps {
   searching: boolean;
@@ -34,11 +34,13 @@ export function SearchBar({ searching, onSearch }: BarProps) {
 interface PanelProps {
   result: SearchResponse | null;
   error: ApiFailure | null;
+  selectedId: string | null;
+  onSelectNode: (node: NodeRecord) => void;
   onClose: () => void;
 }
 
 /** Collapsible LLM-grounding context returned by /api/search. */
-export function SearchPanel({ result, error, onClose }: PanelProps) {
+export function SearchPanel({ result, error, selectedId, onSelectNode, onClose }: PanelProps) {
   const [open, setOpen] = useState(true);
 
   return (
@@ -71,11 +73,20 @@ export function SearchPanel({ result, error, onClose }: PanelProps) {
         <>
           <div className="seed-list">
             {result.seeds.map((s) => (
-              <div key={s.node.id} className="seed">
+              <button
+                key={s.node.id}
+                type="button"
+                className={`seed${selectedId === s.node.id ? ' seed-active' : ''}`}
+                title={`Show ${s.node.id} in the graph`}
+                aria-label={`Show ${s.node.id} in the graph`}
+                aria-pressed={selectedId === s.node.id}
+                onClick={() => onSelectNode(s.node)}
+              >
                 <span className="score">{s.score.toFixed(3)}</span>
                 <span className="match">{s.match}</span>
-                <span>{s.node.id}</span>
-              </div>
+                <span className="seed-id">{s.node.id}</span>
+                <span className="seed-jump" aria-hidden="true">⌖</span>
+              </button>
             ))}
             {result.seeds.length === 0 && <div className="hint-text">no matching nodes</div>}
           </div>

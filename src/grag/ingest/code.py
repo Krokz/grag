@@ -7,11 +7,12 @@ Function nodes carrying path/line_start/line_end/signature/docstring/language
 plus CONTAINS_*/IMPORTS/INHERITS/CALLS edges — so an LLM can answer
 structural questions with cheap Cypher. Source bodies stay out of the graph.
 
-Ids are stable and human-readable: a Repo id is its directory name, a Module
-id is `<repo>:<relative/path>`, a Class/Function id is `<module_id>#<qualname>`
-(qualname dotted for nesting, e.g. `ClassName.method`). Re-ingesting the same
-tree MERGEs by key — idempotent by construction, never DELETE+recreate. Every
-node/edge carries `_source` provenance (the file it was parsed from).
+Ids are stable and human-readable: a Repo id combines its directory name with
+a hash of its canonical path, a Module id is `<repo-id>:<relative/path>`, and a
+Class/Function id is `<module_id>#<qualname>` (qualname dotted for nesting,
+e.g. `ClassName.method`). Re-ingesting preserves unchanged nodes while pruning
+definitions and generated edges no longer present in successfully parsed or
+deleted source files. Every node/edge carries `_source` provenance.
 
 Python parses via the stdlib `ast` module; TypeScript/JavaScript
 (.ts/.tsx/.js/.jsx/.mjs/.cjs), C# (.cs) and Terraform (.tf) parse via
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import hashlib
 import logging
 import os
 import re
@@ -146,6 +148,15 @@ def _skip_file(name: str) -> bool:
     return any(fnmatch.fnmatch(name, pat) for pat in _SKIP_FILE_PATTERNS) or bool(
         _HASHED_BUNDLE_RE.match(name)
     )
+
+
+def _repo_id(root: Path) -> str:
+    """Stable repo key that cannot collide with a same-named directory."""
+
+    canonical = root.expanduser().resolve()
+    name = canonical.name or "repo"
+    digest = hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()
+    return f"{name}-{digest}"
 
 
 # Known code suffixes WITHOUT a registered parser: walked files with these
@@ -534,6 +545,113 @@ def _resolve_base(
     return matches[0] if len(matches) == 1 else None
 
 
+def _missing_module_sources(engine: Engine, directory_roots: set[Path]) -> set[str]:
+    """Previously ingested files that disappeared below an authoritative root."""
+
+    missing: set[str] = set()
+    for root in directory_roots:
+        prefix = f"{root}{os.sep}"
+        rows = engine.execute(
+            "MATCH (n:Module) WHERE n._source STARTS WITH $prefix "
+            "RETURN DISTINCT n._source",
+            {"prefix": prefix},
+        ).rows
+        for row in rows:
+            source = row[0]
+            if source and not Path(str(source)).exists():
+                missing.add(str(source))
+    return missing
+
+
+def _prune_code_nodes(
+    engine: Engine,
+    *,
+    authoritative_sources: set[str],
+    desired_by_label_source: dict[str, dict[str, set[str]]],
+) -> int:
+    pruned = 0
+    for label in ("Module", "Class", "Function"):
+        desired_by_source = desired_by_label_source[label]
+        for source in sorted(authoritative_sources):
+            result = engine.execute_write(
+                f"MATCH (n:{label}) WHERE n._source = $source "
+                "AND NOT n.id IN $keys DETACH DELETE n RETURN count(n)",
+                {
+                    "source": source,
+                    "keys": sorted(desired_by_source.get(source, set())),
+                },
+            )
+            if result.rows:
+                pruned += int(result.rows[0][0])
+    return pruned
+
+
+def _prune_code_edges(
+    engine: Engine,
+    *,
+    authoritative_sources: set[str],
+    desired: set[tuple[str, str, str, str]],
+) -> int:
+    """Delete only generated edges absent from the newly resolved graph."""
+
+    pruned = 0
+    for spec in _CODE_REL_TABLES:
+        rows = engine.execute(
+            f"MATCH (a)-[r:{spec.name}]->(b) RETURN a.id, b.id, r._source"
+        ).rows
+        for from_key, to_key, source in rows:
+            edge_key = (spec.name, str(from_key), str(to_key), str(source))
+            if source not in authoritative_sources or edge_key in desired:
+                continue
+            result = engine.execute_write(
+                f"MATCH (a)-[r:{spec.name}]->(b) "
+                "WHERE a.id = $from_key AND b.id = $to_key "
+                "AND r._source = $source DELETE r RETURN count(r)",
+                {
+                    "from_key": from_key,
+                    "to_key": to_key,
+                    "source": source,
+                },
+            )
+            if result.rows:
+                pruned += int(result.rows[0][0])
+    return pruned
+
+
+def _prune_legacy_repos(engine: Engine, repos: dict[str, UpsertNode]) -> int:
+    pruned = 0
+    for repo_id, repo in repos.items():
+        repo_root = Path(str(repo.properties["path"])).resolve()
+        legacy_prefix = f"{repo.properties['name']}:"
+        for label in ("Module", "Class", "Function"):
+            rows = engine.execute(
+                f"MATCH (n:{label}) WHERE n.id STARTS WITH $prefix "
+                "RETURN n.id, n._source",
+                {"prefix": legacy_prefix},
+            ).rows
+            for node_id, source in rows:
+                if not source:
+                    continue
+                try:
+                    Path(str(source)).expanduser().resolve().relative_to(repo_root)
+                except (OSError, ValueError):
+                    continue
+                result = engine.execute_write(
+                    f"MATCH (n:{label} {{id: $id}}) DETACH DELETE n RETURN count(n)",
+                    {"id": node_id},
+                )
+                if result.rows:
+                    pruned += int(result.rows[0][0])
+        result = engine.execute_write(
+            "MATCH (r:Repo) WHERE r.path = $path AND r.id <> $id "
+            "DETACH DELETE r RETURN count(r)",
+            {"path": repo.properties["path"], "id": repo_id},
+        )
+        if result.rows:
+            pruned += int(result.rows[0][0])
+    return pruned
+
+
 # --- public: ingest_code ----------------------------------------------------------
 
 
@@ -556,31 +674,52 @@ def ingest_code(
     )
 
     warnings: list[str] = []
-    repos: dict[str, UpsertNode] = {}
+    input_paths = [Path(p) for p in req.paths]
+    roots: dict[str, Path] = {}
+    directory_roots: set[Path] = set()
+    for path in input_paths:
+        if path.is_dir():
+            root = path.resolve()
+            directory_roots.add(root)
+        elif path.is_file():
+            root = path.resolve().parent
+        else:
+            continue
+        roots[_repo_id(root)] = root
+    repos: dict[str, UpsertNode] = {
+        repo_id: UpsertNode(
+            label="Repo",
+            key=repo_id,
+            properties={"name": root.name or "repo", "path": str(root)},
+            source=str(root),
+        )
+        for repo_id, root in roots.items()
+    }
     parsed_modules: list[_ParsedModule] = []
+    successful_sources: set[str] = set()
     unsupported: dict[str, int] = {}
 
-    for root, file in _walk([Path(p) for p in req.paths], req.max_file_kb, warnings):
+    for walked_root, walked_file in _walk(input_paths, req.max_file_kb, warnings):
+        rel_path = walked_file.relative_to(walked_root).as_posix()
+        root = walked_root.resolve()
+        # Keep the lexical path below the canonical root so provenance-based
+        # directory pruning remains scoped even when a source file is a symlink.
+        file = root / rel_path
         suffix = file.suffix.lower()
         parser = _PARSERS.get(suffix)
         if parser is None:
             if suffix in _UNSUPPORTED_CODE_SUFFIXES:
                 unsupported[suffix] = unsupported.get(suffix, 0) + 1
             continue
-        repo = root.resolve().name or "repo"
-        rel_path = file.relative_to(root).as_posix()
-        if repo not in repos:
-            repos[repo] = UpsertNode(
-                label="Repo",
-                key=repo,
-                properties={"name": repo, "path": str(root.resolve())},
-                source=str(root),
-            )
+        repo = _repo_id(root)
+        repo_name = root.name or "repo"
         try:
             source = file.read_text(encoding="utf-8")
-            parsed_modules.append(
-                parser(file, source, repo=repo, rel_path=rel_path, calls=req.calls)
-            )
+            parsed = parser(file, source, repo=repo, rel_path=rel_path, calls=req.calls)
+            if rel_path == "__init__.py":
+                parsed.dotted = repo_name
+            parsed_modules.append(parsed)
+            successful_sources.add(str(file))
         except (OSError, UnicodeDecodeError) as exc:
             warnings.append(f"skipped {file}: could not read ({exc})")
         except (SyntaxError, ValueError) as exc:
@@ -605,11 +744,12 @@ def ingest_code(
         # when the repo dir IS the top package (repo "pkg" holding core.py),
         # absolute imports say "pkg.core" while the relative dotted is "core".
         repo = mid.split(":", 1)[0]
+        repo_name = str(repos[repo].properties["name"])
         # Aliases are the non-Python resolution keys: C# namespaces and
         # Terraform module dirs (populated by code_ts; empty for Python).
-        index_keys = {pm.dotted, f"{repo}.{pm.dotted}"}
+        index_keys = {pm.dotted, f"{repo_name}.{pm.dotted}"}
         index_keys.update(pm.aliases)
-        index_keys.update(f"{repo}.{alias}" for alias in pm.aliases)
+        index_keys.update(f"{repo_name}.{alias}" for alias in pm.aliases)
         for key in index_keys:
             module_index.setdefault(key, [])
             if mid not in module_index[key]:
@@ -693,13 +833,43 @@ def ingest_code(
         ("Function", {str(n.key): n for pm in parsed_modules for n in pm.functions}),
     ]
     counts: dict[str, int] = {}
+    desired_by_label_source: dict[str, dict[str, set[str]]] = {
+        "Module": {},
+        "Class": {},
+        "Function": {},
+    }
     for label, nodes in nodes_by_label:
         counts[label] = len(nodes)
+        if label in desired_by_label_source:
+            for node in nodes.values():
+                source = str(node.source)
+                desired_by_label_source[label].setdefault(source, set()).add(
+                    str(node.key)
+                )
         if nodes:
             summary = upsert_nodes(
                 engine, config, UpsertNodesRequest(nodes=list(nodes.values()))
             )
             warnings.extend(summary.warnings)
+
+    authoritative_sources = successful_sources | _missing_module_sources(
+        engine, directory_roots
+    )
+    desired_edges = {
+        (edge.type, str(edge.from_key), str(edge.to_key), str(edge.source))
+        for edge in edges.values()
+    }
+    edges_pruned = _prune_code_edges(
+        engine,
+        authoritative_sources=authoritative_sources,
+        desired=desired_edges,
+    )
+    nodes_pruned = _prune_code_nodes(
+        engine,
+        authoritative_sources=authoritative_sources,
+        desired_by_label_source=desired_by_label_source,
+    )
+    nodes_pruned += _prune_legacy_repos(engine, repos)
 
     edges_by_type: dict[str, list[UpsertEdge]] = {}
     for edge in edges.values():
@@ -717,6 +887,8 @@ def ingest_code(
         classes=counts["Class"],
         functions=counts["Function"],
         edges=edge_count,
+        nodes_pruned=nodes_pruned,
+        edges_pruned=edges_pruned,
         warnings=warnings,
     )
 
@@ -749,7 +921,9 @@ def ingest_code_paths(
         (
             f"Ingested code from {len(paths)} path(s): "
             f"{resp.repos} repo(s), {resp.modules} module(s), {resp.classes} class(es), "
-            f"{resp.functions} function(s), {resp.edges} edge(s) written to {config.db_path}."
+            f"{resp.functions} function(s), {resp.edges} edge(s) written; "
+            f"{resp.nodes_pruned} stale node(s) and {resp.edges_pruned} stale edge(s) "
+            f"pruned in {config.db_path}."
         )
     ]
     if resp.warnings:

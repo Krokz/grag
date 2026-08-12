@@ -348,6 +348,7 @@ button.primary:hover {
   flex: 1;
   position: relative;
   min-height: 0;
+  overflow: hidden;
   background: var(--bg);
 }
 
@@ -383,6 +384,7 @@ button.primary:hover {
 
 .legend {
   position: absolute;
+  top: 52px;
   bottom: 10px;
   left: 10px;
   z-index: 5;
@@ -394,6 +396,9 @@ button.primary:hover {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  max-width: min(240px, calc(100% - 20px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .legend .li {
@@ -912,11 +917,34 @@ table.results td.cell-truncated:hover {
 }
 
 .seed-list .seed {
-  display: flex;
+  display: grid;
+  grid-template-columns: 52px 52px minmax(0, 1fr) auto;
+  align-items: center;
   gap: 8px;
-  padding: 2px 0;
+  width: 100%;
+  padding: 3px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
   font-family: var(--mono);
   font-size: 11.5px;
+  text-align: left;
+}
+
+.seed-list .seed:hover,
+.seed-list .seed:focus-visible {
+  background: #18222e;
+  outline: none;
+}
+
+.seed-list .seed:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent-dim);
+}
+
+.seed-list .seed-active {
+  background: rgba(56, 189, 248, 0.1);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .seed .score {
@@ -927,8 +955,23 @@ table.results td.cell-truncated:hover {
 
 .seed .match {
   color: var(--text-dim);
-  width: 52px;
-  flex: none;
+}
+
+.seed-id {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seed-jump {
+  color: var(--accent);
+  opacity: 0;
+  font: 15px/1 sans-serif;
+}
+
+.seed:hover .seed-jump,
+.seed:focus-visible .seed-jump {
+  opacity: 1;
 }
 
 .context-text {

@@ -10,12 +10,12 @@ idempotent.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from grag.config import GragConfig
 from grag.core.engine import Engine
 from grag.core.errors import NotFoundError, SchemaError
+from grag.core.ident import validate_identifier
 from grag.core.types import (
     META_TABLE,
     PROVENANCE_CREATED_AT,
@@ -33,8 +33,6 @@ from grag.core.types import (
     UpsertEdgesRequest,
     UpsertNodesRequest,
 )
-
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _META_DDL = (
     f"CREATE NODE TABLE {META_TABLE}("
@@ -134,12 +132,7 @@ def _rel_endpoints(engine: Engine) -> dict[str, tuple[str, str]]:
 
 
 def _validate_ident(name: str, what: str) -> None:
-    if not isinstance(name, str) or not _IDENT_RE.match(name):
-        raise SchemaError(
-            f"Invalid {what} '{name}'.",
-            hint="Identifiers must match ^[A-Za-z_][A-Za-z0-9_]*$ "
-            "(start with a letter or underscore; then letters, digits, underscores).",
-        )
+    validate_identifier(name, what)
 
 
 def _reject_reserved(prop: str, table: str) -> None:
@@ -374,13 +367,15 @@ def _sanitize_props(
     alias: str,
     owner: str,
     warnings: list[str],
-) -> tuple[list[str], dict[str, Any]]:
+) -> tuple[list[str], dict[str, Any], dict[str, Any]]:
     """Filter caller props to declared, non-reserved, type-compatible columns.
 
-    Returns (SET assignments, params); rejected props become warnings.
+    Returns (SET assignments, params, accepted values); rejected props become
+    warnings.
     """
     sets: list[str] = []
     params: dict[str, Any] = {}
+    accepted: dict[str, Any] = {}
     for i, (name, value) in enumerate(props.items()):
         if name.startswith(RESERVED_PREFIX) or name in VECTOR_PROPS:
             warnings.append(
@@ -409,8 +404,43 @@ def _sanitize_props(
             continue
         pname = f"p{i}"
         params[pname] = coerced
+        accepted[name] = coerced
         sets.append(f"{alias}.{name} = ${pname}")
-    return sets, params
+    return sets, params, accepted
+
+
+def _searchable_text_changed(
+    engine: Engine,
+    *,
+    label: str,
+    pk: str,
+    key: Any,
+    columns: dict[str, str],
+    accepted: dict[str, Any],
+) -> bool:
+    """Whether an existing node's incoming embedding input has changed."""
+
+    if not VECTOR_PROPS.intersection(columns):
+        return False
+    text_props = [
+        name
+        for name in accepted
+        if columns[name].upper() == "STRING"
+        and not name.startswith(RESERVED_PREFIX)
+        and name not in VECTOR_PROPS
+    ]
+    if not text_props:
+        return False
+    projection = ", ".join(f"n.{name}" for name in text_props)
+    rows = engine.execute(
+        f"MATCH (n:{label} {{{pk}: $key}}) RETURN {projection}", {"key": key}
+    ).rows
+    if not rows:
+        return False
+    return any(
+        previous != accepted[name]
+        for name, previous in zip(text_props, rows[0], strict=True)
+    )
 
 
 # --- public: upsert_nodes ------------------------------------------------------------
@@ -441,7 +471,7 @@ def upsert_nodes(
             col_cache[node.label] = _table_columns(engine, node.label)
         columns = col_cache[node.label]
 
-        create_sets, params = _sanitize_props(
+        create_sets, params, accepted = _sanitize_props(
             props=node.properties,
             columns=columns,
             alias="n",
@@ -449,6 +479,17 @@ def upsert_nodes(
             warnings=warnings,
         )
         match_sets = list(create_sets)
+        if _searchable_text_changed(
+            engine,
+            label=node.label,
+            pk=pk,
+            key=node.key,
+            columns=columns,
+            accepted=accepted,
+        ):
+            match_sets.extend(
+                f"n.{prop} = NULL" for prop in sorted(VECTOR_PROPS) if prop in columns
+            )
         if PROVENANCE_CREATED_AT in columns:
             create_sets.append(f"n.{PROVENANCE_CREATED_AT} = current_timestamp()")
         if node.source is not None and PROVENANCE_SOURCE in columns:
@@ -524,7 +565,7 @@ def upsert_edges(
             col_cache[edge.type] = _table_columns(engine, edge.type)
         columns = col_cache[edge.type]
 
-        create_sets, params = _sanitize_props(
+        create_sets, params, _accepted = _sanitize_props(
             props=edge.properties,
             columns=columns,
             alias="r",

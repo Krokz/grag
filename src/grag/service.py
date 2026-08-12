@@ -18,7 +18,8 @@ from grag.core.engine import (
     extract_subgraph,
     is_internal_label,
 )
-from grag.core.errors import GragError, ReadOnlyViolation
+from grag.core.errors import GragError, ReadOnlyViolation, SchemaError
+from grag.core.ident import validate_identifier
 from grag.core.types import (
     CodeIngestRequest,
     CodeIngestResponse,
@@ -207,24 +208,33 @@ class GragService:
 
     def graph_sample(self, limit: int = 200, label: str | None = None) -> GraphSample:
         limit = max(1, min(limit, self.config.max_query_limit))
-        pattern = f"(n:{label})" if label else "(n)"
+        safe_label = validate_identifier(label, "node label") if label else None
+        if safe_label:
+            known_labels = {table.name for table in self.describe_schema().node_tables}
+            if safe_label not in known_labels:
+                raise SchemaError(
+                    f"Unknown node label {safe_label!r}.",
+                    hint=f"Available node labels: {sorted(known_labels)}.",
+                )
+        pattern = f"(n:{safe_label})" if safe_label else "(n)"
+        pk_map = self._pk_map()
         sub = extract_subgraph(
             self.engine.execute(f"MATCH {pattern} RETURN n LIMIT {limit}"),
-            self._pk_map(),
+            pk_map,
         )
         try:
-            if label:
+            if safe_label:
                 # Label-scoped: only the 1-hop neighborhood of matching nodes,
                 # so a label view shows that label *and its relationships*
                 # instead of the whole graph's edges (the leaky-merge papercut).
                 rels = self.engine.execute(
-                    f"MATCH (a:{label})-[r]-(b) RETURN a, r, b LIMIT {limit}"
+                    f"MATCH (a:{safe_label})-[r]-(b) RETURN a, r, b LIMIT {limit}"
                 )
             else:
                 rels = self.engine.execute(
                     f"MATCH (a)-[r]->(b) RETURN a, r, b LIMIT {limit}"
                 )
-            sub = merge_subgraphs(sub, extract_subgraph(rels, self._pk_map()))
+            sub = merge_subgraphs(sub, extract_subgraph(rels, pk_map))
         except GragError:
             pass  # no rel tables yet
         nodes = [n for n in sub.nodes if not is_internal_label(n.label)]

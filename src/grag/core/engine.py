@@ -14,6 +14,7 @@ Verified LadybugDB value formats (see tests/test_engine_smoke.py):
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import sys
 import threading
@@ -61,9 +62,16 @@ class Engine:
         self.config = config
         self.wal_recovered: bool = False
         db_path = str(config.db_path)
+        self._db_path: Path | None = None
         if db_path != ":memory:":
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            self._db_path = Path(db_path)
+            parent = self._db_path.parent
+            parent_existed = parent.exists()
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not parent_existed and os.name != "nt":
+                parent.chmod(0o700)
         self._db = self._open_db(db_path, config)
+        self._secure_database_files()
         self._write_conn = lb.Connection(self._db)
         self._write_lock = threading.Lock()
         self._readers: queue.Queue = queue.Queue()
@@ -187,7 +195,20 @@ class Engine:
     ) -> EngineResult:
         """Run a write or DDL statement, serialized on the write connection."""
         with self._write_lock:
-            return self._run(self._write_conn, cypher, params)
+            try:
+                return self._run(self._write_conn, cypher, params)
+            finally:
+                # Ladybug creates the WAL lazily on the first write.
+                self._secure_database_files()
+
+    def _secure_database_files(self) -> None:
+        """Keep the database and its transient WAL private to the owner."""
+
+        if self._db_path is None or os.name == "nt":
+            return
+        for path in (self._db_path, Path(f"{self._db_path}.wal")):
+            with suppress(FileNotFoundError):
+                path.chmod(0o600)
 
     def _run(
         self, conn: lb.Connection, cypher: str, params: dict[str, Any] | None

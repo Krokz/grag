@@ -14,7 +14,12 @@ import pytest
 
 from grag.config import GragConfig
 from grag.core.types import IngestDocument, IngestRequest, SearchRequest
-from grag.ingest.loaders import _chunk_text, ingest_documents, ingest_paths
+from grag.ingest.loaders import (
+    _chunk_text,
+    _source_identity,
+    ingest_documents,
+    ingest_paths,
+)
 from grag.service import GragService
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +95,12 @@ def _count_nodes(engine, label="Chunk") -> int:
     return int(engine.execute(f"MATCH (n:{label}) RETURN count(*)").rows[0][0])
 
 
+def _doc_id(
+    source: str | None, text: str, metadata: dict[str, object] | None = None
+) -> str:
+    return f"{_source_identity(source, text, metadata or {})}#0000"
+
+
 def test_ingest_chunk_false_one_node_per_document(engine):
     req = IngestRequest(
         documents=[
@@ -105,10 +116,10 @@ def test_ingest_chunk_false_one_node_per_document(engine):
     rows = engine.execute(
         "MATCH (c:Chunk) RETURN c.id, c.text, c._source ORDER BY c.id"
     ).rows
-    # source is sanitized to a basename slug; provenance keeps the raw source
+    # IDs carry a readable basename plus a source digest; provenance keeps raw input.
     assert rows == [
-        ["doc#0000", "second doc", None],
-        ["my-notes.md#0000", "hello world", "dir/my notes.md"],
+        [_doc_id(None, "second doc"), "second doc", None],
+        [_doc_id("dir/my notes.md", "hello world"), "hello world", "dir/my notes.md"],
     ]
 
 
@@ -125,7 +136,8 @@ def test_ingest_chunked_ids_and_counts(engine):
     assert resp.nodes_created > 1  # ~700 chars of text, 200-char chunks
     rows = engine.execute("MATCH (c:Chunk) RETURN c.id ORDER BY c.id").rows
     assert [r[0] for r in rows] == [
-        f"big.md#{i:04d}" for i in range(resp.nodes_created)
+        f"{_source_identity('big.md', text, {})}#{i:04d}"
+        for i in range(resp.nodes_created)
     ]
 
 
@@ -145,6 +157,79 @@ def test_ingest_is_idempotent(engine):
     assert _count_nodes(engine) == first.nodes_created
 
 
+def test_ingest_same_basename_sources_do_not_collide(engine):
+    req = IngestRequest(
+        documents=[
+            IngestDocument(text="alpha", source="one/notes.md"),
+            IngestDocument(text="beta", source="two/notes.md"),
+        ],
+        chunk=False,
+    )
+    ingest_documents(engine, engine.config, req)
+
+    rows = engine.execute(
+        "MATCH (c:Chunk) RETURN c.id, c.text, c._source ORDER BY c._source"
+    ).rows
+    assert rows == [
+        [_doc_id("one/notes.md", "alpha"), "alpha", "one/notes.md"],
+        [_doc_id("two/notes.md", "beta"), "beta", "two/notes.md"],
+    ]
+    assert rows[0][0] != rows[1][0]
+
+
+def test_reingest_prunes_chunks_no_longer_in_source(engine):
+    source = "shrinking.md"
+    first = ingest_documents(
+        engine,
+        engine.config,
+        IngestRequest(
+            documents=[IngestDocument(text="alpha beta gamma delta", source=source)],
+            chunk_size=8,
+            chunk_overlap=0,
+        ),
+    )
+    assert first.nodes_created > 1
+
+    second = ingest_documents(
+        engine,
+        engine.config,
+        IngestRequest(
+            documents=[IngestDocument(text="short", source=source)],
+            chunk=False,
+        ),
+    )
+    assert second.nodes_created == 1
+    assert second.nodes_pruned == first.nodes_created - 1
+    assert _count_nodes(engine) == 1
+    assert engine.execute("MATCH (c:Chunk) RETURN c.text").rows == [["short"]]
+
+
+def test_reingest_prunes_across_equivalent_source_path_spellings(engine):
+    relative = "docs/alias.md"
+    absolute = str(Path(relative).resolve())
+    first = ingest_documents(
+        engine,
+        engine.config,
+        IngestRequest(
+            documents=[IngestDocument(text="alpha beta gamma", source=relative)],
+            chunk_size=6,
+            chunk_overlap=0,
+        ),
+    )
+    assert first.nodes_created > 1
+
+    second = ingest_documents(
+        engine,
+        engine.config,
+        IngestRequest(
+            documents=[IngestDocument(text="short", source=absolute)],
+            chunk=False,
+        ),
+    )
+    assert second.nodes_pruned == first.nodes_created - 1
+    assert _count_nodes(engine) == 1
+
+
 def test_ingest_meta_json_roundtrip(engine):
     meta = {"author": "Ada", "tags": ["x", "y"], "n": 3}
     req = IngestRequest(
@@ -159,8 +244,8 @@ def test_ingest_meta_json_roundtrip(engine):
     rows = {
         r[0]: r[1] for r in engine.execute("MATCH (c:Chunk) RETURN c.id, c.meta").rows
     }
-    assert json.loads(rows["m.md#0000"]) == meta
-    assert rows["plain.md#0000"] is None  # no metadata -> meta omitted
+    assert json.loads(rows[_doc_id("m.md", "with meta", meta)]) == meta
+    assert rows[_doc_id("plain.md", "without meta")] is None
 
 
 def test_ingest_custom_label(engine):
@@ -203,7 +288,10 @@ def test_ingested_content_findable_via_fts(service):
     resp = service.search_knowledge(SearchRequest(query="cranberry zeppelin", hops=0))
 
     assert resp.seeds
-    assert resp.seeds[0].node.id == "Chunk:notes.md#0000"
+    expected = _doc_id(
+        "notes.md", "The cranberry indexer reconciles zeppelin metrics nightly."
+    )
+    assert resp.seeds[0].node.id == f"Chunk:{expected}"
     assert resp.seeds[0].match == "fts"
     assert "cranberry" in resp.context
 
@@ -262,8 +350,10 @@ def test_ingest_paths_all_formats(tmp_path):
     eng = Engine(cfg)
     try:
         assert _count_nodes(eng) == 7  # each doc fits in one default-size chunk
+        key = _doc_id("c.json", "json list doc about merlins", {"k": 1})
         row = eng.execute(
-            "MATCH (c:Chunk) WHERE c.id = 'c.json#0000' RETURN c.meta, c._source"
+            "MATCH (c:Chunk) WHERE c.id = $key RETURN c.meta, c._source",
+            {"key": key},
         ).rows[0]
         assert json.loads(row[0]) == {"k": 1}
         assert row[1] == "c.json"

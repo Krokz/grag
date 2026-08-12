@@ -157,13 +157,13 @@ graph LR
   F -->|CALLS| F
 ```
 
-Nodes carry path, line range, signature and docstring — **structure only, no source bodies** — with ids like `Module:repo:src/a.py` and `Function:repo:src/a.py#Class.method`. Re-ingesting the same tree is idempotent (MERGE by key). Three recipes:
+Nodes carry path, line range, signature and docstring — **structure only, no source bodies** — with ids like `Module:repo-<canonical-path-sha256>:src/a.py` and `Function:repo-<canonical-path-sha256>:src/a.py#Class.method`. The path-derived repo component prevents same-named checkouts from colliding. Re-ingesting preserves unchanged nodes while pruning removed files, symbols, and generated edges. Three recipes:
 
 ```cypher
 // what imports module X?
-MATCH (m:Module)-[:IMPORTS]->(x:Module) WHERE x.id = 'pkg:core.py' RETURN m.id
+MATCH (m:Module)-[:IMPORTS]->(x:Module) WHERE x.path = 'core.py' RETURN m.id
 // what calls function Y?
-MATCH (f:Function)-[:CALLS]->(y:Function) WHERE y.id = 'pkg:core.py#helper' RETURN f.id
+MATCH (f:Function)-[:CALLS]->(y:Function) WHERE y.path = 'core.py' AND y.name = 'helper' RETURN f.id
 // cross-repo imports (multiple paths ingested into one db)
 MATCH (r1:Repo)-[:CONTAINS_REPO_MODULE]->(a:Module)-[:IMPORTS]->(b:Module)<-[:CONTAINS_REPO_MODULE]-(r2:Repo)
 WHERE r1.id <> r2.id RETURN a.id, b.id
@@ -216,7 +216,7 @@ Cursor / `.cursor/mcp.json` (per window, one header per project):
 
 The server is localhost-only by default, and db names are routing hints, not auth — resolution rejects absolute paths and `..`. Single-db stdio (`grag --db knowledge.lbdb mcp`) remains the simple default.
 
-**HTTP security posture.** The REST layer has no accounts or sessions; the trust model is "whoever can reach the port directly is trusted." Drive-by browser access is denied by default: a Host-header allow-list (loopbacks + the bind host) blocks DNS rebinding, and CORS grants no cross-origin access at all unless you opt in via `GRAG_CORS_ORIGINS` (the built-in UI is served same-origin and needs none). If you bind a non-loopback address, set `GRAG_API_TOKEN` — every `/api/*` route except `/api/health` (and the MCP mount, when enabled) then requires `Authorization: Bearer <token>`.
+**HTTP security posture.** The REST layer has no accounts or sessions; the trust model is "whoever can reach the port directly is trusted." Drive-by browser access is denied by default: a Host-header allow-list (loopbacks + the bind host) blocks DNS rebinding, and CORS grants no cross-origin access at all unless you opt in via `GRAG_CORS_ORIGINS` (the built-in UI is served same-origin and needs none). If you bind a non-loopback address, set `GRAG_API_TOKEN` — every `/api/*` route except `/api/health` and every MCP request then requires `Authorization: Bearer <token>`. Standalone HTTP MCP refuses to bind a non-loopback host without that token. On POSIX, grag also enforces `0600` on database and WAL files (and `0700` when it creates a new database directory).
 
 ## Python API
 

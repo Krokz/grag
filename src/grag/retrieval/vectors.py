@@ -34,7 +34,6 @@ Verified LadybugDB 0.19.1 behaviors relied on here:
 from __future__ import annotations
 
 import os
-import re
 import threading
 import weakref
 from typing import Any, Protocol
@@ -44,6 +43,7 @@ import numpy as np
 from grag.config import EmbedderConfig, GragConfig
 from grag.core.engine import Engine, node_record_from_value
 from grag.core.errors import ConfigurationError, GragError, SchemaError
+from grag.core.ident import validate_identifier
 from grag.core.types import (
     EMB_CODE_PROP,
     EMB_MAGNITUDE_PROP,
@@ -307,16 +307,9 @@ def candidate_scores(codes: list[bytes], codec: str, u_query: np.ndarray) -> np.
 # schema introspection (Agent A preferred, meta table / SHOW_TABLES fallback)
 # ---------------------------------------------------------------------------
 
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 
 def _ident(name: str) -> str:
-    if not _IDENT_RE.match(name):
-        raise SchemaError(
-            f"Invalid identifier {name!r}.",
-            hint="Table/property identifiers must match [A-Za-z_][A-Za-z0-9_]*.",
-        )
-    return name
+    return validate_identifier(name)
 
 
 def _table_info(engine: Engine, table: str) -> list[list[Any]]:

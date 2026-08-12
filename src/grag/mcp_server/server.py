@@ -18,16 +18,19 @@ propagate.
 from __future__ import annotations
 
 import functools
+import hmac
 import inspect
+import ipaddress
 import json
 from collections.abc import Callable
 from typing import Any, TypeVar
 
 from mcp.server.mcpserver import Context, MCPServer
 from pydantic import ValidationError
+from starlette.responses import JSONResponse
 
 from grag.config import GragConfig
-from grag.core.errors import GragError
+from grag.core.errors import ConfigurationError, GragError
 from grag.core.types import (
     CodeIngestRequest,
     ContextRequest,
@@ -61,6 +64,71 @@ __all__ = [
 _F = TypeVar("_F", bound=Callable[..., str])
 
 _COMPACT = (",", ":")  # json.dumps separators: tools return token-lean JSON
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether an explicit bind host is confined to this machine."""
+
+    candidate = host.strip().strip("[]")
+    if candidate.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
+class _BearerAuthMiddleware:
+    """Minimal ASGI bearer guard for the standalone MCP application."""
+
+    def __init__(self, app: Any, token: str):
+        self.app = app
+        self._expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            authorization = next(
+                (
+                    value
+                    for key, value in scope.get("headers", [])
+                    if key.lower() == b"authorization"
+                ),
+                b"",
+            )
+            if not hmac.compare_digest(authorization, self._expected):
+                response = JSONResponse(
+                    {"detail": "Missing or invalid bearer token"}, status_code=401
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def _standalone_http_app(
+    server: MCPServer, config: GragConfig, *, host: str, path: str
+) -> Any:
+    """Build a hardened standalone MCP ASGI app.
+
+    Non-loopback exposure is rejected unless a bearer token is configured.
+    The bind host is also passed into MCP's DNS-rebinding protection.
+    """
+
+    _validate_standalone_http_security(config, host)
+    app = server.streamable_http_app(
+        streamable_http_path=path, stateless_http=True, host=host
+    )
+    if config.api_token:
+        return _BearerAuthMiddleware(app, config.api_token)
+    return app
+
+
+def _validate_standalone_http_security(config: GragConfig, host: str) -> None:
+    if not _is_loopback_host(host) and not config.api_token:
+        raise ConfigurationError(
+            "Standalone HTTP MCP requires GRAG_API_TOKEN on a non-loopback host.",
+            hint="Set GRAG_API_TOKEN or bind to 127.0.0.1/::1.",
+        )
+
 
 _INSTRUCTIONS = (
     "Always call search_knowledge before answering any question about this "
@@ -354,9 +422,10 @@ def ingest_code(
     never source bodies) plus CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Use it
     to answer "what calls X / what inherits from Y / what does module Z
     import" with cheap cypher_query instead of reading files. Re-running on
-    the same tree is idempotent (MERGE by stable ids like "Module:repo:src/
-    a.py" and "Function:repo:src/a.py#Class.method"). Parses Python via stdlib
-    ast plus TypeScript/JavaScript/C#/Terraform via tree-sitter (needs the
+    the same tree preserves stable nodes and prunes removed files, symbols,
+    and generated edges. Repo ids include a canonical-path hash, so same-named
+    checkouts cannot collide. Parses Python via stdlib ast plus TypeScript/
+    JavaScript/C#/Terraform via tree-sitter (needs the
     optional extra: pip install "gragdb[code]"; CALLS/INHERITS edges are
     Python-only for now). Other code files are skipped with a warning.
 
@@ -364,12 +433,12 @@ def ingest_code(
         paths: repo directories (or single files) to walk, e.g. ["src"].
             Build artifacts and VCS dirs (.git, node_modules, dist, ...) are
             skipped automatically.
-        calls: also record same-module CALLS edges (default true).
+        calls: also record resolvable CALLS edges (default true).
         max_file_kb: skip files larger than this many KB (default 1024).
 
-    Returns compact JSON {"repos": n, "modules": n, "classes": n, "functions":
-    n, "edges": n, "warnings": [...]} — always check "warnings" for skipped
-    files.
+    Returns compact JSON {"repos": n, "modules": n, "classes": n,
+    "functions": n, "edges": n, "nodes_pruned": n, "edges_pruned": n,
+    "warnings": [...]} — always check "warnings" for skipped files.
     """
     req = CodeIngestRequest(paths=paths, calls=calls, max_file_kb=max_file_kb)
     resp = service.ingest_code(req)
@@ -506,14 +575,15 @@ def run(
     """Serve the grag tool contract (blocks until shutdown). transport is
     "stdio" (default) or "streamable-http" (uvicorn serving the stateless
     Starlette app at `path` on host:port)."""
+    if transport == "streamable-http":
+        # Fail before opening or creating a database file.
+        _validate_standalone_http_security(config, host)
     server = create_server(config)
     try:
         if transport == "streamable-http":
             import uvicorn
 
-            app = server.streamable_http_app(
-                streamable_http_path=path, stateless_http=True
-            )
+            app = _standalone_http_app(server, config, host=host, path=path)
             uvicorn.run(app, host=host, port=port)
         else:
             # CLI restricts transport to stdio|streamable-http; the literal

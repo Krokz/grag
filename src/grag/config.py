@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+def database_identity(path: Path) -> str:
+    """Stable, non-reversible identity for a database path.
+
+    Auto-serve proxies compare this value with ``/api/health`` before attaching,
+    preventing one project's MCP client from silently reusing another project's
+    server on the same port.
+    """
+    canonical = ":memory:" if str(path) == ":memory:" else str(path.resolve())
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class EmbedderConfig(BaseModel):

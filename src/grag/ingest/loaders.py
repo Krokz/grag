@@ -3,13 +3,15 @@
 `ingest_documents` is the frozen library entry point (reached via
 grag.service.GragService.ingest); `ingest_paths` backs the `grag ingest` CLI
 command. Chunk nodes carry the raw `text` plus a JSON-encoded `meta` property
-and `_source` provenance. Node keys are deterministic (`<source-slug>#NNNN`),
-so re-ingesting the same document MERGEs over its own chunks — ingestion is
-idempotent by construction.
+and `_source` provenance. Node keys are deterministic
+(`<source-slug>-<source-hash>#NNNN`), so same-basename sources cannot overwrite
+each other. Re-ingestion is an authoritative sync for each named source:
+current chunks are MERGEd and stale chunks from that source are pruned.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -70,29 +72,89 @@ def ingest_documents(
     )
 
     nodes: list[UpsertNode] = []
+    desired_by_source: dict[str, set[str]] = {}
+    desired_by_identity: dict[str, set[str]] = {}
+    source_occurrences: dict[str, int] = {}
     for doc in req.documents:
-        slug = _source_slug(doc.source)
+        base_identity = _source_identity(doc.source, doc.text, doc.metadata)
+        desired_by_identity.setdefault(base_identity, set())
+        occurrence_key = _normalized_source(doc.source) if doc.source else base_identity
+        occurrence = source_occurrences.get(occurrence_key, 0)
+        source_occurrences[occurrence_key] = occurrence + 1
+        identity = f"{base_identity}~{occurrence:04d}" if occurrence else base_identity
+        if doc.source is not None:
+            desired_by_source.setdefault(doc.source, set())
         if req.chunk:
             chunks = _chunk_text(doc.text, req.chunk_size, req.chunk_overlap)
         else:
             chunks = [doc.text]
         for i, text in enumerate(chunks):
+            key = f"{identity}#{i:04d}"
             props: dict[str, str] = {"text": text}
             if doc.metadata:
                 props["meta"] = json.dumps(doc.metadata, sort_keys=True)
             nodes.append(
                 UpsertNode(
                     label=req.label,
-                    key=f"{slug}#{i:04d}",
+                    key=key,
                     properties=props,
                     source=doc.source,
                 )
             )
+            if doc.source is not None:
+                desired_by_source[doc.source].add(key)
+            desired_by_identity[base_identity].add(key)
 
     if nodes:
         upsert_nodes(engine, config, UpsertNodesRequest(nodes=nodes))
+    nodes_pruned = _prune_stale_chunks(
+        engine,
+        req.label,
+        desired_by_source=desired_by_source,
+        desired_by_identity=desired_by_identity,
+    )
     _embed_pending(engine, config, req.label)
-    return IngestResponse(label=req.label, nodes_created=len(nodes))
+    return IngestResponse(
+        label=req.label, nodes_created=len(nodes), nodes_pruned=nodes_pruned
+    )
+
+
+def _prune_stale_chunks(
+    engine: Engine,
+    label: str,
+    *,
+    desired_by_source: dict[str, set[str]],
+    desired_by_identity: dict[str, set[str]],
+) -> int:
+    if not desired_by_source and not desired_by_identity:
+        return 0
+    pruned = 0
+    # Identity pruning handles equivalent relative/absolute spellings of the
+    # same path and removes surplus duplicate-document occurrences.
+    for identity, desired in desired_by_identity.items():
+        result = engine.execute_write(
+            f"MATCH (n:{label}) WHERE n.id STARTS WITH $identity "
+            f"AND NOT n.id IN $keys DETACH DELETE n RETURN count(n)",
+            {"identity": identity, "keys": sorted(desired)},
+        )
+        if result.rows:
+            pruned += int(result.rows[0][0])
+    # Provenance pruning also migrates legacy basename-only chunk ids.
+    columns = {
+        str(row[1])
+        for row in engine.execute(f"CALL TABLE_INFO('{label}') RETURN *").rows
+    }
+    if "_source" not in columns:
+        return pruned
+    for source, desired in desired_by_source.items():
+        result = engine.execute_write(
+            f"MATCH (n:{label}) WHERE n._source = $source "
+            f"AND NOT n.id IN $keys DETACH DELETE n RETURN count(n)",
+            {"source": source, "keys": sorted(desired)},
+        )
+        if result.rows:
+            pruned += int(result.rows[0][0])
+    return pruned
 
 
 def _embed_pending(engine: Engine, config: GragConfig, label: str) -> None:
@@ -154,7 +216,8 @@ def ingest_paths(config: GragConfig, paths: list[Path]) -> str:
     lines = [
         (
             f"Ingested {len(documents)} document(s) from {files_read} file(s): "
-            f"{resp.nodes_created} node(s) written to label '{resp.label}' in {config.db_path}."
+            f"{resp.nodes_created} node(s) written, {resp.nodes_pruned} stale node(s) "
+            f"pruned from label '{resp.label}' in {config.db_path}."
         )
     ]
     if warnings:
@@ -298,3 +361,28 @@ def _source_slug(source: str | None) -> str:
         return "doc"
     slug = _SLUG_RE.sub("-", Path(str(source)).name).strip("-")
     return slug or "doc"
+
+
+def _normalized_source(source: str | None) -> str:
+    if source is None:
+        return ""
+    raw = str(source)
+    if "://" in raw:
+        return raw
+    return str(Path(raw).expanduser().resolve())
+
+
+def _source_identity(source: str | None, text: str, metadata: dict[str, object]) -> str:
+    """Human-readable, collision-resistant identity for a source document."""
+
+    if source is not None:
+        material = _normalized_source(source)
+    else:
+        material = json.dumps(
+            {"text": text, "metadata": metadata},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return f"{_source_slug(source)}-{digest}"

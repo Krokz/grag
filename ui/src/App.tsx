@@ -13,7 +13,11 @@ import type {
 } from './types';
 import { mergeSubgraphs, neighborCypher, pkMapFromSchema } from './graph-utils';
 import { SchemaPanel } from './components/SchemaPanel';
-import { GraphCanvas, type SeedInfo } from './components/GraphCanvas';
+import {
+  GraphCanvas,
+  type FocusRequest,
+  type SeedInfo,
+} from './components/GraphCanvas';
 import { Console, type ApplyMode, type ResultView } from './components/Console';
 import { SearchBar, SearchPanel } from './components/SearchBar';
 import { Inspector } from './components/Inspector';
@@ -31,6 +35,7 @@ export default function App() {
   const [stats, setStats] = useState<GraphStats | null>(null);
   const [seeds, setSeeds] = useState<Map<string, SeedInfo>>(new Map());
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
   const [filter, setFilter] = useState('');
   const [labelFilter, setLabelFilter] = useState<string | null>(null);
 
@@ -82,6 +87,7 @@ export default function App() {
     setLabelFilter(null);
     setFilter('');
     setSelectedId(null);
+    setFocusRequest(null);
     try {
       const sample = await api.sample(200);
       setStats(sample.stats);
@@ -124,6 +130,7 @@ export default function App() {
     setStats(null);
     setSeeds(new Map());
     setSelectedId(null);
+    setFocusRequest(null);
     setResult(null);
     setQueryError(null);
     setSearchResult(null);
@@ -163,7 +170,13 @@ export default function App() {
   const expandNode = useCallback(
     (node: NodeRecord) => {
       setSelectedId(node.id);
-      void runQuery(neighborCypher(node, pkMap), 'merge');
+      void runQuery(neighborCypher(node, pkMap), 'merge').then(() => {
+        setFocusRequest((current) => ({
+          nodeId: node.id,
+          revision: (current?.revision ?? 0) + 1,
+          keepStable: true,
+        }));
+      });
     },
     [pkMap, runQuery],
   );
@@ -197,6 +210,20 @@ export default function App() {
     } finally {
       setSearching(false);
     }
+  }, []);
+
+  const revealSearchNode = useCallback((node: NodeRecord) => {
+    // A search result may not match a canvas text/label filter that was active
+    // before the search. Clear those presentation filters so the requested
+    // node is guaranteed to be visible, then ask the canvas to center it.
+    setFilter('');
+    setLabelFilter(null);
+    setSelectedId(node.id);
+    setFocusRequest((current) => ({
+      nodeId: node.id,
+      revision: (current?.revision ?? 0) + 1,
+      keepStable: false,
+    }));
   }, []);
 
   const selectedNode = useMemo(
@@ -275,6 +302,8 @@ export default function App() {
         <SearchPanel
           result={searchResult}
           error={searchError}
+          selectedId={selectedId}
+          onSelectNode={revealSearchNode}
           onClose={() => {
             setSearchResult(null);
             setSearchError(null);
@@ -300,6 +329,7 @@ export default function App() {
             pkMap={pkMap}
             seeds={seeds}
             selectedId={selectedId}
+            focusRequest={focusRequest}
             filter={filter}
             stats={stats}
             onFilterChange={setFilter}
