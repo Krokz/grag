@@ -27,14 +27,32 @@ _CLIENTS: tuple[str, ...] = ("claude", "cursor", "windsurf", "zed")
 
 
 def _grag_bin() -> str:
-    """Absolute path to the grag binary that is currently running."""
+    """Command the MCP client should spawn for grag.
+
+    A globally installed grag (pipx / uv tool / homebrew — anything outside the
+    running interpreter's prefix) is written as bare ``"grag"``: it stays valid
+    when the install is upgraded or moved. A grag inside the current virtualenv
+    keeps its absolute path — the client's PATH won't have the venv on it —
+    at the cost of breaking if the venv is recreated (re-run ``grag init``).
+    """
     import shutil
 
     found = shutil.which("grag")
     if found:
+        if not Path(found).resolve().is_relative_to(Path(sys.prefix).resolve()):
+            return "grag"
         return found
     # grag is running right now; sys.argv[0] is definitionally correct.
     return sys.argv[0]
+
+
+def _fastembed_available() -> bool:
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("fastembed") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _load_json(path: Path) -> dict:
@@ -53,9 +71,12 @@ def _dump_json(data: dict) -> str:
 def _stdio_entry(db_path: Path, port: int = 8471) -> dict:
     """Stdio entry with --auto-serve: starts grag serve --with-mcp if needed, then proxies.
 
-    The proxy process holds no write lock, so the browser UI and LLM tools work simultaneously.
+    The proxy process holds no write lock, so the browser UI and LLM tools work
+    simultaneously. When fastembed is installed, GRAG_EMBED_PROVIDER is baked
+    into the entry so the auto-served daemon inherits it — otherwise a user who
+    installed the embed-local extra would silently get FTS-only retrieval.
     """
-    return {
+    entry: dict = {
         "command": _grag_bin(),
         "args": [
             "--db",
@@ -66,6 +87,9 @@ def _stdio_entry(db_path: Path, port: int = 8471) -> dict:
             str(port),
         ],
     }
+    if _fastembed_available():
+        entry["env"] = {"GRAG_EMBED_PROVIDER": "fastembed"}
+    return entry
 
 
 def _url_entry(port: int) -> dict:
@@ -134,13 +158,7 @@ def _op_zed(db_path: Path, port: int = 8471) -> WriteOp | SkipOp:
         if "//" in raw or "/*" in raw:
             entry = _stdio_entry(db_path, port)
             snippet = json.dumps(
-                {
-                    "context_servers": {
-                        "grag": {
-                            "command": {"path": entry["command"], "args": entry["args"]}
-                        }
-                    }
-                },
+                {"context_servers": {"grag": _zed_command(entry)}},
                 indent=2,
             )
             return SkipOp(
@@ -152,10 +170,15 @@ def _op_zed(db_path: Path, port: int = 8471) -> WriteOp | SkipOp:
     else:
         data = {}
     entry = _stdio_entry(db_path, port)
-    data.setdefault("context_servers", {})["grag"] = {
-        "command": {"path": entry["command"], "args": entry["args"]}
-    }
+    data.setdefault("context_servers", {})["grag"] = _zed_command(entry)
     return WriteOp(path, _dump_json(data), not path.exists())
+
+
+def _zed_command(entry: dict) -> dict:
+    command = {"path": entry["command"], "args": entry["args"]}
+    if "env" in entry:
+        command["env"] = entry["env"]
+    return {"command": command}
 
 
 # ---------------------------------------------------------------------------
@@ -269,3 +292,73 @@ def apply_ops(ops: list[WriteOp | SkipOp]) -> None:
             print(f"  {verb}: {op.path}")
             op.path.parent.mkdir(parents=True, exist_ok=True)
             op.path.write_text(op.content, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# removal (grag init --remove)
+# ---------------------------------------------------------------------------
+
+
+def _remove_json_entry(path: Path, section: str) -> WriteOp | SkipOp | None:
+    """Drop the 'grag' entry from `section` of a JSON config file.
+
+    Returns None when the file doesn't exist or holds no grag entry.
+    """
+    if not path.exists():
+        return None
+    raw = path.read_text(encoding="utf-8")
+    if "//" in raw or "/*" in raw:
+        return SkipOp(
+            path, "file contains comments (JSONC) — remove the grag entry manually"
+        )
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return SkipOp(path, "file is not valid JSON — remove the grag entry manually")
+    servers = data.get(section)
+    if not isinstance(servers, dict) or "grag" not in servers:
+        return None
+    del servers["grag"]
+    return WriteOp(path, _dump_json(data), False)
+
+
+def plan_remove_ops(clients: list[str], project_root: Path) -> list[WriteOp | SkipOp]:
+    """Plan the write-ops that undo `grag init` for the given clients."""
+    ops: list[WriteOp | SkipOp | None] = []
+    if "claude" in clients:
+        ops.append(_remove_json_entry(project_root / ".mcp.json", "mcpServers"))
+    if "cursor" in clients:
+        ops.append(
+            _remove_json_entry(project_root / ".cursor" / "mcp.json", "mcpServers")
+        )
+    if "windsurf" in clients:
+        ops.append(
+            _remove_json_entry(
+                Path.home() / ".codeium" / "windsurf" / "mcp_config.json",
+                "mcpServers",
+            )
+        )
+    if "zed" in clients:
+        ops.append(
+            _remove_json_entry(
+                Path.home() / ".config" / "zed" / "settings.json", "context_servers"
+            )
+        )
+    ops.append(plan_claude_md_removal(project_root))
+    return [op for op in ops if op is not None]
+
+
+def plan_claude_md_removal(project_root: Path) -> WriteOp | None:
+    """Strip the grag block from CLAUDE.md; None when there is nothing to strip."""
+    path = project_root / "CLAUDE.md"
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8")
+    start = text.find(_BLOCK_START)
+    end = text.find(_BLOCK_END)
+    if start == -1 or end == -1:
+        return None
+    new_text = text[:start] + text[end + len(_BLOCK_END) :]
+    new_text = new_text.strip("\n")
+    new_text = new_text + "\n" if new_text else ""
+    return WriteOp(path, new_text, False)
