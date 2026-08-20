@@ -36,12 +36,16 @@ import logging
 import os
 import posixpath
 import re
+import subprocess
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from grag.config import GragConfig
 from grag.core.engine import Engine
+from grag.core.errors import GragError
 from grag.core.mutate import define_schema, upsert_edges, upsert_nodes
 from grag.core.types import (
     CodeIngestRequest,
@@ -72,7 +76,16 @@ _CODE_NODE_TABLES = [
         name="Repo",
         primary_key="id",
         searchable=True,
-        properties=[_S(name="name"), _S(name="path")],
+        # git_commit/git_branch/ingested_at power staleness reporting (grag
+        # doctor): "the index is N commits behind HEAD" instead of silently
+        # answering from a rotted graph.
+        properties=[
+            _S(name="name"),
+            _S(name="path"),
+            _S(name="git_commit"),
+            _S(name="git_branch"),
+            _S(name="ingested_at"),
+        ],
     ),
     NodeTableSpec(
         name="Module",
@@ -698,6 +711,51 @@ def _prune_legacy_repos(engine: Engine, repos: dict[str, UpsertNode]) -> int:
     return pruned
 
 
+# --- repo staleness metadata ------------------------------------------------------
+
+_REPO_STALENESS_COLUMNS = ("git_commit", "git_branch", "ingested_at")
+
+
+def _ensure_repo_staleness_columns(engine: Engine) -> None:
+    """ALTER pre-existing Repo tables to add the staleness columns.
+
+    define_schema never alters an existing table (if_not_exists skips it), so
+    databases ingested before these columns existed need an explicit ADD.
+    """
+    try:
+        res = engine.execute("CALL TABLE_INFO('Repo') RETURN *")
+    except GragError:
+        return
+    existing = {str(row[1]) for row in res.rows}
+    for column in _REPO_STALENESS_COLUMNS:
+        if column not in existing:
+            with suppress(GragError):
+                engine.execute_write(f"ALTER TABLE Repo ADD {column} STRING")
+
+
+def _git_state(root: Path) -> dict[str, str]:
+    """{'git_commit', 'git_branch'} for a checkout; {} outside git / no git."""
+    out: dict[str, str] = {}
+    for prop, args in (
+        ("git_commit", ["rev-parse", "HEAD"]),
+        ("git_branch", ["rev-parse", "--abbrev-ref", "HEAD"]),
+    ):
+        try:
+            proc = subprocess.run(  # noqa: S603 — fixed git argv over a local path
+                ["git", "-C", str(root), *args],  # noqa: S607
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return {}
+        if proc.returncode != 0:
+            return out
+        out[prop] = proc.stdout.strip()
+    return out
+
+
 # --- public: ingest_code ----------------------------------------------------------
 
 
@@ -718,6 +776,7 @@ def ingest_code(
             node_tables=list(_CODE_NODE_TABLES), rel_tables=list(_CODE_REL_TABLES)
         ),
     )
+    _ensure_repo_staleness_columns(engine)
 
     warnings: list[str] = []
     input_paths = [Path(p) for p in req.paths]
@@ -732,11 +791,17 @@ def ingest_code(
         else:
             continue
         roots[_repo_id(root)] = root
+    ingested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     repos: dict[str, UpsertNode] = {
         repo_id: UpsertNode(
             label="Repo",
             key=repo_id,
-            properties={"name": root.name or "repo", "path": str(root)},
+            properties={
+                "name": root.name or "repo",
+                "path": str(root),
+                "ingested_at": ingested_at,
+                **_git_state(root),
+            },
             source=str(root),
         )
         for repo_id, root in roots.items()

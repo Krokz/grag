@@ -409,3 +409,63 @@ def test_calls_resolve_function_local_lazy_import_inside_try(engine, tmp_path):
         f"{_mid(pkg, 'engine.py')}#vector_candidates",
     ) in _edge_pairs(engine, "CALLS")
 
+
+# --- staleness metadata (git_commit / git_branch / ingested_at) -------------------
+
+
+def test_repo_carries_ingested_at_outside_git(engine, tmp_path):
+    pkg = _write_pkg(tmp_path)
+    ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
+    rows = engine.execute(
+        "MATCH (r:Repo) RETURN r.ingested_at, r.git_commit"
+    ).rows
+    assert len(rows) == 1
+    ingested_at, git_commit = rows[0]
+    assert ingested_at  # ISO timestamp string
+    assert git_commit is None  # tmp_path is not a git checkout
+
+
+def test_repo_carries_git_commit_inside_git(engine, tmp_path):
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        import pytest
+
+        pytest.skip("git not installed")
+    pkg = _write_pkg(tmp_path)
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        "HOME": str(tmp_path),
+        "PATH": __import__("os").environ["PATH"],
+    }
+    for argv in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-q", "-m", "init"],
+    ):
+        subprocess.run(argv, cwd=pkg, env=env, check=True)  # noqa: S603 — fixed git argv
+
+    ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
+    rows = engine.execute(
+        "MATCH (r:Repo) RETURN r.git_commit, r.git_branch"
+    ).rows
+    commit, branch = rows[0]
+    assert commit and len(commit) == 40
+    assert branch == "main"
+
+
+def test_reingest_adds_staleness_columns_to_legacy_repo_table(engine, tmp_path):
+    """Databases whose Repo table predates the staleness columns get ALTERed."""
+    engine.execute_write(
+        "CREATE NODE TABLE Repo(id STRING PRIMARY KEY, name STRING, path STRING, "
+        "_source STRING, _created_at TIMESTAMP)"
+    )
+    pkg = _write_pkg(tmp_path)
+    resp = ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
+    assert resp.repos == 1
+    rows = engine.execute("MATCH (r:Repo) RETURN r.ingested_at").rows
+    assert rows and rows[0][0]
