@@ -69,6 +69,15 @@ Linux, macOS, and Windows are all exercised in CI. For CLI + MCP use, prefer a
 `pipx` / `uv tool` install: it puts a stable `grag` on PATH, so the MCP config
 `grag init` writes keeps working when project virtualenvs come and go.
 
+**Windows note.** The current LadybugDB wheel links OpenSSL 3 without bundling
+it. If opening a database fails with `Could not find lbug C API shared library`
+(a misleading fallback error — the real cause is the missing OpenSSL DLLs),
+install [OpenSSL 3 for Win64](https://slproweb.com/products/Win32OpenSSL.html)
+and copy `libssl-3-x64.dll` and `libcrypto-3-x64.dll` from its `bin\` folder
+into the `ladybug.libs` directory next to the `ladybug` package in your Python
+`site-packages`. Tracked as an upstream ladybug packaging issue; this note goes
+away once their wheel bundles the DLLs.
+
 **From source** (for development). Build the UI **first** — `pip install` needs the
 built bundle at `src/grag/api/static` (the wheel's force-include; see `pyproject.toml`):
 
