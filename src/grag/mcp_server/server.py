@@ -145,7 +145,11 @@ _INSTRUCTIONS = (
     "pip install 'gragdb[embed-local]' then restart the server with "
     "GRAG_EMBED_PROVIDER=fastembed. When search_knowledge returns "
     "pending_embeddings > 0, nodes are still being embedded — recall improves "
-    "as later searches drain the backlog."
+    "as later searches drain the backlog. When it returns \"vector\": \"off\", "
+    "no embedder is configured on this server process — FTS-only is expected "
+    "and pending_embeddings will never appear, so don't mistake that for "
+    "\"fully embedded.\" \"vector\": \"error\" means an embedder is configured "
+    "but failed for that call — say so rather than guessing why recall is FTS-only."
 )
 
 
@@ -358,7 +362,13 @@ def search_knowledge(
     "fts"}, ...]}. Pass seed ids to get_context for focused follow-up
     expansion. When the footer includes "pending_embeddings": n, n nodes are
     still awaiting vector embedding — vector recall improves as later
-    searches drain that backlog (ingest embeds its own writes in full).
+    searches drain that backlog (ingest embeds its own writes in full). When
+    the footer includes "vector": "off", no embedder is configured for this
+    server process — every seed is FTS-only and pending_embeddings will
+    never appear (it's always 0), so don't read "no pending_embeddings" as
+    "fully embedded." "vector": "error" means an embedder is configured but
+    the vector path failed for this call (bad install or config) and
+    silently fell back to FTS — worth checking server logs.
     """
     resp = service.search_knowledge(
         SearchRequest(
@@ -377,6 +387,8 @@ def search_knowledge(
     }
     if resp.pending_embeddings:
         payload["pending_embeddings"] = resp.pending_embeddings
+    if resp.vector_status:
+        payload["vector"] = resp.vector_status
     footer = json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
     if resp.context:
         return f"{resp.context}\n\n---\n{footer}"
@@ -425,9 +437,17 @@ def ingest_code(
     the same tree preserves stable nodes and prunes removed files, symbols,
     and generated edges. Repo ids include a canonical-path hash, so same-named
     checkouts cannot collide. Parses Python via stdlib ast plus TypeScript/
-    JavaScript/C#/Terraform via tree-sitter (needs the
+    JavaScript/C#/Terraform/Go via tree-sitter (needs the
     optional extra: pip install "gragdb[code]"; CALLS/INHERITS edges are
     Python-only for now). Other code files are skipped with a warning.
+
+    Terraform (.tf) `module` blocks also become TerraformModuleCall nodes
+    (name, source, version), one per block, local or registry/git source
+    alike — read straight off the .tf file, never retyped by hand. Prefer
+    this over writing a module's version into a manually-authored node from
+    a README or other doc: cypher_query it instead (e.g. MATCH
+    (m:TerraformModuleCall) WHERE m.source CONTAINS '<name>' RETURN
+    m.version) so the answer can't drift from what's actually pinned.
 
     Args:
         paths: repo directories (or single files) to walk, e.g. ["src"].
@@ -437,8 +457,9 @@ def ingest_code(
         max_file_kb: skip files larger than this many KB (default 1024).
 
     Returns compact JSON {"repos": n, "modules": n, "classes": n,
-    "functions": n, "edges": n, "nodes_pruned": n, "edges_pruned": n,
-    "warnings": [...]} — always check "warnings" for skipped files.
+    "functions": n, "module_calls": n, "edges": n, "nodes_pruned": n,
+    "edges_pruned": n, "warnings": [...]} — always check "warnings" for
+    skipped files.
     """
     req = CodeIngestRequest(paths=paths, calls=calls, max_file_kb=max_file_kb)
     resp = service.ingest_code(req)

@@ -315,7 +315,10 @@ def test_search_knowledge_empty_db_returns_empty_seeds(service: GragService):
     out = mcp_server.search_knowledge(service, "anything")
     assert not out.startswith("ERROR")
     payload = json.loads(out)  # no context, just the footer
-    assert payload == {"seeds": []}
+    # No embedder configured on the test service: "vector":"off" disambiguates
+    # this from "embedder configured, backlog fully drained" (both would
+    # otherwise look identical — no pending_embeddings, no vector seeds).
+    assert payload == {"seeds": [], "vector": "off"}
 
 
 # --- ingest_code ---------------------------------------------------------------------

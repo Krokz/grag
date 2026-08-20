@@ -1,5 +1,5 @@
 """Tree-sitter parsers for the code graph (Wave B): TypeScript/JavaScript,
-C# and Terraform/HCL. Python stays on stdlib ast in `grag.ingest.code`.
+C#, Terraform/HCL and Go. Python stays on stdlib ast in `grag.ingest.code`.
 
 This module is imported LAZILY from `grag.ingest.code` (which owns the
 `_PARSERS` dispatch) so a base install without the `code` extra never imports
@@ -14,13 +14,19 @@ so the walk/upsert pipeline and cross-module IMPORTS resolution in
 * Import refs are normalized onto the dotted path keys the existing resolver
   matches: relative specifiers (`./lib/x`) resolve against the importing
   file, C# `using` matches scanned namespaces via `_ParsedModule.aliases`,
-  and a Terraform `module` source matches a scanned directory holding exactly
-  one .tf file. Unresolved refs (external packages) skip silently.
+  a Terraform `module` source matches a scanned directory holding exactly
+  one .tf file, and a Go import matches a scanned package by declared name
+  (see `_walk_go`). Unresolved refs (external packages) skip silently.
 
 Grammar notes: `.tsx` uses the tsx language (JSX on) and plain `.ts` the
 typescript language (JSX must stay off there), per tree-sitter-typescript.
 Terraform has no class/function/import declarations, so .tf files yield a
-Module node plus IMPORTS edges from `module` block sources only.
+Module node, a TerraformModuleCall node per `module` block (name/source/
+version read straight off the block — never hand-typed, so a version pin in
+the graph can't drift from the source of truth), and IMPORTS edges from
+local `module` block sources only. Go has no lexical class nesting: methods
+are top-level funcs carrying a receiver type, matched back to their
+struct/interface Class node by that type name (see `_walk_go`).
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ _SUFFIX_LANGUAGES = {
     ".cjs": ("tree_sitter_javascript", "language", "javascript"),
     ".cs": ("tree_sitter_c_sharp", "language", "csharp"),
     ".tf": ("tree_sitter_hcl", "language", "hcl"),
+    ".go": ("tree_sitter_go", "language", "go"),
 }
 
 # Import specifiers may carry an explicit extension; strip it to match the
@@ -111,6 +118,8 @@ def parse_file(
         _walk_csharp(root, source.encode("utf-8"), parsed, path, rel_path)
     elif language == "hcl":
         _walk_hcl(root, source.encode("utf-8"), parsed, rel_path)
+    elif language == "go":
+        _walk_go(root, source.encode("utf-8"), parsed, rel_path)
     else:
         _walk_tsjs(root, source.encode("utf-8"), parsed, path, rel_path)
     return parsed
@@ -223,9 +232,17 @@ def _add_function(
     rel_path: str,
     language: str,
     source_path: str,
-) -> None:
+    link_to_class: bool = True,
+) -> str:
     """Function node + CONTAINS_MODULE_FUNCTION / CONTAINS_CLASS_FUNCTION,
-    mirroring code._parse_python (is_method when inside a class)."""
+    mirroring code._parse_python (is_method when inside a class). Returns
+    the function's id.
+
+    link_to_class=False still sets is_method and method_ids but skips the
+    same-file CONTAINS_CLASS_FUNCTION append — for Go, whose methods can
+    name a receiver type declared in a different file of the same package;
+    the caller resolves and links those via `_ParsedModule.go_method_links`
+    instead (a same-file class id would often be wrong)."""
     module_id = str(parsed.module.key)
     fid = f"{module_id}#{qual}"
     is_method = parent_class is not None
@@ -247,14 +264,16 @@ def _add_function(
         )
     )
     if parent_class is not None:
-        parsed.contains.append(
-            ("CONTAINS_CLASS_FUNCTION", f"{module_id}#{parent_class}", fid)
-        )
+        if link_to_class:
+            parsed.contains.append(
+                ("CONTAINS_CLASS_FUNCTION", f"{module_id}#{parent_class}", fid)
+            )
         parsed.method_ids.setdefault(parent_class, {})[name] = fid
     else:
         parsed.contains.append(("CONTAINS_MODULE_FUNCTION", module_id, fid))
         if "." not in qual:
             parsed.func_ids.setdefault(name, fid)
+    return fid
 
 
 def _path_import_refs(
@@ -288,9 +307,14 @@ def _path_import_refs(
 
 
 def _string_value(node: Any, src: bytes) -> str:
-    """String literal content without quotes (ts string / hcl string_lit)."""
+    """String literal content without quotes (ts string_fragment / hcl
+    template_literal / go interpreted_string_literal_content)."""
     for child in _walk_all(node):
-        if child.type in ("string_fragment", "template_literal"):
+        if child.type in (
+            "string_fragment",
+            "template_literal",
+            "interpreted_string_literal_content",
+        ):
             return _text(child, src)
     return _text(node, src).strip("\"'")
 
@@ -580,10 +604,16 @@ def _walk_csharp(
 
 def _walk_hcl(root: Any, src: bytes, parsed: _ParsedModule, rel_path: str) -> None:
     """Terraform files have no class/function/import declarations: the
-    structural facts are the Module node itself plus `module` block sources,
-    which reference module DIRECTORIES. Each .tf file registers its directory
-    as an alias, so a local source resolves when the directory holds exactly
-    one .tf file (several files -> ambiguous -> skipped silently)."""
+    structural facts are the Module node itself, a TerraformModuleCall node
+    per `module` block (name/source/version, mechanically read off the block
+    — the whole point being that an LLM never has to retype a version pin
+    from a doc), and `module` block sources that reference local module
+    DIRECTORIES. Each .tf file registers its directory as an alias, so a
+    local source resolves when the directory holds exactly one .tf file
+    (several files -> ambiguous -> skipped silently). Registry/git sources
+    still get a TerraformModuleCall node; they just skip the IMPORTS edge
+    (no scanned file to point at)."""
+    module_id = str(parsed.module.key)
     dir_dotted = posixpath.dirname(rel_path).replace("/", ".")
     if dir_dotted:
         parsed.aliases.append(dir_dotted)
@@ -597,18 +627,215 @@ def _walk_hcl(root: Any, src: bytes, parsed: _ParsedModule, rel_path: str) -> No
             or _text(children[0], src) != "module"
         ):
             continue
+        label = children[1] if len(children) > 1 else None
+        if label is None or label.type != "string_lit":
+            continue  # malformed/labelless module block: nothing to key on
         body = next((c for c in children if c.type == "body"), None)
         if body is None:
             continue
+        name = _string_value(label, src)
+        source_val = ""
+        version_val = ""
         for attr in body.named_children:
             if attr.type != "attribute" or not attr.named_children:
                 continue
-            if _text(attr.named_children[0], src) != "source":
-                continue
-            value = _string_value(attr, src)
-            # Local path sources ('./x', '../x') only; registry/git sources
-            # name no scanned file and skip silently.
-            if value.startswith("."):
-                parsed.import_refs.extend(
-                    _path_import_refs(value, rel_path, index_name=None)
+            attr_name = _text(attr.named_children[0], src)
+            if attr_name == "source":
+                source_val = _string_value(attr, src)
+            elif attr_name == "version":
+                version_val = _string_value(attr, src)
+        call_id = f"{module_id}#{name}"
+        parsed.terraform_module_calls.append(
+            UpsertNode(
+                label="TerraformModuleCall",
+                key=call_id,
+                properties={
+                    "name": name,
+                    "source": source_val,
+                    "version": version_val,
+                    "path": rel_path,
+                    "line_start": node.start_point[0] + 1,
+                    "line_end": node.end_point[0] + 1,
+                },
+                source=parsed.module.source,
+            )
+        )
+        parsed.contains.append(("CONTAINS_MODULE_MODULECALL", module_id, call_id))
+        # Local path sources ('./x', '../x') only; registry/git sources name
+        # no scanned file and get no IMPORTS edge (the TerraformModuleCall
+        # node above still records them).
+        if source_val.startswith("."):
+            parsed.import_refs.extend(
+                _path_import_refs(source_val, rel_path, index_name=None)
+            )
+
+
+# --- go ------------------------------------------------------------------------------
+
+
+def _go_receiver_type(node: Any, src: bytes) -> str | None:
+    """The receiver's type name for a `method_declaration`
+    (`func (g *Greeter) X()` / `func (g Greeter) X()` -> "Greeter"), or None
+    if the node isn't shaped like a method (defensive; grammar guarantees a
+    receiver here in practice)."""
+    if not node.named_children or node.named_children[0].type != "parameter_list":
+        return None
+    receiver = node.named_children[0]
+    if not receiver.named_children:
+        return None
+    pd = receiver.named_children[0]
+    if pd.type != "parameter_declaration" or not pd.named_children:
+        return None
+    type_node = pd.named_children[-1]  # receiver var name (if any) comes first
+    if type_node.type in ("pointer_type", "generic_type") and type_node.named_children:
+        type_node = type_node.named_children[0]
+    return _text(type_node, src) if type_node.type == "type_identifier" else None
+
+
+def _walk_go(root: Any, src: bytes, parsed: _ParsedModule, rel_path: str) -> None:
+    """Go has no lexical class nesting: methods are top-level funcs carrying
+    a receiver type, not members of a struct/interface body, and — unlike
+    every OOP language here — a method's receiver can name ANY declared
+    type, not just a struct or interface (named slices/maps/basic types
+    with methods are idiomatic Go: sort.Interface implementations, Stringer
+    enums). So every `type X ...` spec becomes a Class node regardless of
+    kind, guaranteeing a method's receiver always names something; kind-
+    specific handling only adds interface_type's method_elem entries as
+    Function nodes too, since for an interface that's most of what it *is*.
+
+    Unlike every other language here, a receiver type's declaration and its
+    methods routinely live in DIFFERENT files of the same package (a type
+    declared in one file, its methods spread across many more — extremely
+    common Go style). So method_declaration doesn't link same-file like
+    everyone else: it records (receiver type name, function id) in
+    `parsed.go_method_links` and `code.ingest_code` resolves those against a
+    package-wide (directory, type name) -> class id index built after every
+    file in the scan is parsed, once the receiver's actual declaring file is
+    knowable. Interface method_elem entries skip this — an interface's
+    method set can't be declared outside its own `interface { ... }` body,
+    so same-file linking is always correct for those.
+
+    IMPORTS resolution is best-effort and narrower than the other languages:
+    Go import paths are always fully-qualified (no relative-import syntax),
+    and without parsing go.mod there's no way to know a local package's true
+    import-path prefix. So this matches on the imported package's own name
+    (its declared `package` clause, registered as an alias, vs. the
+    import path's last segment by Go convention) — it resolves imports of
+    single-file local packages whose name is unique across the scanned set,
+    and silently skips everything else (stdlib, third-party, and any
+    multi-file local package, which registers an ambiguous alias — the same
+    accepted limitation as C# namespaces and Terraform module dirs spread
+    across several files)."""
+    language = "go"
+    source_path = str(parsed.module.source)
+
+    pkg_node = next(
+        (c for c in root.named_children if c.type == "package_clause"), None
+    )
+    if pkg_node is not None:
+        ident = next(
+            (c for c in pkg_node.named_children if c.type == "package_identifier"),
+            None,
+        )
+        if ident is not None:
+            parsed.aliases.append(_text(ident, src))
+
+    for node in root.named_children:
+        if node.type == "type_declaration":
+            specs = [c for c in node.named_children if c.type == "type_spec"]
+            for spec in specs:
+                if len(spec.named_children) < 2:
+                    continue
+                name_node, kind_node = spec.named_children[0], spec.named_children[1]
+                if name_node.type != "type_identifier":
+                    continue
+                name = _text(name_node, src)
+                # A doc comment sits directly above a solo `type X struct {}`
+                # declaration; grouped `type (...)` specs rarely carry one,
+                # so fall back to the spec itself (empty docstring).
+                anchor = node if len(specs) == 1 else spec
+                _add_class(
+                    parsed,
+                    spec,
+                    anchor,
+                    src,
+                    name=name,
+                    qual=name,
+                    rel_path=rel_path,
+                    language=language,
+                    source_path=source_path,
                 )
+                if kind_node.type == "interface_type":
+                    for elem in kind_node.named_children:
+                        if elem.type != "method_elem" or not elem.named_children:
+                            continue
+                        mname_node = elem.named_children[0]
+                        if mname_node.type != "field_identifier":
+                            continue
+                        mname = _text(mname_node, src)
+                        _add_function(
+                            parsed,
+                            elem,
+                            elem,
+                            src,
+                            name=mname,
+                            qual=f"{name}.{mname}",
+                            parent_class=name,
+                            rel_path=rel_path,
+                            language=language,
+                            source_path=source_path,
+                        )
+        elif node.type == "method_declaration":
+            recv_type = _go_receiver_type(node, src)
+            mname_node = node.named_children[1] if len(node.named_children) > 1 else None
+            if (
+                recv_type is None
+                or mname_node is None
+                or mname_node.type != "field_identifier"
+            ):
+                continue
+            mname = _text(mname_node, src)
+            fid = _add_function(
+                parsed,
+                node,
+                node,
+                src,
+                name=mname,
+                qual=f"{recv_type}.{mname}",
+                parent_class=recv_type,
+                rel_path=rel_path,
+                language=language,
+                source_path=source_path,
+                link_to_class=False,
+            )
+            parsed.go_method_links.append((recv_type, fid))
+        elif node.type == "function_declaration":
+            name_node = node.named_children[0] if node.named_children else None
+            if name_node is None or name_node.type != "identifier":
+                continue
+            name = _text(name_node, src)
+            _add_function(
+                parsed,
+                node,
+                node,
+                src,
+                name=name,
+                qual=name,
+                parent_class=None,
+                rel_path=rel_path,
+                language=language,
+                source_path=source_path,
+            )
+
+    for spec in _walk_all(root):
+        if spec.type != "import_spec":
+            continue
+        path_node = next(
+            (c for c in spec.named_children if c.type == "interpreted_string_literal"),
+            None,
+        )
+        if path_node is None:
+            continue
+        path = _string_value(path_node, src)
+        if path:
+            parsed.import_refs.append(path.rsplit("/", 1)[-1])

@@ -3,9 +3,12 @@
 `ingest_code` is the frozen library entry point (reached via
 grag.service.GragService.ingest_code, the MCP tool, POST /api/ingest/code and
 the `grag ingest-code` CLI). It records STRUCTURE ONLY — Repo/Module/Class/
-Function nodes carrying path/line_start/line_end/signature/docstring/language
-plus CONTAINS_*/IMPORTS/INHERITS/CALLS edges — so an LLM can answer
-structural questions with cheap Cypher. Source bodies stay out of the graph.
+Function nodes carrying path/line_start/line_end/signature/docstring/language,
+plus TerraformModuleCall nodes (name/source/version) for `module` blocks in
+.tf files, plus CONTAINS_*/IMPORTS/INHERITS/CALLS edges — so an LLM can answer
+structural questions with cheap Cypher instead of retyping facts (like a
+module's version pin) from memory or a doc that can drift from the source.
+Source bodies stay out of the graph.
 
 Ids are stable and human-readable: a Repo id combines its directory name with
 a hash of its canonical path, a Module id is `<repo-id>:<relative/path>`, and a
@@ -15,8 +18,8 @@ definitions and generated edges no longer present in successfully parsed or
 deleted source files. Every node/edge carries `_source` provenance.
 
 Python parses via the stdlib `ast` module; TypeScript/JavaScript
-(.ts/.tsx/.js/.jsx/.mjs/.cjs), C# (.cs) and Terraform (.tf) parse via
-tree-sitter grammars in `grag.ingest.code_ts` (the `code` extra). `_PARSERS`
+(.ts/.tsx/.js/.jsx/.mjs/.cjs), C# (.cs), Terraform (.tf) and Go (.go) parse
+via tree-sitter grammars in `grag.ingest.code_ts` (the `code` extra). `_PARSERS`
 maps file suffix to parser so both share the walk/upsert pipeline. The
 tree-sitter import is lazy: base installs run .py parsing fine, and parsing
 a tree-sitter suffix without the extra raises ConfigurationError with an
@@ -31,6 +34,7 @@ import fnmatch
 import hashlib
 import logging
 import os
+import posixpath
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -105,6 +109,23 @@ _CODE_NODE_TABLES = [
             _S(name="is_method", type="BOOL"),
         ],
     ),
+    # One per Terraform `module { ... }` block, local or remote source alike.
+    # name/source/version are read straight off the block by the HCL parser
+    # — never hand-typed — so a version pin here can't drift from the .tf
+    # source the way a doc-copied fact can.
+    NodeTableSpec(
+        name="TerraformModuleCall",
+        primary_key="id",
+        searchable=True,
+        properties=[
+            _S(name="name"),
+            _S(name="source"),
+            _S(name="version"),
+            _S(name="path"),
+            _S(name="line_start", type="INT64"),
+            _S(name="line_end", type="INT64"),
+        ],
+    ),
 ]
 
 _CODE_REL_TABLES = [
@@ -116,10 +137,25 @@ _CODE_REL_TABLES = [
     RelTableSpec(
         name="CONTAINS_CLASS_FUNCTION", from_label="Class", to_label="Function"
     ),
+    RelTableSpec(
+        name="CONTAINS_MODULE_MODULECALL",
+        from_label="Module",
+        to_label="TerraformModuleCall",
+    ),
     RelTableSpec(name="IMPORTS", from_label="Module", to_label="Module"),
     RelTableSpec(name="INHERITS", from_label="Class", to_label="Class"),
     RelTableSpec(name="CALLS", from_label="Function", to_label="Function"),
 ]
+
+# (from_label, to_label) per CONTAINS_* rel, keyed by name since Class-vs-
+# Function/Module-vs-TerraformModuleCall can't be inferred from the rel name
+# alone once there are more than two CONTAINS_MODULE_* kinds.
+_CONTAINS_ENDPOINTS = {
+    "CONTAINS_MODULE_CLASS": ("Module", "Class"),
+    "CONTAINS_MODULE_FUNCTION": ("Module", "Function"),
+    "CONTAINS_CLASS_FUNCTION": ("Class", "Function"),
+    "CONTAINS_MODULE_MODULECALL": ("Module", "TerraformModuleCall"),
+}
 
 _SKIP_DIRS = frozenset(
     {
@@ -171,7 +207,6 @@ _UNSUPPORTED_CODE_SUFFIXES = frozenset(
         ".cxx",
         ".h",
         ".hpp",
-        ".go",
         ".java",
         ".kt",
         ".kts",
@@ -245,6 +280,17 @@ class _ParsedModule:
     dotted: str  # repo-relative dotted module path, e.g. "grag.ingest.code"
     classes: list[UpsertNode] = field(default_factory=list)
     functions: list[UpsertNode] = field(default_factory=list)
+    # Terraform `module` blocks (name/source/version read off the block
+    # itself, one per block); empty for every non-HCL parser.
+    terraform_module_calls: list[UpsertNode] = field(default_factory=list)
+    # Go methods whose receiver type may be declared in a DIFFERENT file of
+    # the same package (idiomatic: a type's methods commonly spread across
+    # files, e.g. cache/client.go declares Cache, cache/load.go adds a
+    # method to it) — (receiver type name, function id), resolved against a
+    # package-wide class index in code.ingest_code rather than linked
+    # same-file like every other language's CONTAINS_CLASS_FUNCTION; empty
+    # for every non-Go parser.
+    go_method_links: list[tuple[str, str]] = field(default_factory=list)
     contains: list[tuple[str, str, str]] = field(
         default_factory=list
     )  # (rel, from_key, to_key)
@@ -472,11 +518,11 @@ def _tree_sitter_parser(suffix: str) -> Callable[..., _ParsedModule]:
     return parse
 
 
-# Suffix -> parser dispatch. Python uses stdlib ast; ts/js/cs/tf use the
+# Suffix -> parser dispatch. Python uses stdlib ast; ts/js/cs/tf/go use the
 # tree-sitter wrappers above (Wave B) — neither touches the walk or upsert
 # pipeline.
 _PARSERS: dict[str, Callable[..., _ParsedModule]] = {".py": _parse_python}
-for _suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".tf"):
+for _suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".tf", ".go"):
     _PARSERS[_suffix] = _tree_sitter_parser(_suffix)
 del _suffix
 
@@ -570,7 +616,7 @@ def _prune_code_nodes(
     desired_by_label_source: dict[str, dict[str, set[str]]],
 ) -> int:
     pruned = 0
-    for label in ("Module", "Class", "Function"):
+    for label in ("Module", "Class", "Function", "TerraformModuleCall"):
         desired_by_source = desired_by_label_source[label]
         for source in sorted(authoritative_sources):
             result = engine.execute_write(
@@ -729,7 +775,7 @@ def ingest_code(
         warnings.append(
             f"skipped {unsupported[suffix]} file(s) with extension '{suffix}': "
             "no parser registered (supported: .py, .ts, .tsx, .js, .jsx, "
-            ".mjs, .cjs, .cs, .tf)"
+            ".mjs, .cjs, .cs, .tf, .go)"
         )
 
     # Cross-module resolution: IMPORTS, INHERITS and CALLS need the whole
@@ -737,9 +783,17 @@ def ingest_code(
     module_index: dict[str, list[str]] = {}
     class_index: dict[str, list[str]] = {}
     by_module: dict[str, _ParsedModule] = {}
+    # (package directory, type name) -> class id, for resolving Go method
+    # receivers: a type's methods routinely live in a different file of the
+    # same package than the type declaration itself (see _walk_go), so
+    # class ids can't be derived from the method's own file/module.
+    go_class_by_pkg: dict[tuple[str, str], str] = {}
     for pm in parsed_modules:
         mid = str(pm.module.key)
         by_module[mid] = pm
+        pkg_dir = posixpath.dirname(str(pm.module.properties.get("path", "")))
+        for cid in pm.class_ids.values():
+            go_class_by_pkg.setdefault((pkg_dir, cid.rsplit("#", 1)[1]), cid)
         # Index both the repo-relative dotted path and the repo-qualified one:
         # when the repo dir IS the top package (repo "pkg" holding core.py),
         # absolute imports say "pkg.core" while the relative dotted is "core".
@@ -796,9 +850,18 @@ def ingest_code(
             "CONTAINS_REPO_MODULE", "Repo", mid.split(":", 1)[0], "Module", mid, src
         )
         for rel, from_key, to_key in pm.contains:
-            to_label = "Class" if rel == "CONTAINS_MODULE_CLASS" else "Function"
-            from_label = "Class" if rel == "CONTAINS_CLASS_FUNCTION" else "Module"
+            from_label, to_label = _CONTAINS_ENDPOINTS[rel]
             add_edge(rel, from_label, from_key, to_label, to_key, src)
+        if pm.go_method_links:
+            pkg_dir = posixpath.dirname(str(pm.module.properties.get("path", "")))
+            for recv_type, fid in pm.go_method_links:
+                target = go_class_by_pkg.get((pkg_dir, recv_type))
+                if target:
+                    add_edge("CONTAINS_CLASS_FUNCTION", "Class", target, "Function", fid, src)
+                # else: receiver type not declared anywhere in the scanned
+                # package (e.g. a generic/embedded edge case tree-sitter
+                # didn't resolve) — the Function node still exists, just
+                # unlinked, same as any other best-effort miss here.
         for ref in pm.import_refs:
             target = _resolve_module_id(ref, module_index)
             if target and target != mid:
@@ -831,12 +894,21 @@ def ingest_code(
         ("Module", {str(pm.module.key): pm.module for pm in parsed_modules}),
         ("Class", {str(n.key): n for pm in parsed_modules for n in pm.classes}),
         ("Function", {str(n.key): n for pm in parsed_modules for n in pm.functions}),
+        (
+            "TerraformModuleCall",
+            {
+                str(n.key): n
+                for pm in parsed_modules
+                for n in pm.terraform_module_calls
+            },
+        ),
     ]
     counts: dict[str, int] = {}
     desired_by_label_source: dict[str, dict[str, set[str]]] = {
         "Module": {},
         "Class": {},
         "Function": {},
+        "TerraformModuleCall": {},
     }
     for label, nodes in nodes_by_label:
         counts[label] = len(nodes)
@@ -886,6 +958,7 @@ def ingest_code(
         modules=counts["Module"],
         classes=counts["Class"],
         functions=counts["Function"],
+        module_calls=counts["TerraformModuleCall"],
         edges=edge_count,
         nodes_pruned=nodes_pruned,
         edges_pruned=edges_pruned,

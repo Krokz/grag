@@ -311,7 +311,7 @@ def test_walk_skips_and_warns(engine, tmp_path):
     (pkg / "__pycache__").mkdir()
     (pkg / "__pycache__" / "cached.py").write_text("x = 1\n", encoding="utf-8")
     (pkg / "big.py").write_text("x = 1\n" * 500, encoding="utf-8")  # ~3KB
-    (pkg / "tool.go").write_text("package main\n", encoding="utf-8")
+    (pkg / "tool.rs").write_text("fn main() {}\n", encoding="utf-8")
     (pkg / "notes.md").write_text("# not code\n", encoding="utf-8")
 
     resp = ingest_code(
@@ -320,7 +320,7 @@ def test_walk_skips_and_warns(engine, tmp_path):
 
     assert resp.modules == 2  # only core.py and main.py
     assert any("big.py" in w and "max_file_kb=1" in w for w in resp.warnings)
-    assert any("'.go'" in w and "no parser registered" in w for w in resp.warnings)
+    assert any("'.rs'" in w and "no parser registered" in w for w in resp.warnings)
     assert not any("notes.md" in w for w in resp.warnings)  # non-code: silent
     assert not any("ignored.py" in w or "cached.py" in w for w in resp.warnings)
 
@@ -408,3 +408,4 @@ def test_calls_resolve_function_local_lazy_import_inside_try(engine, tmp_path):
         f"{_mid(pkg, 'search.py')}#search_knowledge",
         f"{_mid(pkg, 'engine.py')}#vector_candidates",
     ) in _edge_pairs(engine, "CALLS")
+

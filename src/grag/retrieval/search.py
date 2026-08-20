@@ -54,14 +54,19 @@ def search_knowledge(
     fts_list: list[ScoredNode] = []
     vec_list: list[ScoredNode] = []
     pending = 0
+    vector_status: Literal["off", "error"] | None = None
     if req.query.strip():
         for table in tables:
             fts_list.extend(_fts_seeds(engine, table, req.query, top_k, pk))
-        try:
-            vec_list = vector_candidates(engine, config, req.query, req.labels, top_k)
-            pending = sum(pending_embedding_count(engine, config, t) for t in tables)
-        except Exception as exc:  # noqa: BLE001 — vector path is best-effort
-            log.warning("Vector search skipped, degrading to FTS-only: %s", exc)
+        if config.embedder is None:
+            vector_status = "off"
+        else:
+            try:
+                vec_list = vector_candidates(engine, config, req.query, req.labels, top_k)
+                pending = sum(pending_embedding_count(engine, config, t) for t in tables)
+            except Exception as exc:  # noqa: BLE001 — vector path is best-effort
+                log.warning("Vector search skipped, degrading to FTS-only: %s", exc)
+                vector_status = "error"
 
     fused = _rrf_fuse({"fts": fts_list, "vector": vec_list})
     seeds = _diversify(fused, top_k, config.search_label_cap)
@@ -71,7 +76,11 @@ def search_knowledge(
     subgraph = merge_subgraphs(Subgraph(nodes=[s.node for s in seeds]), expanded)
     packed = _pack(subgraph, budget, seed_ids)
     return SearchResponse(
-        seeds=seeds, subgraph=subgraph, context=packed.text, pending_embeddings=pending
+        seeds=seeds,
+        subgraph=subgraph,
+        context=packed.text,
+        pending_embeddings=pending,
+        vector_status=vector_status,
     )
 
 
