@@ -336,8 +336,12 @@ def _show_tables(engine: Engine) -> list[tuple[str, str]]:
 
 
 def node_tables(engine: Engine) -> list[str]:
-    """All node table names, excluding grag's internal registry."""
-    return [n for n, kind in _show_tables(engine) if kind == "NODE" and n != META_TABLE]
+    """All node table names, excluding grag-internal ("_"-prefixed) tables."""
+    return [
+        n
+        for n, kind in _show_tables(engine)
+        if kind == "NODE" and not n.startswith(RESERVED_PREFIX)
+    ]
 
 
 def pk_map_with_fallback(engine: Engine) -> dict[str, str]:
