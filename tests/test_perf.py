@@ -8,13 +8,29 @@ Headroom is deliberate: shared/sandboxed CPUs are noisy.
 
 from __future__ import annotations
 
-import resource
 import statistics
+import sys
 import time
 
 from grag.config import GragConfig
 from grag.core.types import IngestDocument, IngestRequest, SearchRequest
 from grag.service import GragService
+
+try:
+    import resource
+except ImportError:  # Windows has no resource module
+    resource = None  # type: ignore[assignment]
+
+
+def _rss_mb() -> float | None:
+    """Peak RSS in MB, or None where unmeasurable (Windows).
+
+    ru_maxrss is reported in bytes on macOS and kilobytes on Linux/BSD.
+    """
+    if resource is None:
+        return None
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
 
 
 def _service(tmp_path) -> GragService:
@@ -51,7 +67,7 @@ def test_search_latency_and_rss(tmp_path):
     ]
     svc.ingest(IngestRequest(documents=docs, chunk=True))
 
-    rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_before = _rss_mb()
 
     # warm up: first search builds the FTS index — that's a write-path cost,
     # not query latency
@@ -69,8 +85,10 @@ def test_search_latency_and_rss(tmp_path):
         assert res.seeds, "expected FTS seeds"
 
     p95 = statistics.quantiles(latencies, n=20)[-1]
-    rss_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - rss_before) / 1024
+    rss_after = _rss_mb()
     svc.close()
 
     assert p95 < 0.25, f"search p95 {p95 * 1000:.0f}ms exceeds 250ms guardrail"
-    assert rss_mb < 400, f"RSS delta {rss_mb:.0f}MB exceeds 400MB guardrail"
+    if rss_before is not None and rss_after is not None:
+        rss_mb = rss_after - rss_before
+        assert rss_mb < 400, f"RSS delta {rss_mb:.0f}MB exceeds 400MB guardrail"

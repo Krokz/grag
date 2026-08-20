@@ -433,14 +433,19 @@ def test_repo_carries_git_commit_inside_git(engine, tmp_path):
         import pytest
 
         pytest.skip("git not installed")
+    import os
+
     pkg = _write_pkg(tmp_path)
+    # Extend the real environment: git needs more than PATH on Windows
+    # (SYSTEMROOT etc.); HOME/config overrides isolate from user gitconfig.
     env = {
+        **os.environ,
         "GIT_AUTHOR_NAME": "t",
         "GIT_AUTHOR_EMAIL": "t@example.com",
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@example.com",
-        "HOME": str(tmp_path),
-        "PATH": __import__("os").environ["PATH"],
+        "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"),
+        "GIT_CONFIG_SYSTEM": str(tmp_path / "gitconfig"),
     }
     for argv in (
         ["git", "init", "-q", "-b", "main"],
