@@ -52,6 +52,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Provide OpenSSL DLLs for ladybug (Windows)
+        # The ladybug win wheel's native extension links libssl-3-x64.dll /
+        # libcrypto-3-x64.dll but the wheel does not bundle them (upstream
+        # packaging gap). Copy the runner's OpenSSL 3 DLLs into the wheel's
+        # ladybug.libs dir, which ladybug's delvewheel patch adds to the DLL
+        # search path — then verify the native backend actually imports.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $libs = Join-Path (python -c "import ladybug, pathlib; print(pathlib.Path(ladybug.__file__).parent.parent)") 'ladybug.libs'
+          $roots = @("$env:ProgramFiles\OpenSSL", "$env:ProgramFiles\OpenSSL-Win64", 'C:\Strawberry\c\bin')
+          foreach ($name in 'libssl-3-x64.dll', 'libcrypto-3-x64.dll') {
+            $dll = Get-ChildItem -Path $roots -Recurse -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $dll) {
+              choco install openssl -y --no-progress | Out-Null
+              $dll = Get-ChildItem -Path $roots -Recurse -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
+            if (-not $dll) { throw "$name not found on runner" }
+            Copy-Item $dll.FullName $libs
+            Write-Host "copied $($dll.FullName) -> $libs"
+          }
+          python -c "import ladybug._lbug; print('ladybug native backend OK')"
+
       - name: Run tests
         # LadybugDB downloads FTS/VECTOR extensions on first use; CI has network.
         run: pytest
