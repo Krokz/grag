@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from grag.project import (
@@ -217,3 +218,96 @@ def test_apply_ops_creates_parent_dirs(tmp_path):
     ops = plan_mcp_ops(["cursor"], tmp_path, db)
     apply_ops(ops)
     assert (tmp_path / ".cursor" / "mcp.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# embed env + binary path
+# ---------------------------------------------------------------------------
+
+
+def test_stdio_entry_bakes_embed_env_when_fastembed_installed(tmp_path, monkeypatch):
+    import grag.project as project
+
+    monkeypatch.setattr(project, "_fastembed_available", lambda: True)
+    ops = plan_mcp_ops(["claude"], tmp_path, tmp_path / "kb.lbdb")
+    entry = json.loads(ops[0].content)["mcpServers"]["grag"]
+    assert entry["env"] == {"GRAG_EMBED_PROVIDER": "fastembed"}
+
+
+def test_stdio_entry_omits_embed_env_without_fastembed(tmp_path, monkeypatch):
+    import grag.project as project
+
+    monkeypatch.setattr(project, "_fastembed_available", lambda: False)
+    ops = plan_mcp_ops(["claude"], tmp_path, tmp_path / "kb.lbdb")
+    entry = json.loads(ops[0].content)["mcpServers"]["grag"]
+    assert "env" not in entry
+
+
+def test_grag_bin_prefers_bare_name_for_global_install(monkeypatch):
+    import grag.project as project
+
+    # Global install: which() finds grag outside sys.prefix -> bare "grag".
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/usr/local/bin/grag" if name == "grag" else None
+    )
+    assert project._grag_bin() == "grag"
+
+
+def test_grag_bin_keeps_absolute_path_for_venv_install(monkeypatch, tmp_path):
+    import grag.project as project
+
+    venv_bin = tmp_path / "venv" / "bin" / "grag"
+    venv_bin.parent.mkdir(parents=True)
+    venv_bin.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("shutil.which", lambda name: str(venv_bin))
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+    assert project._grag_bin() == str(venv_bin)
+
+
+# ---------------------------------------------------------------------------
+# plan_remove_ops (grag init --remove)
+# ---------------------------------------------------------------------------
+
+
+def test_remove_ops_strip_grag_entry_but_keep_others(tmp_path):
+    from grag.project import plan_remove_ops
+
+    mcp_json = tmp_path / ".mcp.json"
+    mcp_json.write_text(
+        json.dumps(
+            {"mcpServers": {"grag": {"command": "grag"}, "other": {"command": "x"}}}
+        )
+    )
+    ops = plan_remove_ops(["claude"], tmp_path)
+    assert len(ops) == 1
+    data = json.loads(ops[0].content)
+    assert "grag" not in data["mcpServers"]
+    assert "other" in data["mcpServers"]
+
+
+def test_remove_ops_nothing_when_no_grag_entries(tmp_path):
+    from grag.project import plan_remove_ops
+
+    assert plan_remove_ops(["claude", "cursor"], tmp_path) == []
+
+
+def test_remove_ops_strip_claude_md_block(tmp_path):
+    from grag.project import plan_remove_ops
+
+    (tmp_path / "CLAUDE.md").write_text(
+        f"# Project\n\n{_BLOCK_START}\ngrag stuff\n{_BLOCK_END}\n\n# Rest\n"
+    )
+    ops = plan_remove_ops([], tmp_path)
+    assert len(ops) == 1
+    content = ops[0].content
+    assert _BLOCK_START not in content
+    assert "# Project" in content and "# Rest" in content
+
+
+def test_remove_ops_skip_jsonc_config(tmp_path):
+    from grag.project import plan_remove_ops
+
+    (tmp_path / ".mcp.json").write_text('// comment\n{"mcpServers": {"grag": {}}}')
+    ops = plan_remove_ops(["claude"], tmp_path)
+    assert len(ops) == 1
+    assert isinstance(ops[0], SkipOp)

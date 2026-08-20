@@ -81,6 +81,7 @@ class Engine:
         self._preload_extensions()
         if self.wal_recovered:
             self._drop_stale_vector_indexes()
+        self._stamp_version()
 
     def _open_db(self, db_path: str, config: GragConfig) -> lb.Database:
         """Open the database, offering WAL auto-recovery when a TTY is attached.
@@ -177,6 +178,69 @@ class Engine:
         for name in ("FTS", "VECTOR"):
             with suppress(GragError):
                 self._run(self._write_conn, f"LOAD EXTENSION {name}", None)
+
+    # -- version stamp ---------------------------------------------------------
+
+    _META_KV_TABLE = "_grag_meta"
+
+    def _stamp_version(self) -> None:
+        """Record which grag versions have touched this database.
+
+        ``_grag_meta`` holds ``created_version`` (grag version at first stamp;
+        "unknown" for databases that predate stamping) and ``newest_version``
+        (highest grag version that has opened the file). When the database was
+        last written by a *newer* grag than the one running, warn: an older
+        runtime may misread structures a newer version introduced. Best-effort
+        throughout — a stamp failure must never block opening the database.
+        """
+        from grag import __version__
+
+        try:
+            res = self._run(self._write_conn, "CALL SHOW_TABLES() RETURN *", None)
+            tables = {str(row[1]) for row in res.rows}
+            if self._META_KV_TABLE not in tables:
+                self._run(
+                    self._write_conn,
+                    f"CREATE NODE TABLE {self._META_KV_TABLE}"
+                    "(key STRING PRIMARY KEY, value STRING)",
+                    None,
+                )
+                created = __version__ if len(tables) == 0 else "unknown"
+                self._set_meta("created_version", created)
+            newest = self._get_meta("newest_version")
+            if newest is not None and _version_tuple(newest) > _version_tuple(
+                __version__
+            ):
+                logger.warning(
+                    "Database %s was last written by grag %s; you are running "
+                    "grag %s. Upgrade gragdb (pip install -U gragdb) to avoid "
+                    "compatibility issues.",
+                    self.config.db_path,
+                    newest,
+                    __version__,
+                )
+            elif newest is None or _version_tuple(newest) < _version_tuple(
+                __version__
+            ):
+                self._set_meta("newest_version", __version__)
+        except GragError:
+            logger.debug("version stamp skipped for %s", self.config.db_path)
+
+    def _get_meta(self, key: str) -> str | None:
+        res = self._run(
+            self._write_conn,
+            f"MATCH (m:{self._META_KV_TABLE} {{key: $k}}) RETURN m.value",
+            {"k": key},
+        )
+        return str(res.rows[0][0]) if res.rows and res.rows[0][0] is not None else None
+
+    def _set_meta(self, key: str, value: str) -> None:
+        self._run(
+            self._write_conn,
+            f"MERGE (m:{self._META_KV_TABLE} {{key: $k}}) "
+            "ON CREATE SET m.value = $v ON MATCH SET m.value = $v",
+            {"k": key, "v": value},
+        )
 
     # -- execution -------------------------------------------------------------
 
@@ -297,6 +361,21 @@ class Engine:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Lenient "0.3.7" -> (0, 3, 7); unparseable parts end the tuple."""
+    parts: list[int] = []
+    for piece in version.split("."):
+        digits = ""
+        for ch in piece:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
 
 
 # --- value normalization -----------------------------------------------------------

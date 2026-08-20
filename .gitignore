@@ -11,3 +11,8 @@ node_modules/
 ui/dist/
 src/grag/api/static/
 .pytest_cache/
+
+# grag init output (personal machine paths) — dogfooding configs stay local
+.mcp.json
+.cursor/mcp.json
+CLAUDE.md

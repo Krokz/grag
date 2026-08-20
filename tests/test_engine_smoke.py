@@ -129,16 +129,17 @@ def test_fts_extension(docs: Engine):
 
 
 def test_drop_internal_rows(docs: Engine):
-    docs.execute_write("CREATE NODE TABLE _grag_meta(name STRING PRIMARY KEY)")
-    docs.execute_write("CREATE (m:_grag_meta {name: 'Doc'})")
-    docs.execute_write("CREATE REL TABLE _grag_link(FROM _grag_meta TO Doc)")
+    docs.execute_write("CREATE NODE TABLE _grag_priv(name STRING PRIMARY KEY)")
+    docs.execute_write("CREATE (m:_grag_priv {name: 'Doc'})")
+    docs.execute_write("CREATE REL TABLE _grag_link(FROM _grag_priv TO Doc)")
     docs.execute_write(
-        "MATCH (m:_grag_meta {name: 'Doc'}), (d:Doc {id: 'doc-0'}) "
+        "MATCH (m:_grag_priv {name: 'Doc'}), (d:Doc {id: 'doc-0'}) "
         "CREATE (m)-[:_grag_link]->(d)"
     )
 
     res = docs.execute("MATCH (n) RETURN n")
-    assert {r[0]["_LABEL"] for r in res.rows} == {"Doc", "_grag_meta"}
+    # _grag_meta rows come from the engine's version stamp on open.
+    assert {r[0]["_LABEL"] for r in res.rows} == {"Doc", "_grag_priv", "_grag_meta"}
     filtered = drop_internal_rows(res)
     assert {r[0]["_LABEL"] for r in filtered.rows} == {"Doc"}
     assert filtered.columns == res.columns
@@ -146,14 +147,71 @@ def test_drop_internal_rows(docs: Engine):
     # rows touching internal values through rels/paths are dropped too
     res = docs.execute("MATCH (m)-[r:_grag_link]->(d) RETURN m, r, d")
     assert res.rows and drop_internal_rows(res).rows == []
-    res = docs.execute("MATCH p = (m:_grag_meta)-[:_grag_link]->(d:Doc) RETURN p")
+    res = docs.execute("MATCH p = (m:_grag_priv)-[:_grag_link]->(d:Doc) RETURN p")
     assert res.rows and drop_internal_rows(res).rows == []
 
     # ...while a row whose only graph value is a user node stays
-    res = docs.execute("MATCH (m:_grag_meta)-[:_grag_link]->(d:Doc) RETURN d")
+    res = docs.execute("MATCH (m:_grag_priv)-[:_grag_link]->(d:Doc) RETURN d")
     assert len(drop_internal_rows(res).rows) == 1
 
     # scalar projections over an internal table are explicit introspection —
     # no graph values in the row, so the row stays
-    res = docs.execute("MATCH (m:_grag_meta) RETURN m.name")
+    res = docs.execute("MATCH (m:_grag_priv) RETURN m.name")
     assert drop_internal_rows(res).rows == [["Doc"]]
+
+
+# ---------------------------------------------------------------------------
+# version stamp (_grag_meta)
+# ---------------------------------------------------------------------------
+
+
+def test_version_stamp_written_on_open(tmp_path):
+    import grag
+
+    db = tmp_path / "stamped.lbdb"
+    with Engine(GragConfig(db_path=db)) as engine:
+        rows = engine.execute(
+            "MATCH (m:_grag_meta) RETURN m.key, m.value ORDER BY m.key"
+        ).rows
+    stored = dict(rows)
+    assert stored["created_version"] == grag.__version__
+    assert stored["newest_version"] == grag.__version__
+
+
+def test_version_stamp_marks_preexisting_database_unknown(tmp_path):
+    db = tmp_path / "old.lbdb"
+    # Simulate a database created before stamping existed: tables, no _grag_meta.
+    import ladybug as lb
+
+    database = lb.Database(str(db))
+    conn = lb.Connection(database)
+    conn.execute("CREATE NODE TABLE Doc(id STRING PRIMARY KEY)")
+    conn.execute("CHECKPOINT")
+    conn.close()
+    database.close()
+
+    with Engine(GragConfig(db_path=db)) as engine:
+        rows = engine.execute(
+            "MATCH (m:_grag_meta {key: 'created_version'}) RETURN m.value"
+        ).rows
+    assert rows == [["unknown"]]
+
+
+def test_version_stamp_warns_when_database_is_newer(tmp_path, caplog):
+    db = tmp_path / "future.lbdb"
+    with Engine(GragConfig(db_path=db)) as engine:
+        engine._set_meta("newest_version", "99.0.0")
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="grag"):
+        Engine(GragConfig(db_path=db)).close()
+    assert any("grag 99.0.0" in r.getMessage() for r in caplog.records)
+
+
+def test_version_tuple_parsing():
+    from grag.core.engine import _version_tuple
+
+    assert _version_tuple("0.3.7") == (0, 3, 7)
+    assert _version_tuple("1.0.0rc1") == (1, 0, 0)
+    assert _version_tuple("weird") == ()
+    assert _version_tuple("99.0.0") > _version_tuple("0.3.7")

@@ -32,9 +32,23 @@ hallucination.
   with far fewer tokens than reading code.
 - **Read a source file only when** the graph points you at a specific node's
   `path`/`line_start`/`line_end` and you genuinely need the body — not to wander.
-- **Build as you learn.** When the user states a decision, convention, or fact worth
-  keeping, `upsert_nodes`/`upsert_edges` it (with `_source`) so it compounds. When you
-  touch an unfamiliar repo, `ingest_code` it first.
+- **Build as you learn — check after every substantive exchange, not just when it
+  feels obviously important.** `upsert_nodes`/`upsert_edges` it (with `_source`) the
+  moment one of these happens, don't wait for a natural pause:
+  - The user explains **why** something was built a certain way, rejects an
+    alternative, or states a tradeoff → a `Decision` node (the rejected alternative
+    and reason belong in its properties, not just the outcome).
+  - The user or the code reveals an **external integration** (a service, API,
+    library, third-party module and what it's for) → an `Integration`/`Service` node,
+    linked to the code that calls it.
+  - A **non-obvious concept, pattern, or domain term** gets defined or explained
+    (in chat or in a doc/comment) → a `Concept` node — the kind of thing a new
+    contributor would otherwise have to ask about or re-derive from source.
+  - The user **corrects** something the agent believed about the project → update
+    the existing node (don't leave the stale fact standing) or add one if none
+    exists yet.
+  When you touch an unfamiliar repo, `ingest_code` it first. Prefer writing the
+  fact immediately over batching it for "later" — later is where this gets skipped.
 - **Connect words to code.** Link knowledge nodes to the code they describe (e.g. a
   `Decision`/`Concept` `-[:DOCUMENTS|MENTIONS]->` a `Function`/`Module`), so retrieval
   returns docs *and* the implementation in one cited subgraph.
@@ -50,7 +64,12 @@ don't stall.
 > ```
 > If the user hasn't enabled this, suggest it. When `search_knowledge` returns
 > `pending_embeddings > 0`, nodes are still being embedded — recall improves as
-> subsequent searches drain the backlog.
+> subsequent searches drain the backlog. A footer with no `pending_embeddings`
+> field does **not** mean "fully embedded" — check the `vector` field instead:
+> absent/missing means vector search ran fine, `"vector":"off"` means no
+> embedder is configured on this server process (FTS-only is expected, and
+> `pending_embeddings` will never appear), `"vector":"error"` means an embedder
+> is configured but failed for that call — report it rather than guessing.
 
 ## How to talk to it
 
@@ -77,7 +96,7 @@ or `grag --db <file> serve` (UI + REST only, FTS-only search).
 | `cypher_query` | Read-only Cypher. Write keywords (CREATE/MERGE/SET/DELETE/...) are rejected — use the upsert tools for writes. |
 | `search_knowledge` | Hybrid BM25 + vector seeds, RRF fusion, **per-label diversity cap**, k-hop expansion, token-budgeted cited context. The main RAG entry point. |
 | `get_context` | Re-pack chosen node ids (from a prior search) into a fresh token budget. |
-| `ingest_code` | Index a repo's code STRUCTURE: Repo/Module/Class/Function nodes + CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Structure only — never source bodies. |
+| `ingest_code` | Index a repo's code STRUCTURE (Python/TS/JS/C#/Terraform/Go): Repo/Module/Class/Function/TerraformModuleCall nodes + CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Structure only — never source bodies. |
 
 ## Working with an unfamiliar codebase (code graph)
 
@@ -90,16 +109,32 @@ or `grag --db <file> serve` (UI + REST only, FTS-only search).
    - what imports X: `MATCH (m:Module)-[:IMPORTS]->(x:Module) WHERE x.path = '<path>' RETURN m.id`
    - what calls Y: `MATCH (f:Function)-[:CALLS]->(y:Function) WHERE y.path = '<path>' AND y.name = '<name>' RETURN f.id`
    - subclass/implementor check: `MATCH (c:Class)-[:INHERITS]->(b:Class) WHERE b.name = 'Base' RETURN c.id`
+   - what version is a Terraform module pinned to: `MATCH (m:TerraformModuleCall) WHERE m.source CONTAINS '<name>' RETURN m.version, m.source`
    - ids look like `Module:pkg-<path-hash>:core.py` and
      `Function:pkg-<path-hash>:core.py#Greeter.greet`;
      nodes carry signature, docstring and line range — enough to navigate by.
 3. **Only fetch source bodies when truly needed** — read the file at the node's
    `path`/`line_start`/`line_end` instead of bulk-reading the repo.
 
-Python parses in every install (stdlib ast); TypeScript/JavaScript/C#/Terraform
+Python parses in every install (stdlib ast); TypeScript/JavaScript/C#/Terraform/Go
 need `pip install "gragdb[code]"` (tree-sitter) — without it those files raise
 an ERROR with that install HINT. CALLS/INHERITS edges are Python-only for now;
 IMPORTS for the tree-sitter languages is best-effort (path/namespace-based).
+Go has no lexical class nesting — methods are top-level funcs with a receiver,
+attached to their struct/interface's Class node by receiver type name, and
+interface method sets become Function nodes too. Go IMPORTS resolution is
+narrower than the others: it matches an import's declared package name
+against locally scanned packages (no go.mod parsing, so no true import-path
+prefix), which resolves single-file local packages and silently skips
+everything else (stdlib, third-party, ambiguous multi-file local packages).
+
+**Never hand-type a fact that `ingest_code` already extracts structurally.**
+Terraform `module` blocks (local or registry/git source alike) become
+`TerraformModuleCall` nodes with `name`/`source`/`version` read straight off
+the `.tf` file — a version pin queried this way can't drift from the actual
+source the way a value copied from a README or changelog can. If you're
+about to `upsert_nodes` a version/pin/path fact that a code file already
+states verbatim, `ingest_code` the repo and `cypher_query` it instead.
 
 ## Hard-won rules (respect these — they came from real errors)
 

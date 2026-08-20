@@ -1,4 +1,4 @@
-"""grag CLI: serve / mcp / ingest / ingest-code / bench."""
+"""grag CLI: serve / mcp / ingest / ingest-code / status / doctor / export / bench."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from grag.config import GragConfig
+from grag.config import GragConfig, derive_port
 
 
 def _config(args: argparse.Namespace) -> GragConfig:
@@ -21,8 +21,13 @@ def _config(args: argparse.Namespace) -> GragConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import grag
+
     parser = argparse.ArgumentParser(
         prog="grag", description="LLM-first graph knowledgebase"
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"grag {grag.__version__}"
     )
     db_sel = parser.add_mutually_exclusive_group()
     db_sel.add_argument(
@@ -95,6 +100,25 @@ def main(argv: list[str] | None = None) -> int:
         "--max-file-kb", type=int, default=1024, help="skip files larger than this (KB)"
     )
 
+    sub.add_parser("status", help="show whether a server is running for this database")
+    sub.add_parser("stop", help="stop the background server for this database")
+    sub.add_parser(
+        "doctor",
+        help="diagnose the install: extras, embedder, server, code-index staleness",
+    )
+
+    export = sub.add_parser(
+        "export", help="dump the database as portable JSONL (schema + nodes + edges)"
+    )
+    export.add_argument(
+        "--out", "-o", default=None, help="output file (default: stdout)"
+    )
+
+    import_ = sub.add_parser(
+        "import", help="replay a 'grag export' JSONL file into this database"
+    )
+    import_.add_argument("file", help="JSONL file produced by 'grag export'")
+
     bench = sub.add_parser("bench", help="codec benchmark (recall / latency / RSS)")
     bench.add_argument("--codec", default=None)
 
@@ -119,8 +143,19 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument(
         "--port",
         type=int,
-        default=8471,
-        help="port for the grag serve --with-mcp server (default 8471, used in the MCP URL)",
+        default=None,
+        help="port for the grag serve --with-mcp server (default: a per-project "
+        "port derived from the database path, so projects don't collide)",
+    )
+    init.add_argument(
+        "--ingest",
+        action="store_true",
+        help="also run ingest-code on the current directory right away",
+    )
+    init.add_argument(
+        "--remove",
+        action="store_true",
+        help="undo init: remove the grag MCP entry and the CLAUDE.md block",
     )
     init.add_argument(
         "--url",
@@ -153,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "serve":
         import uvicorn
 
+        from grag.admin import remove_pidfile, write_pidfile
         from grag.api.main import create_app
 
         if getattr(args, "with_mcp", False):
@@ -160,7 +196,12 @@ def main(argv: list[str] | None = None) -> int:
         # The bind host drives the REST Host-header allow-list and the MCP
         # endpoint's DNS-rebinding allow-list, not just uvicorn's socket.
         cfg.host = args.host
-        uvicorn.run(create_app(cfg), host=args.host, port=args.port, workers=1)
+        # Register in ~/.grag/run/ so 'grag status' / 'grag stop' can find us.
+        write_pidfile(cfg.db_path, args.port)
+        try:
+            uvicorn.run(create_app(cfg), host=args.host, port=args.port, workers=1)
+        finally:
+            remove_pidfile(cfg.db_path)
     elif args.cmd == "mcp":
         if getattr(args, "auto_serve", False):
             import asyncio
@@ -193,6 +234,57 @@ def main(argv: list[str] | None = None) -> int:
             max_file_kb=args.max_file_kb,
         )
         print(summary)
+    elif args.cmd == "status":
+        from grag.admin import status_lines
+
+        print("\n".join(status_lines(cfg)))
+    elif args.cmd == "stop":
+        from grag.admin import stop_server
+
+        print(stop_server(cfg.db_path))
+    elif args.cmd == "doctor":
+        from grag.admin import doctor_lines
+
+        print("\n".join(doctor_lines(cfg)))
+    elif args.cmd == "export":
+        from grag.admin import find_server
+        from grag.core.engine import Engine
+        from grag.transfer import export_to
+
+        if find_server(cfg.db_path) is not None:
+            print(
+                "A server is running on this database (single-writer lock).\n"
+                "Stop it first: grag --db "
+                f"{cfg.db_path} stop",
+                file=sys.stderr,
+            )
+            return 1
+        with Engine(cfg) as engine:
+            if args.out:
+                with open(args.out, "w", encoding="utf-8") as fh:
+                    n = export_to(engine, fh)
+                print(f"Exported {n} line(s) to {args.out}", file=sys.stderr)
+            else:
+                export_to(engine, sys.stdout)
+    elif args.cmd == "import":
+        from grag.admin import find_server
+        from grag.core.engine import Engine
+        from grag.transfer import import_from
+
+        if find_server(cfg.db_path) is not None:
+            print(
+                "A server is running on this database (single-writer lock).\n"
+                "Stop it first: grag --db "
+                f"{cfg.db_path} stop",
+                file=sys.stderr,
+            )
+            return 1
+        with Engine(cfg) as engine, open(args.file, encoding="utf-8") as fh:
+            report = import_from(engine, cfg, fh)
+            engine.execute_write("CHECKPOINT")
+        print(f"Imported {report['nodes']} node(s), {report['edges']} edge(s).")
+        for w in report["warnings"]:
+            print(f"  warning: {w}")
     elif args.cmd == "bench":
         from grag.retrieval.bench import run_bench
 
@@ -222,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
             detect_clients,
             plan_claude_md_op,
             plan_mcp_ops,
+            plan_remove_ops,
         )
 
         project_root = Path.cwd()
@@ -230,10 +323,30 @@ def main(argv: list[str] | None = None) -> int:
             db_path = Path(args.db).resolve()
         else:
             db_path = Path.home() / ".grag" / f"{project_root.name}.lbdb"
+        # Per-project default port: two initialised projects must not both
+        # claim one port and collide at auto-serve time.
+        port = args.port if args.port is not None else derive_port(db_path)
 
         clients = (
             detect_clients(project_root) if args.client == "auto" else [args.client]
         )
+
+        if args.remove:
+            remove_ops = plan_remove_ops(clients, project_root)
+            if not remove_ops:
+                print("Nothing to remove — no grag entries found.")
+                return 0
+            if args.dry_run:
+                print("Would write (dry run):")
+                for op in remove_ops:
+                    if isinstance(op, SkipOp):
+                        print(f"  skip:   {op.path}  ({op.reason})")
+                    else:
+                        print(f"  update: {op.path}")
+            else:
+                print("Removing grag configuration:")
+                apply_ops(remove_ops)
+            return 0
 
         ops: list[WriteOp | SkipOp] = []
         if not args.no_mcp:
@@ -243,11 +356,11 @@ def main(argv: list[str] | None = None) -> int:
                     project_root,
                     db_path,
                     stdio=not args.url,
-                    port=args.port,
+                    port=port,
                 )
             )
         if not args.no_claude_md:
-            ops.append(plan_claude_md_op(project_root, db_path, port=args.port))
+            ops.append(plan_claude_md_op(project_root, db_path, port=port))
 
         if not ops:
             print("Nothing to do (both --no-mcp and --no-claude-md were given).")
@@ -261,9 +374,34 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     verb = "create" if op.created else "update"
                     print(f"  {verb}: {op.path}")
-        else:
-            print("Writing:")
-            apply_ops(ops)
+            return 0
+
+        print("Writing:")
+        apply_ops(ops)
+
+        if args.ingest:
+            from grag.ingest.code import ingest_code_paths
+
+            cfg.db_path = db_path
+            print(f"\nIngesting code from {project_root} ...")
+            summary = ingest_code_paths(cfg, [project_root])
+            print(summary)
+
+        print(
+            "\nDone. Next steps:\n"
+            "  1. Restart your MCP client (Claude Code / Cursor / ...) so it "
+            "picks up the config;\n"
+            "     grag then starts automatically when the agent first uses it.\n"
+            + (
+                ""
+                if args.ingest
+                else "  2. Index this repo (ask your agent to run ingest_code, "
+                f"or run:\n       grag --db {db_path} ingest-code {project_root})\n"
+            )
+            + f"  {'2' if args.ingest else '3'}. Browse the graph once the server "
+            f"is up: http://127.0.0.1:{port}/\n"
+            f"     (check with: grag --db {db_path} status)"
+        )
     return 0
 
 

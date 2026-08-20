@@ -16,11 +16,16 @@ getrusage exposes only the high-water mark, so it overstates steady usage.
 from __future__ import annotations
 
 import hashlib
-import resource
+import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+try:
+    import resource
+except ImportError:  # Windows has no resource module
+    resource = None  # type: ignore[assignment]
 
 import numpy as np
 
@@ -249,8 +254,12 @@ def _build_queries(n_queries: int, seed: int) -> list[str]:
 
 
 def _rss_mb() -> float:
-    # ru_maxrss is KiB on Linux; it is a high-water mark (never decreases).
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    # ru_maxrss is a high-water mark (never decreases), reported in bytes on
+    # macOS and KiB on Linux/BSD. 0.0 on Windows (no resource module).
+    if resource is None:
+        return 0.0
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss / (1024.0 * 1024.0) if sys.platform == "darwin" else rss / 1024.0
 
 
 def _doc_vectors(

@@ -37,6 +37,24 @@ What that means in practice:
 
 Use an extractor when you want a one-shot map of a codebase. Use a graph platform when you need multi-user ops, clustering, or a shared server. Use grag when the agent should **accumulate** project knowledge locally and ground answers in a hybrid subgraph without standing up a database.
 
+## Use it on your project (60 seconds)
+
+```bash
+pipx install 'gragdb[code,embed-local]'   # or: pip install / uv tool install
+cd your-project
+grag init --ingest
+```
+
+That's it. `grag init`:
+
+- registers grag with your MCP client (Claude Code, Cursor, Windsurf, Zed — auto-detected),
+- picks a **per-project port** (derived from the db path, so multiple projects never collide),
+- bakes in local embeddings when the `embed-local` extra is installed,
+- stores the graph at `~/.grag/<project-name>.lbdb`,
+- with `--ingest`, indexes your code right away.
+
+Restart your MCP client and ask it something ("what calls X?", "remember that we chose Y because Z"). The server auto-starts on first use; browse the graph at the URL `grag status` prints. `grag doctor` diagnoses a misbehaving setup; `grag init --remove` undoes everything.
+
 ## Install
 
 **From PyPI** (ships the web UI):
@@ -47,6 +65,18 @@ pip install gragdb
 
 Python 3.10–3.14; **3.13 recommended** (faster interpreter for the Python-side
 packing/serialization paths, and 3.10 reaches end-of-life in October 2026).
+Linux, macOS, and Windows are all exercised in CI. For CLI + MCP use, prefer a
+`pipx` / `uv tool` install: it puts a stable `grag` on PATH, so the MCP config
+`grag init` writes keeps working when project virtualenvs come and go.
+
+**Windows note.** The current LadybugDB wheel links OpenSSL 3 without bundling
+it. If opening a database fails with `Could not find lbug C API shared library`
+(a misleading fallback error — the real cause is the missing OpenSSL DLLs),
+install [OpenSSL 3 for Win64](https://slproweb.com/products/Win32OpenSSL.html)
+and copy `libssl-3-x64.dll` and `libcrypto-3-x64.dll` from its `bin\` folder
+into the `ladybug.libs` directory next to the `ladybug` package in your Python
+`site-packages`. Tracked as an upstream ladybug packaging issue; this note goes
+away once their wheel bundles the DLLs.
 
 **From source** (for development). Build the UI **first** — `pip install` needs the
 built bundle at `src/grag/api/static` (the wheel's force-include; see `pyproject.toml`):
@@ -74,7 +104,30 @@ GRAG_EMBED_PROVIDER=fastembed grag --db knowledge.lbdb serve
 # optional: GRAG_EMBED_MODEL=BAAI/bge-base-en-v1.5 GRAG_EMBED_DIM=768
 ```
 
-## Quickstart
+## Server management
+
+Auto-served daemons (and `grag serve`) register themselves, so you never have to hunt processes:
+
+```bash
+grag --db ~/.grag/myproj.lbdb status   # running? where? which port/log?
+grag --db ~/.grag/myproj.lbdb stop     # stop the background server
+grag doctor                            # extras, embedder, server, code-index staleness
+```
+
+Daemon output lands in `~/.grag/logs/<db>-<id>.log` (not /dev/null), so an embedding failure or startup crash is always diagnosable. `grag doctor` also reports, per ingested repo, whether the code index is behind git HEAD ("index is 3 commit(s) behind — re-run ingest-code").
+
+## Backup / portability
+
+The `.lbdb` binary format belongs to the storage engine; the durable escape hatch is JSONL:
+
+```bash
+grag --db knowledge.lbdb export -o knowledge.jsonl   # schema + nodes + edges + provenance
+grag --db fresh.lbdb import knowledge.jsonl          # replay anywhere (idempotent merge)
+```
+
+Embeddings are excluded on purpose — they're derived data and rebuild lazily after import. Commit the export to git for a team-shareable knowledgebase each developer rebuilds locally. Every database is also version-stamped on open (`created_version` / `newest_version` in `_grag_meta`), and grag warns when a database was last written by a newer grag than the one running.
+
+## Demo quickstart
 
 ```bash
 # build the demo knowledgebase (fictional company handbook, entities + relations)
@@ -331,8 +384,15 @@ The configuration-affecting options are:
 | `ingest-code --max-file-kb N` | `1024` | Skips source files larger than this many KiB. |
 | `bench --codec CODEC` | all codecs | Benchmarks only the named codec; without it, the benchmark runs `fp32`, `int8`, `binary`, and `polar`. |
 | `reindex --batch-size N` | `128` | Number of nodes embedded per reindex batch. |
+| `status` | — | Shows whether a server is running for the selected database, on which port, and where its log is. |
+| `stop` | — | Stops the background (auto-served) server for the selected database. |
+| `doctor` | — | Install/runtime health report: extras, embedder, env, server, code-index staleness vs git HEAD. |
+| `export --out FILE` | stdout | Dumps the database as portable JSONL (schema, nodes, edges, provenance; embeddings excluded). |
+| `import FILE` | — | Replays a `grag export` file into the selected database (idempotent merge). |
 | `init --client CLIENT` | `auto` | MCP client to configure: `claude`, `cursor`, `windsurf`, `zed`, or auto-detection. |
-| `init --port PORT` | `8471` | Port written into generated MCP/shared-server configuration. |
+| `init --port PORT` | derived per-project | Port written into generated MCP/shared-server configuration. The default is derived from the database path (41000–49151), so initialised projects don't collide on one port. |
+| `init --ingest` | off | Also runs `ingest-code` on the current directory immediately. |
+| `init --remove` | off | Undoes init: removes the grag MCP entry and the CLAUDE.md block. |
 | `init --url` | off | Writes direct HTTP URL transport instead of stdio plus auto-serve; the shared server must already be running. |
 | `init --no-mcp` | off | Skips MCP client configuration. |
 | `init --no-claude-md` | off | Skips the `CLAUDE.md` guidance block. |
@@ -340,7 +400,9 @@ The configuration-affecting options are:
 
 `grag init` has one intentional database-path exception: without an explicit global
 `--db`, it writes `~/.grag/<current-project-name>.lbdb` into the generated client
-configuration rather than using `knowledge.lbdb`. The CLI prevents `--db` and
+configuration rather than using `knowledge.lbdb`. When the `embed-local` extra is
+installed, init also bakes `GRAG_EMBED_PROVIDER=fastembed` into the MCP entry so the
+auto-served daemon gets semantic search without any manual env setup. The CLI prevents `--db` and
 `--db-dir` from appearing together, but it cannot prevent mixing an environment
 variable with the opposite flag; clear `GRAG_DB_DIR` before using `--db` when you
 intend to switch back to single-database mode.

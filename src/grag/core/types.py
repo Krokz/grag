@@ -263,6 +263,13 @@ class SearchResponse(BaseModel):
     # embeds at most config.max_embed_per_search synchronously). > 0 means
     # vector recall improves as later searches drain the backlog.
     pending_embeddings: int = 0
+    # None when vector search ran normally (or the query was empty). "off"
+    # when no embedder is configured for this server process — search is
+    # FTS-only and pending_embeddings is always 0, which otherwise looks
+    # identical to "fully embedded." "error" when an embedder is configured
+    # but the vector path raised (bad install, bad config) and silently
+    # degraded to FTS-only for this call.
+    vector_status: Literal["off", "error"] | None = None
 
 
 class ContextRequest(BaseModel):
@@ -322,6 +329,7 @@ class CodeIngestResponse(BaseModel):
     modules: int = 0
     classes: int = 0
     functions: int = 0
+    module_calls: int = 0  # TerraformModuleCall nodes (Terraform `module` blocks)
     edges: int = 0
     nodes_pruned: int = 0
     edges_pruned: int = 0
