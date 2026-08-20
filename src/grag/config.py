@@ -21,6 +21,20 @@ def database_identity(path: Path) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def derive_port(path: Path) -> int:
+    """Deterministic per-database port in [41000, 49151].
+
+    ``grag init`` uses this as the default so two projects initialised on one
+    machine get different ports instead of both claiming 8471 and colliding
+    at auto-serve time. Derived from database_identity, so the same .lbdb
+    path always yields the same port; the range stays below the common
+    ephemeral-port floor (49152). A rare pair collision is caught at attach
+    time by the identity check in grag.proxy and fixed with an explicit
+    ``--port``.
+    """
+    return 41000 + int(database_identity(path)[:8], 16) % 8152
+
+
 class EmbedderConfig(BaseModel):
     """Opt-in embedding provider. Without one, retrieval runs FTS-only."""
 

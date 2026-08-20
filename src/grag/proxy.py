@@ -57,12 +57,35 @@ async def _ensure_server(db_path: Path, port: int, url: str) -> None:
             return
         raise _wrong_database(port)
 
+    from grag.admin import log_path, open_daemon_log
+
     grag = shutil.which("grag") or sys.argv[0]
-    subprocess.Popen(  # noqa: S603 — grag is resolved from PATH, not user input
-        [grag, "--db", str(db_path.resolve()), "serve", "--with-mcp", f"--port={port}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
+    # Daemon output goes to ~/.grag/logs/ (not /dev/null): embedder failures
+    # and startup errors in the auto-served process must stay debuggable.
+    log_fd = open_daemon_log(db_path)
+    try:
+        subprocess.Popen(  # noqa: S603 — grag is resolved from PATH, not user input
+            [
+                grag,
+                "--db",
+                str(db_path.resolve()),
+                "serve",
+                "--with-mcp",
+                f"--port={port}",
+            ],
+            stdout=log_fd,
+            stderr=log_fd,
+            start_new_session=True,
+        )
+    finally:
+        if isinstance(log_fd, int) and log_fd >= 0:
+            import os
+
+            os.close(log_fd)
+    print(
+        f"grag proxy: starting 'grag serve --with-mcp' on port {port} "
+        f"(log: {log_path(db_path)})",
+        file=sys.stderr,
     )
 
     import asyncio

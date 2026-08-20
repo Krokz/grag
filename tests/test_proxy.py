@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 
 import pytest
 
 from grag import proxy
 from grag.config import database_identity
+
+
+def test_probe_server_real_import_against_dead_port():
+    """Run the real probe (no mocks) so its HTTP-client import is exercised.
+
+    Every other test here monkeypatches _probe_server, which would hide an
+    ImportError inside it until the first real auto-serve connection.
+    """
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    # Nothing is listening on `port` anymore: probe must report unreachable.
+    reachable, identity = asyncio.run(
+        proxy._probe_server(f"http://127.0.0.1:{port}/api/health")
+    )
+    assert reachable is False
+    assert identity is None
 
 
 def test_ensure_server_reuses_only_matching_database(tmp_path, monkeypatch):
@@ -61,6 +79,10 @@ def test_ensure_server_refuses_legacy_unidentified_server(tmp_path, monkeypatch)
 
 
 def test_ensure_server_starts_and_waits_for_matching_database(tmp_path, monkeypatch):
+    from grag import admin
+
+    monkeypatch.setattr(admin, "GRAG_HOME", tmp_path / ".grag")
+
     db = tmp_path / "project.lbdb"
     probes = iter([(False, None), (False, None), (True, database_identity(db))])
     popen_calls = []
