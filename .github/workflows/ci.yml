@@ -8,12 +8,21 @@ on:
 
 jobs:
   test:
-    name: pytest (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: pytest (py${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          # Windows and macOS get one representative Python each: wide
+          # per-version coverage comes from the Linux axis, these two guard
+          # platform-specific paths (paths, pidfiles, daemon spawn, perms).
+          - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.13"
     steps:
       - uses: actions/checkout@v4
 
