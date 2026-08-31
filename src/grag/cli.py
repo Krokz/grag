@@ -5,17 +5,66 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from grag.config import GragConfig, derive_port
+
+
+def _port_number(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 1 and 65535")
+    return port
+
+
+def _mounted_mcp_path(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        parsed = None
+    invalid_character = any(
+        char.isspace()
+        or ord(char) < 0x20
+        or ord(char) == 0x7F
+        or 0xD800 <= ord(char) <= 0xDFFF
+        for char in value
+    )
+    if (
+        parsed is None
+        or not value.startswith("/")
+        or value.startswith("//")
+        or value == "/"
+        or value == "/api"
+        or value.startswith("/api/")
+        or value == "/assets"
+        or value.startswith("/assets/")
+        or parsed.scheme
+        or parsed.netloc
+        or "?" in value
+        or "#" in value
+        or "\\" in value
+        or invalid_character
+    ):
+        raise argparse.ArgumentTypeError(
+            "mounted MCP path must be a clean URL path under '/' and cannot overlap "
+            "'/', '/api', or '/assets'"
+        )
+    return value
 
 
 def _config(args: argparse.Namespace) -> GragConfig:
     cfg = GragConfig.from_env()
     if getattr(args, "db", None):
         cfg.db_path = Path(args.db)
+        # An explicit CLI selector wins over the opposite environment selector.
+        cfg.db_dir = None
     if getattr(args, "db_dir", None):
         # Leave cfg.db_path at its default: its name picks the preferred
         # default db inside db_dir.
+        cfg.db_path = GragConfig().db_path
         cfg.db_dir = Path(args.db_dir)
     return cfg
 
@@ -42,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
 
     serve = sub.add_parser("serve", help="run the REST API + UI server")
     serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8471)
+    serve.add_argument("--port", type=_port_number, default=8471)
     serve.add_argument(
         "--with-mcp",
         action="store_true",
@@ -52,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     serve.add_argument(
         "--mcp-path",
+        type=_mounted_mcp_path,
         default="/mcp",
         help="HTTP path for the MCP endpoint when --with-mcp is set",
     )
@@ -71,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     mcp.add_argument(
         "--port",
-        type=int,
+        type=_port_number,
         default=8471,
         help="port for streamable-http transport or the --auto-serve target port (default 8471)",
     )
@@ -101,7 +151,79 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     sub.add_parser("status", help="show whether a server is running for this database")
-    sub.add_parser("stop", help="stop the background server for this database")
+
+    start = sub.add_parser(
+        "start",
+        help="start the server as a background daemon (frees the terminal; "
+        "logs to ~/.grag/logs/)",
+    )
+    start.add_argument("--host", default="127.0.0.1")
+    start.add_argument(
+        "--port",
+        type=_port_number,
+        default=None,
+        help="port to bind (default: per-database derived port)",
+    )
+    start.add_argument(
+        "--no-mcp",
+        action="store_true",
+        help="serve UI + REST only, without the MCP endpoint",
+    )
+    start.add_argument(
+        "--mcp-path",
+        type=_mounted_mcp_path,
+        default="/mcp",
+        help="mounted MCP path (default: /mcp)",
+    )
+
+    restart = sub.add_parser(
+        "restart",
+        help="stop the background server for this database (if any) and start a "
+        "fresh one — picks up code changes",
+    )
+    restart.add_argument(
+        "--host", default=None, help="bind host (default: preserve current setting)"
+    )
+    restart.add_argument(
+        "--port",
+        type=_port_number,
+        default=None,
+        help="port (default: preserve current setting)",
+    )
+    restart_mcp = restart.add_mutually_exclusive_group()
+    restart_mcp.add_argument(
+        "--with-mcp", dest="with_mcp", action="store_true", help="enable MCP"
+    )
+    restart_mcp.add_argument(
+        "--no-mcp", dest="with_mcp", action="store_false", help="disable MCP"
+    )
+    restart.set_defaults(with_mcp=None)
+    restart.add_argument(
+        "--mcp-path",
+        type=_mounted_mcp_path,
+        default=None,
+        help="MCP path (default: preserve current setting)",
+    )
+    restart.add_argument(
+        "--force",
+        action="store_true",
+        help="allow the one-time restart of a legacy/unverified registration",
+    )
+
+    stop = sub.add_parser("stop", help="stop the background server for this database")
+    stop.add_argument(
+        "-a",
+        "-all",
+        "--all",
+        action="store_true",
+        help="stop every running grag server on the system, not just this database's",
+    )
+    stop.add_argument(
+        "--force",
+        action="store_true",
+        help="also signal live legacy/unverified pidfile entries (unsafe; use only "
+        "when you have independently confirmed the recorded PID)",
+    )
     sub.add_parser(
         "doctor",
         help="diagnose the install: extras, embedder, server, code-index staleness",
@@ -142,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     init.add_argument(
         "--port",
-        type=int,
+        type=_port_number,
         default=None,
         help="port for the grag serve --with-mcp server (default: a per-project "
         "port derived from the database path, so projects don't collide)",
@@ -186,29 +308,84 @@ def main(argv: list[str] | None = None) -> int:
     cfg = _config(args)
 
     if args.cmd == "serve":
+        import os
+        import secrets
+
         import uvicorn
 
-        from grag.admin import remove_pidfile, write_pidfile
+        from grag.admin import (
+            DaemonLifecycleError,
+            _prepare_server_target,
+            remove_pidfile,
+            server_target,
+            write_pidfile,
+        )
         from grag.api.main import create_app
+        from grag.core.errors import GragError
 
         if getattr(args, "with_mcp", False):
             cfg.mcp_path = args.mcp_path
         # The bind host drives the REST Host-header allow-list and the MCP
         # endpoint's DNS-rebinding allow-list, not just uvicorn's socket.
         cfg.host = args.host
+        shutdown_token = secrets.token_urlsafe(32)
         # Register in ~/.grag/run/ so 'grag status' / 'grag stop' can find us.
-        write_pidfile(cfg.db_path, args.port)
+        target = server_target(cfg)
         try:
-            uvicorn.run(create_app(cfg), host=args.host, port=args.port, workers=1)
+            # A foreground serve should recover from a confirmed-dead daemon
+            # registration just like `start` and MCP auto-serve do.
+            _prepare_server_target(target)
+        except DaemonLifecycleError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        claimed = write_pidfile(
+            target,
+            args.port,
+            is_db_dir=cfg.db_dir is not None,
+            with_mcp=cfg.mcp_path is not None,
+            mcp_path=cfg.mcp_path,
+            host=args.host,
+            shutdown_token=shutdown_token,
+        )
+        if not claimed:
+            print(
+                "Could not safely register this server target; another server or "
+                "stale pidfile may already own it. Check 'grag status' before "
+                "starting another writer.",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            app = create_app(cfg)
+            server = uvicorn.Server(
+                uvicorn.Config(app, host=args.host, port=args.port, workers=1)
+            )
+            app.state.shutdown_token = shutdown_token
+            app.state.request_shutdown = lambda: setattr(server, "should_exit", True)
+            server.run()
+        except GragError as exc:
+            print(exc.message, file=sys.stderr)
+            if exc.hint:
+                print(exc.hint, file=sys.stderr)
+            return 1
         finally:
-            remove_pidfile(cfg.db_path)
+            remove_pidfile(
+                target, owner_pid=os.getpid(), shutdown_token=shutdown_token
+            )
     elif args.cmd == "mcp":
         if getattr(args, "auto_serve", False):
+            if cfg.db_dir is not None:
+                parser.error(
+                    "--db-dir cannot be used with 'mcp --auto-serve'; auto-serve "
+                    "currently supports one --db file only. Start 'grag --db-dir "
+                    "DIR serve --with-mcp' and configure the MCP client with that "
+                    "server URL instead."
+                )
             import asyncio
 
             from grag.proxy import run_proxy
 
-            asyncio.run(run_proxy(cfg.db_path, args.port))
+            asyncio.run(run_proxy(cfg.db_path, args.port, api_token=cfg.api_token))
         else:
             from grag.mcp_server.server import run
 
@@ -238,10 +415,50 @@ def main(argv: list[str] | None = None) -> int:
         from grag.admin import status_lines
 
         print("\n".join(status_lines(cfg)))
-    elif args.cmd == "stop":
-        from grag.admin import stop_server
+    elif args.cmd == "start":
+        from grag.admin import DaemonLifecycleError, start_daemon
 
-        print(stop_server(cfg.db_path))
+        try:
+            print(
+                start_daemon(
+                    cfg,
+                    host=args.host,
+                    port=args.port,
+                    with_mcp=not args.no_mcp,
+                    mcp_path=args.mcp_path,
+                )
+            )
+        except DaemonLifecycleError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    elif args.cmd == "restart":
+        from grag.admin import DaemonLifecycleError, restart_daemon
+
+        try:
+            print(
+                restart_daemon(
+                    cfg,
+                    host=args.host,
+                    port=args.port,
+                    with_mcp=args.with_mcp,
+                    mcp_path=args.mcp_path,
+                    force=args.force,
+                )
+            )
+        except DaemonLifecycleError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    elif args.cmd == "stop":
+        from grag.admin import server_target, stop_all_result, stop_server_result
+
+        outcome = (
+            stop_all_result(force=args.force)
+            if args.all
+            else stop_server_result(server_target(cfg), force=args.force)
+        )
+        print(outcome.message)
+        if not outcome.stopped:
+            return 1
     elif args.cmd == "doctor":
         from grag.admin import doctor_lines
 

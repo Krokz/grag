@@ -8,9 +8,12 @@ started by the CLI, not this module.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,7 +23,12 @@ from fastapi.staticfiles import StaticFiles
 
 import grag
 from grag.config import GragConfig, database_identity
-from grag.core.errors import GragError, NotFoundError, ReadOnlyViolation
+from grag.core.errors import (
+    ConfigurationError,
+    GragError,
+    NotFoundError,
+    ReadOnlyViolation,
+)
 from grag.core.types import (
     CodeIngestRequest,
     CodeIngestResponse,
@@ -53,6 +61,74 @@ log = logging.getLogger(__name__)
 # be set instead.
 _WILDCARD_BINDS = {"", "0.0.0.0", "::"}  # noqa: S104 — a constant, not a bind
 
+_SHUTDOWN_PATH = "/api/admin/stop"
+
+
+def _is_loopback_bind(host: str) -> bool:
+    """Return whether an explicit bind host is confined to this machine.
+
+    Only the special hostname ``localhost`` and numeric loopback addresses are
+    trusted. Other hostnames are deliberately not resolved here: DNS can
+    change between validation and bind time. Brackets are accepted around an
+    IPv6 literal to match common host notation.
+    """
+
+    candidate = host.strip().strip("[]")
+    if candidate.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_bind_security(config: GragConfig) -> None:
+    """Refuse a network-visible REST/UI/MCP server without authentication."""
+
+    if not _is_loopback_bind(config.host) and not config.api_token:
+        raise ConfigurationError(
+            "REST/UI server requires GRAG_API_TOKEN on a non-loopback host.",
+            hint="Set GRAG_API_TOKEN or bind to 127.0.0.1/::1/localhost.",
+        )
+
+
+def _validate_mounted_mcp_path(path: str | None) -> None:
+    """Keep the MCP mount from shadowing REST health/control routes or the SPA."""
+    if path is None:
+        return
+    try:
+        parsed = urlsplit(path)
+    except ValueError:
+        parsed = None
+    invalid_character = any(
+        char.isspace()
+        or ord(char) < 0x20
+        or ord(char) == 0x7F
+        or 0xD800 <= ord(char) <= 0xDFFF
+        for char in path
+    )
+    if (
+        parsed is None
+        or not path.startswith("/")
+        or path.startswith("//")
+        or path == "/"
+        or path == "/api"
+        or path.startswith("/api/")
+        or path == "/assets"
+        or path.startswith("/assets/")
+        or parsed.scheme
+        or parsed.netloc
+        or "?" in path
+        or "#" in path
+        or "\\" in path
+        or invalid_character
+    ):
+        raise ConfigurationError(
+            "Mounted MCP path must be a clean URL path under '/' and cannot overlap "
+            "'/', '/api', or '/assets'.",
+            hint="Use the default /mcp or another dedicated prefix such as /agent-mcp.",
+        )
+
 
 def _allowed_hosts(config: GragConfig) -> list[str]:
     """Host-header allow-list — the REST layer's DNS-rebinding guard.
@@ -73,6 +149,11 @@ def _error_body(message: str, hint: str | None) -> dict:
 
 
 def create_app(config: GragConfig) -> FastAPI:
+    # Validate before opening a database or constructing the optional MCP app.
+    # This single gate protects REST, the bundled UI, and a mounted MCP endpoint.
+    _validate_bind_security(config)
+    _validate_mounted_mcp_path(config.mcp_path)
+
     # One registry for the whole process: REST + UI + (optionally) MCP share
     # it, so a single GragService/write-conn serves every surface of a .lbdb.
     registry = ServiceRegistry(config)
@@ -94,12 +175,16 @@ def create_app(config: GragConfig) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if mcp_session_manager is not None:
-            async with mcp_session_manager.run():
+        try:
+            if mcp_session_manager is not None:
+                async with mcp_session_manager.run():
+                    yield
+            else:
                 yield
-        else:
-            yield
-        registry.close()
+        finally:
+            # Close/checkpoint every Engine even when startup or request
+            # teardown propagates an exception through the lifespan context.
+            registry.close()
 
     app = FastAPI(title="grag", version=grag.__version__, lifespan=lifespan)
     app.state.registry = registry
@@ -130,6 +215,10 @@ def create_app(config: GragConfig) -> FastAPI:
             protected = path.startswith("/api/") and path != "/api/health"
             if config.mcp_path and path.startswith(config.mcp_path):
                 protected = True
+            # The managed stop hook has a separate high-entropy token. Keep it
+            # exempt even if a broad custom MCP path also matched this URL.
+            if path == _SHUTDOWN_PATH:
+                protected = False
             if protected and not hmac.compare_digest(
                 request.headers.get("authorization", ""), expected
             ):
@@ -198,11 +287,36 @@ def create_app(config: GragConfig) -> FastAPI:
         identity = (
             database_identity(service.config.db_path) if service is not None else None
         )
+        server_target = config.db_dir if config.db_dir is not None else config.db_path
         return {
             "status": "ok",
             "version": grag.__version__,
             "database_id": identity,
+            "server_id": database_identity(server_target),
+            "pid": os.getpid(),
+            "mcp_enabled": config.mcp_path is not None,
+            "mcp_path": config.mcp_path,
         }
+
+    @app.post(_SHUTDOWN_PATH, include_in_schema=False, status_code=202)
+    def request_managed_shutdown(request: Request):
+        """Ask a managed daemon to stop without exposing a general API route."""
+
+        token = getattr(app.state, "shutdown_token", None)
+        callback = getattr(app.state, "request_shutdown", None)
+        if not token or not callable(callback):
+            return JSONResponse(
+                status_code=404,
+                content=_error_body("Not found.", None),
+            )
+        supplied = request.headers.get("x-grag-stop-token", "")
+        if not hmac.compare_digest(supplied, token):
+            return JSONResponse(
+                status_code=401,
+                content=_error_body("Unauthorized.", None),
+            )
+        callback()
+        return {"status": "stopping"}
 
     @app.get("/api/dbs")
     def list_dbs() -> dict:
