@@ -590,6 +590,9 @@ def upsert_edges(
             cypher += " ON MATCH SET " + ", ".join(match_sets)
         params["fk"] = edge.from_key
         params["tk"] = edge.to_key
+        # execute_write auto-evicts the cached plan for MERGE statements;
+        # without that, ladybug collapses every edge onto the first edge's
+        # endpoints. See Engine.execute_write.
         engine.execute_write(cypher, params)
 
     return MutationSummary(edges=len(req.edges), warnings=warnings)

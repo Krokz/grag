@@ -26,7 +26,7 @@ from typing import Any
 import ladybug as lb
 
 from grag.config import GragConfig
-from grag.core.errors import CypherError, GragError
+from grag.core.errors import ConfigurationError, CypherError, GragError
 from grag.core.types import (
     EMB_CODE_PROP,
     EMBEDDING_PROP,
@@ -235,12 +235,16 @@ class Engine:
         return str(res.rows[0][0]) if res.rows and res.rows[0][0] is not None else None
 
     def _set_meta(self, key: str, value: str) -> None:
-        self._run(
-            self._write_conn,
+        # MERGE: evict the cached plan first (see execute_write) or a second
+        # _set_meta for the same table takes the CREATE branch and raises
+        # duplicate-PK. This runs on the write conn directly (init-time, may be
+        # inside the write lock) rather than via execute_write.
+        cypher = (
             f"MERGE (m:{self._META_KV_TABLE} {{key: $k}}) "
-            "ON CREATE SET m.value = $v ON MATCH SET m.value = $v",
-            {"k": key, "v": value},
+            "ON CREATE SET m.value = $v ON MATCH SET m.value = $v"
         )
+        self._clear_prepared_write_cache()
+        self._run(self._write_conn, cypher, {"k": key, "v": value})
 
     # -- execution -------------------------------------------------------------
 
@@ -257,13 +261,65 @@ class Engine:
     def execute_write(
         self, cypher: str, params: dict[str, Any] | None = None
     ) -> EngineResult:
-        """Run a write or DDL statement, serialized on the write connection."""
+        """Run a write or DDL statement, serialized on the write connection.
+
+        Writes always evict their cached prepared statement first so ladybug
+        compiles a fresh plan every time.
+
+        Ladybug keys its implicit prepared-statement cache on query text and
+        parameter type signature. On 0.20.1, repeated writes with same-typed
+        params have been observed to reuse stale first-execution state instead
+        of re-scanning with the new parameters. The result is silent corruption
+        across the write path: a second upsert of the same node raises
+        duplicate-PK instead of updating; a second ``define_schema`` fails the
+        same way; every edge after the first of its type collapses onto the
+        first edge's endpoints; and a parameterized DELETE (edge pruning)
+        targets the first row's endpoints instead of its own. Reads run on
+        separate pooled connections and keep their cache — this eviction is
+        write-only. See
+        tests/test_mutate.py::test_upsert_edges_distinct_endpoints_*.
+        """
         with self._write_lock:
             try:
+                self._clear_prepared_write_cache()
                 return self._run(self._write_conn, cypher, params)
             finally:
                 # Ladybug creates the WAL lazily on the first write.
                 self._secure_database_files()
+
+    def _clear_prepared_write_cache(self) -> None:
+        """Drop every cached prepared statement on the write connection.
+
+        Reaches into ladybug's implicit prepared-statement cache. A runtime
+        without these private internals cannot apply the write-safety
+        workaround, so refuse the write rather than risk silent corruption.
+
+        Clearing only the caller's query text is insufficient: Ladybug rewrites
+        some parameterized statements before caching them (notably ``to_json``
+        and BLOB parameters), so the cache key can differ from the input Cypher.
+        The cache belongs only to the single write connection; read-connection
+        caches remain untouched.
+        """
+        conn = self._write_conn
+        cache = getattr(conn, "_pybind_implicit_prepared_cache", None)
+        lock = getattr(conn, "_prepared_cache_lock", None)
+        if cache is None or lock is None:
+            raise ConfigurationError(
+                "LadybugDB write safety check failed: the runtime does not "
+                "expose the prepared-statement cache internals grag requires; "
+                "refusing the write to prevent cached-plan data corruption.",
+                hint="Install the verified runtime with: pip install 'ladybug==0.20.1'.",
+            )
+        with lock:
+            prepared_statements = list(cache.values())
+            cache.clear()
+        # Do not invoke driver cleanup while holding its private cache lock;
+        # a future close() implementation may acquire connection state itself.
+        for prepared in prepared_statements:
+            close = getattr(prepared, "close", None)
+            if close is not None:
+                with suppress(Exception):
+                    close()
 
     def _secure_database_files(self) -> None:
         """Keep the database and its transient WAL private to the owner."""

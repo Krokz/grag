@@ -17,6 +17,7 @@ from grag.core.engine import (
     is_node_value,
     is_rel_value,
 )
+from grag.core.errors import ConfigurationError
 from grag.core.types import make_node_id
 
 
@@ -86,6 +87,51 @@ def test_ddl_and_query(docs: Engine):
 def test_parameterized_write_and_read(docs: Engine):
     res = docs.execute("MATCH (d:Doc {id: $id}) RETURN d.title", {"id": "doc-1"})
     assert res.rows == [["vector search"]]
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    ["_pybind_implicit_prepared_cache", "_prepared_cache_lock"],
+)
+def test_write_fails_closed_without_cache_internals(engine: Engine, attribute: str):
+    engine.execute_write("CREATE NODE TABLE SafeWrite(id STRING PRIMARY KEY)")
+    conn = engine._write_conn
+    original = getattr(conn, attribute)
+    setattr(conn, attribute, None)
+    try:
+        with pytest.raises(ConfigurationError) as captured:
+            engine.execute_write(
+                "CREATE (:SafeWrite {id: $id})",
+                {"id": "must-not-be-written"},
+            )
+    finally:
+        setattr(conn, attribute, original)
+
+    assert "refusing the write" in captured.value.message
+    assert "ladybug==0.20.1" in (captured.value.hint or "")
+    assert engine.execute("MATCH (n:SafeWrite) RETURN count(n)").rows == [[0]]
+
+
+def test_rewritten_parameterized_write_does_not_reuse_first_binding(engine: Engine):
+    """Ladybug rewrites to_json($param) before caching, so its cache key does
+    not contain the original Cypher. Clearing only an exact-query key silently
+    updated the first node three times and left the other two JSON fields NULL."""
+    engine.execute_write(
+        "CREATE NODE TABLE JsonWrite(id STRING PRIMARY KEY, payload JSON)"
+    )
+    for key in ("a", "b", "c"):
+        engine.execute_write("CREATE (:JsonWrite {id: $id})", {"id": key})
+    payload = '{"n":1}'
+    for key in ("a", "b", "c"):
+        engine.execute_write(
+            "MATCH (n:JsonWrite {id: $id}) SET n.payload = to_json($payload)",
+            {"id": key, "payload": payload},
+        )
+
+    rows = engine.execute(
+        "MATCH (n:JsonWrite) RETURN n.id, CAST(n.payload AS STRING) ORDER BY n.id"
+    ).rows
+    assert rows == [["a", payload], ["b", payload], ["c", payload]]
 
 
 def test_node_and_rel_value_formats(docs: Engine):

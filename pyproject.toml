@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = { text = "MIT" }
 dependencies = [
-    "ladybug>=0.19",
+    # Exact for file compatibility: 0.19.1 cannot open storage-v47 databases
+    # touched by 0.20.x. Engine guards 0.20.1's implicit cached-write bug;
+    # lift only after the upstream cached-write regression passes.
+    "ladybug==0.20.1",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "mcp>=2.0",
