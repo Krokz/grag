@@ -21,19 +21,31 @@ from grag.project import (
 # ---------------------------------------------------------------------------
 
 
-def test_detect_clients_fallback_to_claude(tmp_path):
+def test_detect_clients_fallback_to_claude(tmp_path, monkeypatch):
     """No client dirs → default to claude so .mcp.json is always written."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
     clients = detect_clients(tmp_path)
     assert clients == ["claude"]
 
 
-def test_detect_clients_cursor(tmp_path):
+def test_detect_clients_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
     (tmp_path / ".cursor").mkdir()
     assert "cursor" in detect_clients(tmp_path)
 
 
-def test_detect_clients_does_not_duplicate(tmp_path):
+def test_detect_clients_cursor_from_home_dir(tmp_path, monkeypatch):
+    """A user-level ~/.cursor means the user runs Cursor — configure it even in
+    a fresh project that has no .cursor dir yet."""
+    home = tmp_path / "home"
+    (home / ".cursor").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    assert "cursor" in detect_clients(tmp_path / "project")
+
+
+def test_detect_clients_does_not_duplicate(tmp_path, monkeypatch):
     """Each client appears at most once."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
     (tmp_path / ".cursor").mkdir()
     clients = detect_clients(tmp_path)
     assert clients.count("cursor") == 1
@@ -346,6 +358,32 @@ def test_skill_ops_include_agents_when_codex_present(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
     ops = plan_skill_ops(["claude"], tmp_path)
     assert tmp_path / ".agents" / "skills" / "grag" / "SKILL.md" in {
+        op.path for op in ops
+    }
+
+
+def test_skill_ops_cover_detected_harnesses_beyond_clients(tmp_path, monkeypatch):
+    """A project .cursor dir gets the skill even when --client was claude only."""
+    from grag.project import plan_skill_ops
+
+    (tmp_path / ".cursor").mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    ops = plan_skill_ops(["claude"], tmp_path)
+    assert tmp_path / ".cursor" / "skills" / "grag" / "SKILL.md" in {
+        op.path for op in ops
+    }
+
+
+def test_skill_ops_cover_home_detected_harnesses(tmp_path, monkeypatch):
+    """A user-level ~/.cursor gets the skill even in a fresh project."""
+    from grag.project import plan_skill_ops
+
+    home = tmp_path / "home"
+    (home / ".cursor").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    project = tmp_path / "project"
+    ops = plan_skill_ops(["claude"], project)
+    assert project / ".cursor" / "skills" / "grag" / "SKILL.md" in {
         op.path for op in ops
     }
 
