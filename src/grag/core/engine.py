@@ -251,9 +251,19 @@ class Engine:
     def execute(
         self, cypher: str, params: dict[str, Any] | None = None
     ) -> EngineResult:
-        """Run a read query on a pooled connection."""
+        """Run a read query on a pooled connection.
+
+        Reads evict the borrowed connection's cached prepared statements first,
+        exactly like the write path: LadybugDB/ladybug#877 shows the same
+        stale-first-execution bug on reads (joins, ORDER BY, LIMIT/top-k — which
+        covers QUERY_FTS_INDEX and QUERY_VECTOR_INDEX, grag's seed shapes). The
+        FTS seed query text is identical for every search on a table, so a warm
+        reader pool would otherwise replay the first search's results for every
+        subsequent one. See tests/test_read_staleness.py.
+        """
         conn = self._borrow_reader()
         try:
+            self._clear_prepared_cache(conn)
             return self._run(conn, cypher, params)
         finally:
             self._readers.put(conn)
@@ -273,41 +283,41 @@ class Engine:
         across the write path: a second upsert of the same node raises
         duplicate-PK instead of updating; a second ``define_schema`` fails the
         same way; every edge after the first of its type collapses onto the
-        first edge's endpoints; and a parameterized DELETE (edge pruning)
-        targets the first row's endpoints instead of its own. Reads run on
-        separate pooled connections and keep their cache — this eviction is
-        write-only. See
+        first edge's endpoints; and a         parameterized DELETE (edge pruning)
+        targets the first row's endpoints instead of its own. See
         tests/test_mutate.py::test_upsert_edges_distinct_endpoints_*.
         """
         with self._write_lock:
             try:
-                self._clear_prepared_write_cache()
+                self._clear_prepared_cache(self._write_conn)
                 return self._run(self._write_conn, cypher, params)
             finally:
                 # Ladybug creates the WAL lazily on the first write.
                 self._secure_database_files()
 
     def _clear_prepared_write_cache(self) -> None:
-        """Drop every cached prepared statement on the write connection.
+        """Drop every cached prepared statement on the write connection."""
+        self._clear_prepared_cache(self._write_conn)
+
+    def _clear_prepared_cache(self, conn: lb.Connection) -> None:
+        """Drop every cached prepared statement on one connection.
 
         Reaches into ladybug's implicit prepared-statement cache. A runtime
-        without these private internals cannot apply the write-safety
-        workaround, so refuse the write rather than risk silent corruption.
+        without these private internals cannot apply the stale-plan workaround,
+        so refuse the query rather than risk silent corruption.
 
         Clearing only the caller's query text is insufficient: Ladybug rewrites
         some parameterized statements before caching them (notably ``to_json``
         and BLOB parameters), so the cache key can differ from the input Cypher.
-        The cache belongs only to the single write connection; read-connection
-        caches remain untouched.
+        The cache is per connection; each pooled reader is cleared on borrow.
         """
-        conn = self._write_conn
         cache = getattr(conn, "_pybind_implicit_prepared_cache", None)
         lock = getattr(conn, "_prepared_cache_lock", None)
         if cache is None or lock is None:
             raise ConfigurationError(
-                "LadybugDB write safety check failed: the runtime does not "
+                "LadybugDB query safety check failed: the runtime does not "
                 "expose the prepared-statement cache internals grag requires; "
-                "refusing the write to prevent cached-plan data corruption.",
+                "refusing the query to prevent cached-plan data corruption.",
                 hint="Install the verified runtime with: pip install 'ladybug==0.20.1'.",
             )
         with lock:
