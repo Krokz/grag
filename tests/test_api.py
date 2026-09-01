@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 import grag
 from grag.api.main import _STATIC_DIR, create_app
 from grag.config import GragConfig, database_identity
+from grag.core.errors import ConfigurationError
 from grag.core.types import (
     CodeIngestResponse,
     ContextResponse,
@@ -95,6 +97,10 @@ def test_health(client):
         "status": "ok",
         "version": grag.__version__,
         "database_id": database_identity(client.app.state.service.config.db_path),
+        "server_id": database_identity(client.app.state.service.config.db_path),
+        "pid": os.getpid(),
+        "mcp_enabled": False,
+        "mcp_path": None,
     }
 
 
@@ -420,6 +426,107 @@ def test_dns_rebinding_host_header_rejected(client):
     assert res.status_code == 400
 
 
+@pytest.mark.parametrize(
+    "mcp_path",
+    [
+        "/",
+        "/api",
+        "/api/mcp",
+        "/api/admin/stop",
+        "/assets",
+        "/assets/index.js",
+        "//evil.example/mcp",
+        "/mcp?target=evil",
+        "/mcp#fragment",
+        "/mcp\\child",
+        "/mcp child",
+        "/mcp\x00child",
+        "/mcp\ud800",
+    ],
+)
+def test_mounted_mcp_path_cannot_shadow_app_routes(mcp_path, tmp_path):
+    with pytest.raises(ConfigurationError, match="cannot overlap"):
+        create_app(
+            GragConfig(
+                db_path=tmp_path / "invalid-mcp-path.lbdb",
+                buffer_pool_size=128 * 1024 * 1024,
+                mcp_path=mcp_path,
+            )
+        )
+
+
+@pytest.mark.parametrize("mcp_path", ["/agent-mcp", "/assets2"])
+def test_safe_custom_mcp_mount_starts_and_is_reported(mcp_path, tmp_path):
+    app = create_app(
+        GragConfig(
+            db_path=tmp_path / "custom-mcp-path.lbdb",
+            buffer_pool_size=128 * 1024 * 1024,
+            mcp_path=mcp_path,
+        )
+    )
+
+    assert any(
+        getattr(route, "path", None) == mcp_path
+        and getattr(route, "name", None) == "mcp"
+        for route in app.routes
+    )
+    with TestClient(app) as custom_client:
+        health = custom_client.get("/api/health")
+        assert health.status_code == 200
+        assert health.json()["mcp_enabled"] is True
+        assert health.json()["mcp_path"] == mcp_path
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["0.0.0.0", "::", "", "192.0.2.10", "grag.example"],  # noqa: S104
+)
+@pytest.mark.parametrize("mcp_path", [None, "/mcp"])
+def test_non_loopback_bind_requires_token(host, mcp_path, tmp_path):
+    """The startup gate covers REST/UI and the optional mounted MCP app."""
+
+    with pytest.raises(ConfigurationError, match="GRAG_API_TOKEN"):
+        create_app(
+            GragConfig(
+                db_path=tmp_path / "unsafe.lbdb",
+                buffer_pool_size=128 * 1024 * 1024,
+                host=host,
+                mcp_path=mcp_path,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "host", ["127.0.0.1", "127.0.0.2", "localhost", "LOCALHOST", "::1", "[::1]"]
+)
+def test_loopback_bind_does_not_require_token(host, tmp_path):
+    app = create_app(
+        GragConfig(
+            db_path=tmp_path / "loopback.lbdb",
+            buffer_pool_size=128 * 1024 * 1024,
+            host=host,
+        )
+    )
+    with TestClient(app) as c:
+        assert c.get("/api/health").status_code == 200
+
+
+def test_token_allows_non_loopback_bind_with_mounted_mcp(tmp_path):
+    app = create_app(
+        GragConfig(
+            db_path=tmp_path / "authenticated.lbdb",
+            buffer_pool_size=128 * 1024 * 1024,
+            host="0.0.0.0",  # noqa: S104 — config under test, no socket bind
+            api_token="sekret",  # noqa: S106 — test fixture
+            mcp_path="/mcp",
+        )
+    )
+    with TestClient(app) as c:
+        assert c.get("/api/health").status_code == 200
+        assert c.get("/api/schema").status_code == 401
+        assert c.get("/mcp/").status_code == 401
+
+
 @pytest.fixture()
 def token_client(tmp_path):
     app = create_app(
@@ -446,6 +553,40 @@ def test_bearer_token_required_when_configured(token_client):
 
 def test_health_exempt_from_token(token_client):
     assert token_client.get("/api/health").status_code == 200
+
+
+def test_managed_shutdown_route_unavailable_without_both_state_values(client):
+    assert client.post("/api/admin/stop").status_code == 404
+
+    client.app.state.shutdown_token = "stop-secret"  # noqa: S105 — test token
+    assert (
+        client.post(
+            "/api/admin/stop", headers={"x-grag-stop-token": "stop-secret"}
+        ).status_code
+        == 404
+    )
+
+
+def test_managed_shutdown_requires_own_exact_token_and_invokes_callback(token_client):
+    calls = []
+    token_client.app.state.shutdown_token = "stop-secret"  # noqa: S105 — test token
+    token_client.app.state.request_shutdown = lambda: calls.append("stop")
+
+    # This private route is exempt from the ordinary bearer middleware, but
+    # the separate shutdown token is mandatory and compared exactly.
+    assert token_client.post("/api/admin/stop").status_code == 401
+    assert (
+        token_client.post(
+            "/api/admin/stop", headers={"x-grag-stop-token": "wrong"}
+        ).status_code
+        == 401
+    )
+    response = token_client.post(
+        "/api/admin/stop", headers={"x-grag-stop-token": "stop-secret"}
+    )
+    assert response.status_code == 202
+    assert response.json() == {"status": "stopping"}
+    assert calls == ["stop"]
 
 
 def test_500_returns_generic_body(tmp_path, monkeypatch):
@@ -556,6 +697,16 @@ def test_list_dbs_multi_db_mode(multi_client):
     res = multi_client.get("/api/dbs")
     assert res.status_code == 200
     assert res.json() == {"dbs": ["alpha", "beta"], "default": "alpha"}
+
+
+def test_multi_db_health_identifies_server_directory(multi_client):
+    body = multi_client.get("/api/health").json()
+    db_dir = multi_client.app.state.registry.config.db_dir
+    assert db_dir is not None
+    assert body["server_id"] == database_identity(db_dir)
+    assert body["pid"] == os.getpid()
+    assert body["mcp_enabled"] is False
+    assert body["mcp_path"] is None
 
 
 def test_query_routes_per_db(multi_client):

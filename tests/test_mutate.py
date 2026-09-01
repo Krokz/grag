@@ -443,6 +443,87 @@ def test_upsert_edges_happy_path_and_update(engine: Engine):
     assert rows == [[2021]]  # single rel, updated prop
 
 
+def _chain_nodes(engine: Engine, keys: list[str]) -> None:
+    """Person schema (name PK, KNOWS since) + one node per key."""
+    define_schema(
+        engine,
+        engine.config,
+        DefineSchemaRequest(node_tables=[_person_spec()], rel_tables=[_knows_spec()]),
+    )
+    upsert_nodes(
+        engine,
+        engine.config,
+        UpsertNodesRequest(nodes=[UpsertNode(label="Person", key=k) for k in keys]),
+    )
+
+
+def _knows_edge(fk: str, tk: str, since: int) -> UpsertEdge:
+    return UpsertEdge(
+        type="KNOWS",
+        from_label="Person",
+        from_key=fk,
+        to_label="Person",
+        to_key=tk,
+        properties={"since": since},
+    )
+
+
+def test_upsert_edges_distinct_endpoints_within_a_call(engine: Engine):
+    """Regression: ladybug reused the first edge's cached MERGE plan for every
+    later same-typed edge, collapsing them all onto the first edge's endpoints.
+    Every edge in a single call must keep its own (from, to)."""
+    _chain_nodes(engine, ["a", "b", "c", "d"])
+    upsert_edges(
+        engine,
+        engine.config,
+        UpsertEdgesRequest(
+            edges=[
+                _knows_edge("a", "b", 1),
+                _knows_edge("b", "c", 2),
+                _knows_edge("c", "d", 3),
+            ]
+        ),
+    )
+    rows = engine.execute(
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, b.name, r.since "
+        "ORDER BY r.since"
+    ).rows
+    assert rows == [["a", "b", 1], ["b", "c", 2], ["c", "d", 3]]
+
+
+def test_upsert_edges_distinct_endpoints_across_calls(engine: Engine):
+    """The prepared-statement cache lives on the long-lived write connection,
+    so the collapse also spanned separate upsert_edges calls (the server's
+    real usage). Each call's edges must bind to their own endpoints."""
+    _chain_nodes(engine, ["a", "b", "c", "d", "e"])
+    for edges in (
+        [_knows_edge("a", "b", 1)],
+        [_knows_edge("b", "c", 2), _knows_edge("c", "d", 3)],
+        [_knows_edge("d", "e", 4)],
+    ):
+        upsert_edges(engine, engine.config, UpsertEdgesRequest(edges=edges))
+    rows = engine.execute(
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, b.name, r.since "
+        "ORDER BY r.since"
+    ).rows
+    assert rows == [["a", "b", 1], ["b", "c", 2], ["c", "d", 3], ["d", "e", 4]]
+
+
+def test_merge_idempotency_across_calls(engine: Engine):
+    """Regression: the same cached-MERGE-plan bug that collapsed edges also
+    made a repeated node or schema upsert take the CREATE branch again,
+    raising duplicate-PK instead of matching. define_schema and upsert_nodes
+    must both stay idempotent across separate calls on the write connection."""
+    spec = DefineSchemaRequest(node_tables=[_person_spec()], rel_tables=[_knows_spec()])
+    define_schema(engine, engine.config, spec)
+    define_schema(engine, engine.config, spec)  # meta MERGE, second call
+    node = UpsertNodesRequest(nodes=[UpsertNode(label="Person", key="a")])
+    upsert_nodes(engine, engine.config, node)
+    upsert_nodes(engine, engine.config, node)  # node MERGE, second call
+    rows = engine.execute("MATCH (p:Person) RETURN p.name").rows
+    assert rows == [["a"]]
+
+
 def test_upsert_edges_missing_endpoint(engine: Engine):
     _people(engine)
     with pytest.raises(NotFoundError) as exc:

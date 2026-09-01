@@ -53,6 +53,31 @@ function overlaps(r: LabelRect, others: LabelRect[]): boolean {
   return others.some((o) => r.x0 < o.x1 && r.x1 > o.x0 && r.y0 < o.y1 && r.y1 > o.y0);
 }
 
+function escapeXml(value: string): string {
+  const xmlSafe = Array.from(value, (character) => {
+    const codePoint = character.codePointAt(0)!;
+    return codePoint === 0x09 ||
+      codePoint === 0x0a ||
+      codePoint === 0x0d ||
+      (codePoint >= 0x20 && codePoint <= 0xd7ff) ||
+      (codePoint >= 0xe000 && codePoint <= 0xfffd) ||
+      (codePoint >= 0x10000 && codePoint <= 0x10ffff)
+      ? character
+      : '\ufffd';
+  }).join('');
+  return xmlSafe.replace(
+    /[&<>"']/g,
+    (character) =>
+      ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&apos;',
+      })[character]!,
+  );
+}
+
 function useElementSize() {
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -91,6 +116,10 @@ export function GraphCanvas({
   const pinnedNode = useRef<FgNode | null>(null);
   const lastClick = useRef<{ id: string; t: number }>({ id: '', t: 0 });
   const [hoverId, setHoverId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const exportTaskTimer = useRef<number | null>(null);
+  const exportNoticeTimer = useRef<number | null>(null);
   // Label bounding boxes already drawn this frame — cleared in
   // onRenderFramePre, filled as labels render, used to skip overlaps.
   const drawnLabels = useRef<LabelRect[]>([]);
@@ -122,6 +151,130 @@ export function GraphCanvas({
       return () => clearTimeout(t);
     }
   }, [data.nodes.length]);
+
+  // Export the currently loaded and filtered canvas view as a
+  // resolution-independent SVG, straight from the coordinates the force
+  // simulation already computed. The viewBox is the layout's bounding box, so
+  // the export is independent of the current zoom/pan.
+  const exportSvg = useCallback(() => {
+    if (exportTaskTimer.current !== null) {
+      window.clearTimeout(exportTaskTimer.current);
+      exportTaskTimer.current = null;
+    }
+    if (exportNoticeTimer.current !== null) {
+      window.clearTimeout(exportNoticeTimer.current);
+      exportNoticeTimer.current = null;
+    }
+    setExportNotice(null);
+    setExporting(true);
+    // Defer the (synchronous) build one tick so the button repaints to
+    // "Exporting…" before the main thread blocks on a large graph.
+    exportTaskTimer.current = window.setTimeout(() => {
+      exportTaskTimer.current = null;
+      try {
+        if (!buildAndDownloadSvg(data)) {
+          setExportNotice('Layout not ready');
+          const timer = window.setTimeout(() => {
+            // A newer export may have replaced or cancelled this notice. Only
+            // the timer that still owns the notice is allowed to clear it.
+            if (exportNoticeTimer.current === timer) {
+              exportNoticeTimer.current = null;
+              setExportNotice(null);
+            }
+          }, 1500);
+          exportNoticeTimer.current = timer;
+        }
+      } finally {
+        setExporting(false);
+      }
+    }, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, pkMap]);
+
+  useEffect(
+    () => () => {
+      if (exportNoticeTimer.current !== null) {
+        window.clearTimeout(exportNoticeTimer.current);
+      }
+      if (exportTaskTimer.current !== null) {
+        window.clearTimeout(exportTaskTimer.current);
+      }
+    },
+    [],
+  );
+
+  // ForceGraph writes x/y onto the same node objects held in `data.nodes`, and
+  // replaces each link's source/target with the node reference — so the live
+  // layout can be read straight off `data`, no imperative ref needed.
+  const buildAndDownloadSvg = (graph: {
+    nodes: FgNode[];
+    links: (Omit<EdgeRecord, 'source' | 'target'> & {
+      source: FgNode | string;
+      target: FgNode | string;
+    })[];
+  }) => {
+    const { nodes, links } = graph;
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const resolve = (v: FgNode | string): FgNode | undefined =>
+      typeof v === 'string' ? byId.get(v) : v;
+    const pts = nodes.filter(
+      (n) => Number.isFinite(n.x) && Number.isFinite(n.y),
+    );
+    if (pts.length === 0) return false;
+    const xs = pts.map((n) => n.x as number);
+    const ys = pts.map((n) => n.y as number);
+    const pad = 24;
+    const minX = Math.min(...xs) - pad;
+    const minY = Math.min(...ys) - pad;
+    const w = Math.max(...xs) - minX + pad;
+    const h = Math.max(...ys) - minY + pad;
+    const f = (v: number) => v.toFixed(1);
+    const edges = links
+      .map((l) => {
+        const s = resolve(l.source);
+        const t = resolve(l.target);
+        if (
+          !s ||
+          !t ||
+          !Number.isFinite(s.x) ||
+          !Number.isFinite(s.y) ||
+          !Number.isFinite(t.x) ||
+          !Number.isFinite(t.y)
+        ) {
+          return '';
+        }
+        const title = escapeXml(`${l.type}: ${s.id} → ${t.id}`);
+        return `<line x1="${f(s.x!)}" y1="${f(s.y!)}" x2="${f(t.x!)}" y2="${f(t.y!)}"><title>${title}</title></line>`;
+      })
+      .join('');
+    const circles = pts
+      .map(
+        (n) => {
+          const title = escapeXml(`${displayName(n, pkMap)} (${n.id})`);
+          return `<circle cx="${f(n.x!)}" cy="${f(n.y!)}" r="3" fill="${colorForLabel(n.label)}"><title>${title}</title></circle>`;
+        },
+      )
+      .join('');
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="grag-view-title grag-view-desc" viewBox="${f(minX)} ${f(minY)} ${f(w)} ${f(h)}">` +
+      `<title id="grag-view-title">grag canvas view</title>` +
+      `<desc id="grag-view-desc">Currently loaded and filtered canvas view with ${pts.length} nodes and ${links.length} edges.</desc>` +
+      `<defs><marker id="grag-arrow" viewBox="0 0 5 5" refX="5" refY="2.5" markerWidth="5" markerHeight="5" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 5 2.5 L 0 5 z" fill="#8895a7" fill-opacity="0.5"/></marker></defs>` +
+      `<rect x="${f(minX)}" y="${f(minY)}" width="${f(w)}" height="${f(h)}" fill="#0b0f14"/>` +
+      `<g stroke="#8895a7" stroke-width="0.5" stroke-opacity="0.25" marker-end="url(#grag-arrow)">${edges}</g>` +
+      `<g>${circles}</g></svg>`;
+    const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'grag-view.svg';
+    // Must be in the document for the download to fire in Firefox/Safari; a
+    // detached anchor with a blob URL silently no-ops.
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  };
 
   useEffect(() => {
     if (!focusRequest) return;
@@ -384,6 +537,15 @@ export function GraphCanvas({
           {data.nodes.length} nodes · {data.links.length} edges
           {filter && ` (filtered from ${subgraph.nodes.length})`}
         </span>
+        <button
+          type="button"
+          className="reset-view-btn"
+          title="Save the currently loaded and filtered canvas view as SVG"
+          onClick={exportSvg}
+          disabled={data.nodes.length === 0 || exporting}
+        >
+          {exporting ? 'Exporting…' : (exportNotice ?? 'Export SVG view')}
+        </button>
       </div>
 
       {empty && (

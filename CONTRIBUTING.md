@@ -10,14 +10,14 @@ Two long-lived branches, plus short-lived working branches.
 | Branch          | Purpose                                                        | Lifetime    |
 | --------------- | -------------------------------------------------------------- | ----------- |
 | `main`          | Always releasable. Tags and PyPI releases are cut from here.    | permanent   |
-| `develop`       | Integration branch. All features land here first.               | permanent   |
-| `feature/<x>`   | A single feature or change. Branched from `develop`.            | until merged |
-| `release/<x.y.z>` | Stabilize a release. Branched from `develop`.                 | until merged |
+| `dev`           | Integration branch. All features land here first.                | permanent   |
+| `feature/<x>`   | A single feature or change. Branched from `dev`.                 | until merged |
+| `release/<x.y.z>` | Stabilize a release. Branched from `dev`.                     | until merged |
 | `hotfix/<x>`    | Urgent fix against what's shipped. Branched from `main`.        | until merged |
 
 ```mermaid
 flowchart LR
-  F[feature/x] -->|PR| D[develop]
+  F[feature/x] -->|PR| D[dev]
   D --> R[release/0.2.0]
   R -->|merge + tag v0.2.0| M[main]
   R -->|back-merge| D
@@ -28,23 +28,22 @@ flowchart LR
 
 ### The rules
 
-- **PRs required** for everything. No direct pushes to `main` or `develop`.
+- **PRs required** for everything. No direct pushes to `main` or `dev`.
 - **CI must be green** before merge (pytest matrix + ruff/mypy + UI build — see
   `.github/workflows/ci.yml`).
-- **Squash-merge** `feature/*` into `develop` to keep history readable.
-- **No force-push** to `main` or `develop`. Ever.
+- **Squash-merge** `feature/*` into `dev` to keep history readable.
+- **No force-push** to `main` or `dev`. Ever.
 - Keep `feature/*` branches small and focused; one concern per PR.
 
 ### Where work goes
 
-- Day-to-day work: branch `feature/<name>` **from `develop`**, PR back to
-  `develop`.
-- Preparing a release: cut `release/<x.y.z>` **from `develop`**. Only bug fixes
+- Day-to-day work: branch `feature/<name>` **from `dev`**, PR back to `dev`.
+- Preparing a release: cut `release/<x.y.z>` **from `dev`**. Only bug fixes
   and the version bump go here — no new features. Merge it to `main` (fast-forward
-  or merge commit), tag `v<x.y.z>`, then **back-merge to `develop`** so the fixes
+  or merge commit), tag `v<x.y.z>`, then **back-merge to `dev`** so the fixes
   and version bump don't get lost.
 - Urgent production fix: branch `hotfix/<name>` **from `main`**, merge to `main`
-  (tag a patch release), then **back-merge to `develop`**.
+  (tag a patch release), then **back-merge to `dev`**.
 
 ## Development setup
 
@@ -65,8 +64,8 @@ and VECTOR extensions on first use, so the first test run needs network access.
 
 ## Cutting a release
 
-1. Make sure `develop` is green and cut `release/<x.y.z>`:
-   `git checkout -b release/0.2.0 develop`
+1. Make sure `dev` is green and cut `release/<x.y.z>`:
+   `git checkout -b release/0.2.0 dev`
 2. Bump `version` in `pyproject.toml` to `0.2.0` (the publish workflow **fails**
    if the tag doesn't match this value).
 3. Merge `release/0.2.0` → `main`.
@@ -74,7 +73,7 @@ and VECTOR extensions on first use, so the first test run needs network access.
    — pushing a `v*` tag **or** publishing a GitHub Release triggers the
    publish workflow (`.github/workflows/publish.yml`): build UI → pytest →
    build dist (`twine check`) → publish to PyPI via OIDC.
-5. Back-merge `main` → `develop` and delete the release branch.
+5. Back-merge `main` → `dev` and delete the release branch.
 
 ## One-time PyPI setup (maintainer)
 

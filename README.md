@@ -1,6 +1,6 @@
 # grag
 
-**Local-first, LLM-first graph knowledgebase.** One embedded Cypher engine ([LadybugDB](https://ladybugdb.com), the Kuzu successor), one file per database, zero daemons, nothing leaves your machine — wrapped in the tool contract LLMs actually need: schema introspection that anchors text-to-Cypher, idempotent upserts with provenance, hybrid FTS/vector search, and token-budgeted subgraph context for grounded, low-hallucination answers.
+**Local-first, LLM-first graph knowledgebase.** One embedded Cypher engine ([LadybugDB](https://ladybugdb.com), the Kuzu successor), one file per database, no database server to run, nothing leaves your machine — wrapped in the tool contract LLMs actually need: schema introspection that anchors text-to-Cypher, idempotent upserts with provenance, hybrid FTS/vector search, and token-budgeted subgraph context for grounded, low-hallucination answers.
 
 *(**G**(raph)**RAG** — retrieval-augmented generation grounded in a graph.)*
 
@@ -16,7 +16,7 @@ The point isn't just "local storage," it's **token economics**:
 - **Structure over bodies.** Code ingestion stores signatures, docstrings, and line ranges — never source bodies — so the graph stays tiny and queries resolve at near-zero body tokens. Fetch a body only when the graph points you at the exact `path:line_start-line_end`.
 - **Token budgets everywhere.** `search_knowledge` / `get_context` return cited subgraphs packed to a budget you set, so grounding never floods the context window.
 - **Context that compounds.** Decisions, conventions, and rationale the agent learns get written back (`upsert_nodes/edges` with provenance) and linked to the code they describe — so the next session starts from what you already established, not from scratch.
-- **Local means private and free.** No external embedding service by default (optional local ONNX embeddings, no torch), no telemetry, no daemon. Your code and your knowledge stay on-disk, in a file you can copy, back up, or delete.
+- **Local means private and free.** No external embedding service by default (optional local ONNX embeddings, no torch), no telemetry, no mandatory background service — the engine is embedded and the CLI and library work directly against the file. Your code and your knowledge stay on-disk, in a file you can copy, back up, or delete.
 
 The result: an LLM that grounds its answers in *your* project's accumulated knowledge — with far fewer tokens, far less hallucination, and zero data leaving the box.
 
@@ -26,7 +26,7 @@ LLM answers hallucinate when retrieval returns isolated chunks. grag stores know
 
 ## How grag differs
 
-The space tends to split two ways: **code-graph extractors** (compile a repo into a graph artifact an assistant can traverse) and **enterprise graph platforms** (a server you operate, then bolt RAG on yourself). grag is the missing middle — an **embedded Cypher knowledgebase agents both build and retrieve from**, with hybrid search packed to a token budget. One `.lbdb` file per project, no daemon.
+The space tends to split two ways: **code-graph extractors** (compile a repo into a graph artifact an assistant can traverse) and **enterprise graph platforms** (a server you operate, then bolt RAG on yourself). grag is the missing middle — an **embedded Cypher knowledgebase agents both build and retrieve from**, with hybrid search packed to a token budget. One `.lbdb` file per project, no database server to operate.
 
 What that means in practice:
 
@@ -92,6 +92,12 @@ pip install -e ".[embed-remote]"  # optional: OpenAI-compatible remote embedding
 
 Without an embedder, everything works FTS-only (BM25 is native to the engine).
 
+**LadybugDB compatibility.** This release pins LadybugDB 0.20.1 and guards its
+implicit prepared-write cache in grag's engine. Do not downgrade an existing
+database in place: a file opened by 0.20.x uses storage version 47 and cannot be
+opened by 0.19.1 (storage version 43). A rollback requires exporting with the
+newer compatible grag/Ladybug installation and importing into a fresh database.
+
 **Enabling semantic search:** install `embed-local`, then set `GRAG_EMBED_PROVIDER=fastembed`
 when serving. This uses ONNX Runtime — **no PyTorch** — so grag stays light (~50-100MB,
 model downloads once then works offline). Nodes are (re)embedded lazily on the next
@@ -106,13 +112,30 @@ GRAG_EMBED_PROVIDER=fastembed grag --db knowledge.lbdb serve
 
 ## Server management
 
-Auto-served daemons (and `grag serve`) register themselves, so you never have to hunt processes:
+A server is never required — the CLI and library work directly on the `.lbdb` file. But when you want the browser UI or a shared MCP endpoint, grag can run one as a background daemon (a convenience front-end over the same embedded engine, not a database service you have to operate). Daemons — whether auto-served for an MCP client or started explicitly — register themselves, so you never have to hunt processes:
 
 ```bash
-grag --db ~/.grag/myproj.lbdb status   # running? where? which port/log?
-grag --db ~/.grag/myproj.lbdb stop     # stop the background server
+grag --db ~/.grag/myproj.lbdb start    # launch in the background, frees the terminal
+grag --db ~/.grag/myproj.lbdb restart  # relaunch (picks up new code after an upgrade/edit)
+grag --db ~/.grag/myproj.lbdb status   # running? where? which port/log? + every server on the system
+grag --db ~/.grag/myproj.lbdb stop     # stop this database's server
+grag stop --all                        # stop every grag server on the system
 grag doctor                            # extras, embedder, server, code-index staleness
 ```
+
+`grag start` binds a stable per-database port by default (pass `--port` to override, `--no-mcp` for UI+REST only) and inherits your environment, so `GRAG_EMBED_PROVIDER=fastembed grag start` carries the embedder into the daemon.
+
+`grag stop -a`, `grag stop -all`, and `grag stop --all` are equivalent. New
+daemons use a private authenticated shutdown channel so the API and embedded
+database close cleanly on every platform. After upgrading from grag 0.4.0, its
+older pidfiles cannot be health/PID-verified; inspect the PIDs shown by
+`grag status`, then use `grag stop --all --force` (or `grag restart --force` for
+one target) once. Stop/refusal failures return a non-zero exit code.
+
+Binding the REST/UI server beyond loopback requires `GRAG_API_TOKEN`; grag now
+refuses an unauthenticated `--host 0.0.0.0`, `--host ::`, hostname, or LAN
+address. `restart` preserves the recorded host, port, and MCP mode unless you
+explicitly override them; a custom `--mcp-path` is preserved as well.
 
 Daemon output lands in `~/.grag/logs/<db>-<id>.log` (not /dev/null), so an embedding failure or startup crash is always diagnosable. `grag doctor` also reports, per ingested repo, whether the code index is behind git HEAD ("index is 3 commit(s) behind — re-run ingest-code").
 
@@ -148,7 +171,7 @@ grag --db examples/knowledge.lbdb serve --with-mcp
 python examples/demo_e2e.py
 ```
 
-The UI: force-graph explorer (click = inspect, double-click = expand neighbors), Cypher console (Ctrl+Enter, graph/table results), schema sidebar, and a search bar that shows the exact grounding text an LLM would receive. **Click a label in the legend** (bottom-left) to view just that label and its 1-hop relationships — e.g. click `Decision` to see only your Decisions and what they document/motivate; run a query or reload to reset the canvas.
+The UI: force-graph explorer (click = inspect, double-click = expand neighbors), Cypher console (Ctrl+Enter, graph/table results), schema sidebar, and a search bar that shows the exact grounding text an LLM would receive. **Click a label in the legend** (bottom-left) to view just that label and its 1-hop relationships — e.g. click `Decision` to see only your Decisions and what they document/motivate; run a query or reload to reset the canvas. **Export SVG view** saves the currently loaded and filtered canvas view (not the whole database), including directional edges and accessible node/relationship titles.
 
 **One process, one live file.** LadybugDB is single-writer, so `serve` and `mcp` can't share a `.lbdb` as separate processes. `serve --with-mcp` mounts the MCP endpoint *inside* the REST/UI server, so UI + REST + MCP share one registry and one write connection — the UI watches the AI's writes land live instead of reading a stale copy. Use `--mcp-path` to change the MCP mount path (default `/mcp`).
 
@@ -269,7 +292,7 @@ Cursor / `.cursor/mcp.json` (per window, one header per project):
 
 The server is localhost-only by default, and db names are routing hints, not auth — resolution rejects absolute paths and `..`. Single-db stdio (`grag --db knowledge.lbdb mcp`) remains the simple default.
 
-**HTTP security posture.** The REST layer has no accounts or sessions; the trust model is "whoever can reach the port directly is trusted." Drive-by browser access is denied by default: a Host-header allow-list (loopbacks + the bind host) blocks DNS rebinding, and CORS grants no cross-origin access at all unless you opt in via `GRAG_CORS_ORIGINS` (the built-in UI is served same-origin and needs none). If you bind a non-loopback address, set `GRAG_API_TOKEN` — every `/api/*` route except `/api/health` and every MCP request then requires `Authorization: Bearer <token>`. Standalone HTTP MCP refuses to bind a non-loopback host without that token. On POSIX, grag also enforces `0600` on database and WAL files (and `0700` when it creates a new database directory).
+**HTTP security posture.** The REST layer has no accounts or sessions; the trust model is "whoever can reach the port directly is trusted." Drive-by browser access is denied by default: a Host-header allow-list (loopbacks + the bind host) blocks DNS rebinding, and CORS grants no cross-origin access at all unless you opt in via `GRAG_CORS_ORIGINS` (the built-in UI is served same-origin and needs none). If you bind a non-loopback address, set `GRAG_API_TOKEN` — every public `/api/*` route except `/api/health` and every MCP request then requires `Authorization: Bearer <token>`. The hidden managed-daemon stop hook is not a public API: it accepts only the separate high-entropy token stored in that daemon's private `0600` registration file. Standalone HTTP MCP refuses to bind a non-loopback host without `GRAG_API_TOKEN`. On POSIX, grag also enforces `0600` on database and WAL files (and `0700` when it creates a new database directory).
 
 ## Python API
 
@@ -380,12 +403,23 @@ The configuration-affecting options are:
 | `mcp --port PORT` | `8471` | Standalone HTTP MCP port, or the shared server target for `--auto-serve`. |
 | `mcp --path PATH` | `/mcp` | Standalone streamable HTTP endpoint path. |
 | `mcp --auto-serve` | off | Keeps the client transport on stdio but proxies it to a shared `serve --with-mcp` process, starting that process when needed. |
+| `start --host HOST` | `127.0.0.1` | Starts a managed background REST/UI server on this host. Non-loopback binds require `GRAG_API_TOKEN`. |
+| `start --port PORT` | per-database derived port | Port for the managed background server. |
+| `start --no-mcp` | off | Starts the managed server without its normally enabled MCP endpoint. |
+| `start --mcp-path PATH` | `/mcp` | Mounted MCP path for the managed background server. |
+| `restart --host HOST` | preserve current | Overrides the registered bind host while restarting. |
+| `restart --port PORT` | preserve current | Overrides the registered port while restarting. |
+| `restart --with-mcp` / `--no-mcp` | preserve current | Enables or disables mounted MCP while restarting. |
+| `restart --mcp-path PATH` | preserve current | Overrides the mounted MCP path while restarting. |
+| `restart --force` | off | Allows one-time migration of a live legacy registration after independently verifying its PID. |
 | `ingest-code --no-calls` | off | Skips Python `CALLS` edge extraction. |
 | `ingest-code --max-file-kb N` | `1024` | Skips source files larger than this many KiB. |
 | `bench --codec CODEC` | all codecs | Benchmarks only the named codec; without it, the benchmark runs `fp32`, `int8`, `binary`, and `polar`. |
 | `reindex --batch-size N` | `128` | Number of nodes embedded per reindex batch. |
 | `status` | — | Shows whether a server is running for the selected database, on which port, and where its log is. |
-| `stop` | — | Stops the background (auto-served) server for the selected database. |
+| `stop` | — | Gracefully stops the managed background server for the selected database. |
+| `stop -a` / `-all` / `--all` | off | Stops every safely verifiable managed grag server. Refuses unresolved legacy registrations instead of reporting false success. |
+| `stop --force` | off | Also permits signaling a live legacy/unverified registration; use only after independently verifying its recorded PID. |
 | `doctor` | — | Install/runtime health report: extras, embedder, env, server, code-index staleness vs git HEAD. |
 | `export --out FILE` | stdout | Dumps the database as portable JSONL (schema, nodes, edges, provenance; embeddings excluded). |
 | `import FILE` | — | Replays a `grag export` file into the selected database (idempotent merge). |
@@ -402,10 +436,10 @@ The configuration-affecting options are:
 `--db`, it writes `~/.grag/<current-project-name>.lbdb` into the generated client
 configuration rather than using `knowledge.lbdb`. When the `embed-local` extra is
 installed, init also bakes `GRAG_EMBED_PROVIDER=fastembed` into the MCP entry so the
-auto-served daemon gets semantic search without any manual env setup. The CLI prevents `--db` and
-`--db-dir` from appearing together, but it cannot prevent mixing an environment
-variable with the opposite flag; clear `GRAG_DB_DIR` before using `--db` when you
-intend to switch back to single-database mode.
+auto-served daemon gets semantic search without any manual env setup. The CLI prevents
+`--db` and `--db-dir` from appearing together. An explicit CLI selector also clears
+the opposite selector inherited from the environment, so `--db` overrides
+`GRAG_DB_DIR` and `--db-dir` overrides `GRAG_DB_PATH`.
 
 ## Performance budget
 
@@ -421,14 +455,14 @@ Measured — `tests/test_perf.py` guards cold start (< 2s), search latency, and 
 ## Develop
 
 ```bash
-python -m pytest tests/          # 240+ tests, ~25s
+python -m pytest tests/          # 400+ tests
 ruff check src tests && mypy src/grag   # CI gates on both
 grag bench                        # codec recall/latency/RSS table
 cd ui && npm run build            # rebuilds the UI into src/grag/api/static/
 ```
 
 See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the branching model (Gitflow-lite:
-`main` + `develop` + `feature`/`release`/`hotfix`), PR rules, and how releases are
+`main` + `dev` + `feature`/`release`/`hotfix`), PR rules, and how releases are
 cut and published to PyPI.
 
 Known limits: embedded engine = single-writer; LadybugDB reserves a large *virtual* address space per open database (actual RSS stays within the buffer pool) — close `Engine`s you create; polar codec encode is Python-speed (fine at query time, slower at write time).
