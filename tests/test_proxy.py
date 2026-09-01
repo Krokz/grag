@@ -306,6 +306,15 @@ def test_run_proxy_passes_bearer_client_to_mcp_transport(tmp_path, monkeypatch):
         raise RuntimeError("transport reached")
         yield  # pragma: no cover
 
+    async def no_sleep(_seconds):
+        return None
+
+    # A crashed server leaves its pidfile behind; without one the heal loop
+    # treats the loss as a deliberate `grag stop` and exits instead.
+    monkeypatch.setattr(admin, "GRAG_HOME", tmp_path / ".grag")
+    assert admin.write_pidfile(tmp_path / "project.lbdb", 42001)
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
     monkeypatch.setattr(proxy, "_ensure_server", ensure_server)
     monkeypatch.setattr(httpx2, "AsyncClient", FakeHttpClient)
     monkeypatch.setattr(stdio_module, "stdio_server", stdio_server)
@@ -328,6 +337,237 @@ def test_run_proxy_passes_bearer_client_to_mcp_transport(tmp_path, monkeypatch):
     assert captured["client_kwargs"]["timeout"].read == 300.0
     assert captured["url"] == "http://127.0.0.1:42001/agent-mcp/"
     assert captured["client"] is not None
+
+
+def _session_msg(message):
+    from mcp.shared.message import SessionMessage
+
+    return SessionMessage(message=message)
+
+
+class _FakeHttpClient:
+    def __init__(self, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+
+def test_run_proxy_reconnects_and_replays_initialize(tmp_path, monkeypatch):
+    """A mid-session server crash heals in-band: the proxy re-ensures the
+    server, reconnects, replays the captured initialize handshake under a
+    proxy-internal id, and resumes forwarding — the client never re-initializes.
+    """
+    import anyio
+    import httpx2
+    from mcp.client import streamable_http as streamable_http_module
+    from mcp.server import stdio as stdio_module
+    from mcp.types import JSONRPCNotification, JSONRPCRequest, JSONRPCResponse
+
+    # stdio ends: test acts as the MCP client.
+    stdio_client_send, stdio_read = anyio.create_memory_object_stream(100)
+    stdio_write, stdio_client_recv = anyio.create_memory_object_stream(100)
+    # Two upstream sessions: session 1 dies mid-stream, session 2 is the heal.
+    # upstream_respond_N feeds the proxy's http_read; upstream_requests_N
+    # drains the proxy's http_write.
+    upstream_respond_1, http_read_1 = anyio.create_memory_object_stream(100)
+    http_write_1, upstream_requests_1 = anyio.create_memory_object_stream(100)
+    upstream_respond_2, http_read_2 = anyio.create_memory_object_stream(100)
+    http_write_2, upstream_requests_2 = anyio.create_memory_object_stream(100)
+    sessions = iter(
+        [
+            (http_read_1, http_write_1),
+            (http_read_2, http_write_2),
+        ]
+    )
+
+    async def ensure_server(*args, **kwargs):
+        return "/mcp"
+
+    @asynccontextmanager
+    async def fake_stdio():
+        yield stdio_read, stdio_write
+
+    @asynccontextmanager
+    async def fake_http(url, *, http_client):
+        yield next(sessions)
+
+    async def no_sleep(_seconds):
+        return None
+
+    # A crashed server leaves its pidfile behind; the heal loop keys on that.
+    monkeypatch.setattr(admin, "GRAG_HOME", tmp_path / ".grag")
+    db = tmp_path / "project.lbdb"
+    assert admin.write_pidfile(db, 42001)
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(proxy, "_ensure_server", ensure_server)
+    monkeypatch.setattr(httpx2, "AsyncClient", _FakeHttpClient)
+    monkeypatch.setattr(stdio_module, "stdio_server", fake_stdio)
+    monkeypatch.setattr(streamable_http_module, "streamable_http_client", fake_http)
+
+    async def client_and_upstream():
+        init_params = {"protocolVersion": "2025-03-26", "capabilities": {}}
+        # Session 1: client initializes through the pipe.
+        await stdio_client_send.send(
+            _session_msg(
+                JSONRPCRequest(
+                    jsonrpc="2.0", id=1, method="initialize", params=init_params
+                )
+            )
+        )
+        forwarded = await upstream_requests_1.receive()
+        assert forwarded.message.method == "initialize"
+        await upstream_respond_1.send(
+            _session_msg(JSONRPCResponse(jsonrpc="2.0", id=1, result={"ok": 1}))
+        )
+        assert (await stdio_client_recv.receive()).message.id == 1
+        await stdio_client_send.send(
+            _session_msg(
+                JSONRPCNotification(
+                    jsonrpc="2.0", method="notifications/initialized"
+                )
+            )
+        )
+        await upstream_requests_1.receive()
+
+        # Crash: the upstream read stream closes.
+        await upstream_respond_1.aclose()
+
+        # Session 2: proxy must replay initialize under its own id, then the
+        # initialized notification, before any client traffic is forwarded.
+        replayed = await upstream_requests_2.receive()
+        assert replayed.message.method == "initialize"
+        assert replayed.message.id == "grag-proxy-reinit"
+        assert replayed.message.params == init_params
+        await upstream_respond_2.send(
+            _session_msg(
+                JSONRPCResponse(
+                    jsonrpc="2.0", id="grag-proxy-reinit", result={"ok": 1}
+                )
+            )
+        )
+        replayed_note = await upstream_requests_2.receive()
+        assert replayed_note.message.method == "notifications/initialized"
+
+        # A post-crash tool call flows to the fresh session.
+        await stdio_client_send.send(
+            _session_msg(
+                JSONRPCRequest(
+                    jsonrpc="2.0", id=2, method="tools/call", params={"name": "x"}
+                )
+            )
+        )
+        healed = await upstream_requests_2.receive()
+        assert healed.message.method == "tools/call"
+
+        # Client disconnects: proxy shuts down normally.
+        await stdio_client_send.aclose()
+
+    async def run():
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(client_and_upstream)
+            tg.start_soon(
+                proxy.run_proxy, tmp_path / "project.lbdb", 42001
+            )
+
+    asyncio.run(run())
+
+
+def test_run_proxy_gives_up_after_max_restarts(tmp_path, monkeypatch):
+    """A server that never comes up must not retry-loop forever."""
+    import httpx2
+    from mcp.client import streamable_http as streamable_http_module
+    from mcp.server import stdio as stdio_module
+
+    async def ensure_server(*args, **kwargs):
+        return "/mcp"
+
+    @asynccontextmanager
+    async def fake_stdio():
+        yield object(), object()
+
+    @asynccontextmanager
+    async def fake_http(url, *, http_client):
+        raise ConnectionRefusedError("upstream never comes up")
+        yield  # pragma: no cover
+
+    async def no_sleep(_seconds):
+        return None
+
+    # A crashed server leaves its pidfile behind; without one the heal loop
+    # treats the loss as a deliberate `grag stop` and exits instead.
+    monkeypatch.setattr(admin, "GRAG_HOME", tmp_path / ".grag")
+    assert admin.write_pidfile(tmp_path / "project.lbdb", 42001)
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(proxy, "_MAX_SESSION_RESTARTS", 2)
+    monkeypatch.setattr(proxy, "_ensure_server", ensure_server)
+    monkeypatch.setattr(httpx2, "AsyncClient", _FakeHttpClient)
+    monkeypatch.setattr(stdio_module, "stdio_server", fake_stdio)
+    monkeypatch.setattr(streamable_http_module, "streamable_http_client", fake_http)
+
+    with pytest.raises(ConnectionRefusedError):
+        asyncio.run(proxy.run_proxy(tmp_path / "project.lbdb", 42001))
+
+
+def test_run_proxy_respects_deliberate_stop(tmp_path, monkeypatch, capsys):
+    """`grag stop` removes the pidfile — the heal loop must NOT resurrect a
+    deliberately stopped server; the proxy exits with an explanation instead."""
+    import anyio
+    import httpx2
+    from mcp.client import streamable_http as streamable_http_module
+    from mcp.server import stdio as stdio_module
+
+    monkeypatch.setattr(admin, "GRAG_HOME", tmp_path / ".grag")
+    db = tmp_path / "project.lbdb"
+
+    _stdio_client_send, stdio_read = anyio.create_memory_object_stream(100)
+    stdio_write, _stdio_client_recv = anyio.create_memory_object_stream(100)
+    upstream_respond, http_read = anyio.create_memory_object_stream(100)
+    http_write, _upstream_requests = anyio.create_memory_object_stream(100)
+
+    ensure_calls = []
+
+    async def ensure_server(*args, **kwargs):
+        ensure_calls.append(args)
+        return "/mcp"
+
+    @asynccontextmanager
+    async def fake_stdio():
+        yield stdio_read, stdio_write
+
+    @asynccontextmanager
+    async def fake_http(url, *, http_client):
+        yield http_read, http_write
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(proxy, "_ensure_server", ensure_server)
+    monkeypatch.setattr(httpx2, "AsyncClient", _FakeHttpClient)
+    monkeypatch.setattr(stdio_module, "stdio_server", fake_stdio)
+    monkeypatch.setattr(streamable_http_module, "streamable_http_client", fake_http)
+
+    async def stop_server_mid_session():
+        # Simulate `grag stop`: the upstream dies AND the pidfile is gone
+        # (graceful shutdown removes it; a crash would leave it behind).
+        await upstream_respond.aclose()
+
+    async def run():
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(stop_server_mid_session)
+            tg.start_soon(proxy.run_proxy, db, 42001)
+
+    asyncio.run(run())  # exits cleanly, not with a SystemExit traceback
+
+    # Startup ensured once; the heal path must not try to respawn.
+    assert len(ensure_calls) == 1
+    assert "stopped deliberately" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("from_environment", [False, True])

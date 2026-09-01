@@ -2,9 +2,13 @@
 
 Bridges a stdio MCP client (e.g. Claude Code) to a running
 ``grag serve --with-mcp`` HTTP server, auto-starting that server if
-it is not yet reachable.  The proxy process itself never opens the
-.lbdb file, so the single-writer constraint is satisfied: only
-``grag serve`` holds the write lock.
+it is not yet reachable — and re-starting it if it dies mid-session.
+On reconnect the proxy replays the client's captured ``initialize``
+handshake into the fresh upstream session, so a server crash surfaces
+to the MCP client as at most one failed tool call; the next retry goes
+through.  The proxy process itself never opens the .lbdb file, so the
+single-writer constraint is satisfied: only ``grag serve`` holds the
+write lock.
 
 Usage (written by ``grag init``)::
 
@@ -13,9 +17,13 @@ Usage (written by ``grag init``)::
 
 from __future__ import annotations
 
+import asyncio
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
+
+import anyio
 
 from grag.config import database_identity
 
@@ -194,8 +202,6 @@ async def _ensure_server(db_path: Path, port: int, url: str) -> str:
             file=sys.stderr,
         )
 
-    import asyncio
-
     for _ in range(40):
         await asyncio.sleep(0.5)
         reachable, actual, mcp_enabled, mcp_path = await _probe_server(url)
@@ -213,32 +219,160 @@ async def _ensure_server(db_path: Path, port: int, url: str) -> str:
     sys.exit(f"grag proxy: server at {url} did not become ready (waited 20 s)")
 
 
-async def run_proxy(db_path: Path, port: int, *, api_token: str | None = None) -> None:
-    """Bridge stdio ↔ streamable-http, auto-starting grag serve if needed."""
-    import anyio
-    import httpx2
+# How often the proxy re-establishes a dead upstream session before giving up.
+# A session that survives this long resets the counter, so a server that
+# crashes once in a while never accumulates towards the cap.
+_MAX_SESSION_RESTARTS = 5
+_HEALTHY_SESSION_SECONDS = 60.0
+
+
+def _mark(ended: dict, side: str) -> None:
+    """Record which side of the bridge ended first (the other is cancelled)."""
+    if ended["side"] is None:
+        ended["side"] = side
+
+
+async def _forward(src, dst, scope, ended: dict, src_side: str, dst_side: str, snoop=None) -> None:
+    try:
+        async for msg in src:
+            if isinstance(msg, Exception):
+                _mark(ended, src_side)
+                break
+            if snoop is not None:
+                snoop(msg)
+            try:
+                await dst.send(msg)
+            except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+                _mark(ended, dst_side)
+                break
+        # A closed stream ends the async-for silently (StopAsyncIteration),
+        # not via EndOfStream — loop exhaustion means the source side ended.
+        _mark(ended, src_side)
+    except (anyio.ClosedResourceError, anyio.EndOfStream):
+        _mark(ended, src_side)
+    except Exception:  # noqa: BLE001 — a broken stream ends the session either way
+        _mark(ended, src_side)
+    finally:
+        scope.cancel()
+
+
+def _capture_initialize(msg, handshake: dict) -> None:
+    """Remember the client's initialize params so a reconnect can replay them."""
+    message = getattr(msg, "message", None)
+    method = getattr(message, "method", None)
+    if method == "initialize" and handshake.get("initialize") is None:
+        handshake["initialize"] = getattr(message, "params", None)
+    elif method == "notifications/initialized":
+        handshake["initialized"] = True
+
+
+async def _replay_initialize(http_read, http_write, handshake: dict) -> None:
+    """Re-establish the MCP session on a fresh upstream after a server restart.
+
+    The stdio client initialized once at startup and does not know the upstream
+    died, so the proxy replays its captured initialize (under a proxy-internal
+    id, swallowing the response) plus the initialized notification before
+    resuming normal forwarding.
+    """
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCNotification, JSONRPCRequest
+
+    init_id = "grag-proxy-reinit"
+    await http_write.send(
+        SessionMessage(
+            message=JSONRPCRequest(
+                jsonrpc="2.0",
+                id=init_id,
+                method="initialize",
+                params=handshake["initialize"],
+            )
+        )
+    )
+    answered = False
+    with anyio.move_on_after(_MCP_DEFAULT_TIMEOUT):
+        async for msg in http_read:
+            if getattr(getattr(msg, "message", None), "id", None) == init_id:
+                answered = True
+                break
+    if not answered:
+        raise TimeoutError("upstream did not answer the replayed initialize")
+    await http_write.send(
+        SessionMessage(
+            message=JSONRPCNotification(
+                jsonrpc="2.0", method="notifications/initialized"
+            )
+        )
+    )
+
+
+async def _relay_session(
+    mcp_url: str, http_client, stdio_read, stdio_write, handshake: dict
+) -> str:
+    """Bridge one upstream MCP session; return which side ended it.
+
+    "stdio" means the MCP client went away (normal shutdown); "upstream" means
+    the HTTP server connection failed (the supervisor should heal it).
+    """
     from mcp.client.streamable_http import streamable_http_client
+
+    ended = {"side": None}
+    async with streamable_http_client(mcp_url, http_client=http_client) as (
+        http_read,
+        http_write,
+    ):
+        if handshake.get("initialize") is not None:
+            await _replay_initialize(http_read, http_write, handshake)
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    _forward,
+                    stdio_read,
+                    http_write,
+                    tg.cancel_scope,
+                    ended,
+                    "stdio",
+                    "upstream",
+                    lambda msg: _capture_initialize(msg, handshake),
+                )
+                tg.start_soon(
+                    _forward,
+                    http_read,
+                    stdio_write,
+                    tg.cancel_scope,
+                    ended,
+                    "upstream",
+                    "stdio",
+                )
+        finally:
+            # Close the write end so internal cleanup tasks (post_writer)
+            # see EndOfStream and exit cleanly.
+            await http_write.aclose()
+    return ended["side"] or "upstream"
+
+
+def _deliberately_stopped(db_path: Path) -> bool:
+    """Whether the server went away via `grag stop` rather than a crash.
+
+    A graceful stop removes the pidfile (serve's finally block); a crash
+    (SIGKILL, segfault) leaves it behind with a dead pid. The heal loop must
+    only resurrect crashes — never override a deliberate stop.
+    """
+    from grag.admin import pidfile_path
+
+    return not pidfile_path(db_path).exists()
+
+
+async def run_proxy(db_path: Path, port: int, *, api_token: str | None = None) -> None:
+    """Bridge stdio ↔ streamable-http, healing the upstream server on crashes."""
+    import httpx2
     from mcp.server.stdio import stdio_server
 
     # Ping the REST health endpoint — GET /mcp/ opens an SSE stream and hangs.
     health_url = f"http://127.0.0.1:{port}/api/health"
-    mcp_path = await _ensure_server(db_path, port, health_url)
-    # Keep the origin fixed rather than resolving server-provided metadata as
-    # a URL. _validated_mcp_path rejects authority/query/fragment overrides.
-    mcp_url = f"http://127.0.0.1:{port}{mcp_path}/"
-
-    async def _forward(src, dst, scope: anyio.CancelScope) -> None:
-        try:
-            async for msg in src:
-                if isinstance(msg, Exception):
-                    break
-                await dst.send(msg)
-        except (anyio.ClosedResourceError, anyio.EndOfStream):
-            pass
-        finally:
-            scope.cancel()
-
     headers = {"Authorization": f"Bearer {api_token}"} if api_token else None
+    handshake: dict = {}
+    restarts = 0
+    last_error: BaseException | None = None
     async with (
         httpx2.AsyncClient(
             headers=headers,
@@ -248,17 +382,55 @@ async def run_proxy(db_path: Path, port: int, *, api_token: str | None = None) -
             trust_env=False,
         ) as http_client,
         stdio_server() as (stdio_read, stdio_write),
-        streamable_http_client(mcp_url, http_client=http_client) as (
-            http_read,
-            http_write,
-        ),
     ):
         try:
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(_forward, stdio_read, http_write, tg.cancel_scope)
-                tg.start_soon(_forward, http_read, stdio_write, tg.cancel_scope)
+            while True:
+                mcp_path = await _ensure_server(db_path, port, health_url)
+                # Keep the origin fixed rather than resolving server-provided
+                # metadata as a URL; _validated_mcp_path rejects overrides.
+                mcp_url = f"http://127.0.0.1:{port}{mcp_path}/"
+                started = time.monotonic()
+                try:
+                    side = await _relay_session(
+                        mcp_url, http_client, stdio_read, stdio_write, handshake
+                    )
+                    last_error = None
+                except Exception as exc:  # noqa: BLE001 — upstream connect/relay failed
+                    side = "upstream"
+                    last_error = exc
+                if side == "stdio":
+                    return  # MCP client disconnected — normal shutdown
+                if _deliberately_stopped(db_path):
+                    # Return (not sys.exit) so the stdio context exits cleanly —
+                    # a SystemExit through the anyio task group surfaces to the
+                    # MCP client as an alarming BaseExceptionGroup traceback.
+                    print(
+                        "grag proxy: the server was stopped deliberately "
+                        "(grag stop); respecting that and exiting. Run "
+                        "'grag start' or reconnect the MCP server to resume.",
+                        file=sys.stderr,
+                    )
+                    return
+                if time.monotonic() - started > _HEALTHY_SESSION_SECONDS:
+                    restarts = 0
+                restarts += 1
+                if restarts > _MAX_SESSION_RESTARTS:
+                    if last_error is not None:
+                        raise last_error
+                    print(
+                        f"grag proxy: upstream server kept failing after "
+                        f"{_MAX_SESSION_RESTARTS} restarts; giving up",
+                        file=sys.stderr,
+                    )
+                    return
+                print(
+                    f"grag proxy: upstream server lost — restarting and "
+                    f"reconnecting ({restarts}/{_MAX_SESSION_RESTARTS})",
+                    file=sys.stderr,
+                )
+                await asyncio.sleep(min(0.5 * restarts, 5.0))
         finally:
-            # Close write ends so internal cleanup tasks (post_writer,
-            # stdout_writer) see EndOfStream and exit cleanly.
-            await http_write.aclose()
-            await stdio_write.aclose()
+            # Close the write end so the stdout_writer task sees EndOfStream.
+            close = getattr(stdio_write, "aclose", None)
+            if close is not None:
+                await close()

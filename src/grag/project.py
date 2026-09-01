@@ -208,7 +208,7 @@ def detect_clients(project_root: Path) -> list[str]:
     found: list[str] = []
     if (project_root / ".claude").is_dir() or (Path.home() / ".claude").is_dir():
         found.append("claude")
-    if (project_root / ".cursor").is_dir():
+    if (project_root / ".cursor").is_dir() or (Path.home() / ".cursor").is_dir():
         found.append("cursor")
     if (Path.home() / ".codeium" / "windsurf").is_dir():
         found.append("windsurf")
@@ -267,12 +267,18 @@ def _skill_template() -> str:
 
 
 def _skill_paths(clients: list[str], project_root: Path) -> list[Path]:
-    """Project-level SKILL.md targets for the initialised clients.
+    """Project-level SKILL.md targets for every harness the user evidently uses.
 
-    Codex (``.agents/skills/``) has no MCP config in ``grag init`` but reads the
-    same skill format — include it when the project or the user already uses it.
+    A skill file is inert unless its harness reads it, so scaffold beyond the
+    --client list: any harness with a project-level or user-level config dir
+    gets one. Codex (``.agents/skills/``) has no MCP config in ``grag init``
+    but reads the same skill format.
     """
     dirs = [_SKILL_DIRS[c] for c in clients if c in _SKILL_DIRS]
+    if (project_root / ".claude").is_dir() or (Path.home() / ".claude").is_dir():
+        dirs.append(".claude")
+    if (project_root / ".cursor").is_dir() or (Path.home() / ".cursor").is_dir():
+        dirs.append(".cursor")
     if (project_root / ".agents").is_dir() or (Path.home() / ".codex").is_dir():
         dirs.append(".agents")
     return [

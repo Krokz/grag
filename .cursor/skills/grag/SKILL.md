@@ -86,6 +86,38 @@ If none are running and a `.lbdb` exists, start one:
 `GRAG_EMBED_PROVIDER=fastembed grag --db <file> serve --with-mcp` (UI + REST + MCP, with semantic search)
 or `grag --db <file> serve` (UI + REST only, FTS-only search).
 
+## If grag stops responding (it heals itself — just retry)
+
+A tool error like "connection refused" or "did not become ready" means the
+server crashed or was never started — **not** that your query was wrong. The
+MCP proxy supervises the server: it detects a dead upstream, restarts the
+daemon, and rebuilds the session in-band. **Wait a few seconds and retry the
+same tool call once** — that is the entire recovery procedure for the common
+case. A crash never loses committed data (the WAL rolls back to the last
+checkpoint at worst). If the server was stopped **on purpose** (`grag stop`),
+the proxy respects that and exits instead of restarting it — reconnect the
+MCP server or `grag --db <file> start` to resume.
+
+Only if retries keep failing for more than ~30 seconds, recover with the CLI
+using the same `--db` path that `grag init` wrote into the MCP config:
+
+1. `grag --db <file> status` — is a server registered, is its pid alive, which port?
+2. `grag --db <file> restart` — detached daemon; then retry the tool once.
+3. Still failing? Read the daemon log `~/.grag/logs/<name>-<id>.log` (its path
+   is also printed by `grag start`) and act on the actual error:
+   - "Could not set lock" → another process owns the `.lbdb` (single-writer).
+     Use the running server; never start a second writer.
+   - "Corrupted wal file" → the previous process was killed mid-write. Delete
+     `<file>.wal` (rolls back to the last checkpoint — committed data is safe)
+     and start again.
+   - "port ... serving a different database" → `grag stop` that server, or pick
+     another `--port`.
+4. If the server is healthy but the MCP session stays broken, fall back to REST
+   with curl (`POST http://127.0.0.1:<port>/api/search` etc. mirror the tools)
+   and ask the user to reconnect the MCP server in their client.
+5. Only if all of that fails: tell the user what you tried and show the log
+   excerpt. Never silently retry-loop.
+
 ## The 8 tools
 
 | tool | use |
