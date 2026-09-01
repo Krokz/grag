@@ -254,7 +254,8 @@ def main(argv: list[str] | None = None) -> int:
 
     init = sub.add_parser(
         "init",
-        help="register grag with your LLM client (MCP config) and update CLAUDE.md",
+        help="register grag with your LLM client (MCP config), update CLAUDE.md, "
+        "and install the grag SKILL.md for skill-capable harnesses",
     )
     init.add_argument(
         "--client",
@@ -277,7 +278,8 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument(
         "--remove",
         action="store_true",
-        help="undo init: remove the grag MCP entry and the CLAUDE.md block",
+        help="undo init: remove the grag MCP entry, the CLAUDE.md block, and the "
+        "grag SKILL.md (unless locally modified)",
     )
     init.add_argument(
         "--url",
@@ -297,6 +299,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-claude-md",
         action="store_true",
         help="skip CLAUDE.md — only write MCP config",
+    )
+    init.add_argument(
+        "--no-skill",
+        action="store_true",
+        help="skip SKILL.md — only write MCP config and CLAUDE.md",
     )
     init.add_argument(
         "--dry-run",
@@ -525,6 +532,7 @@ def main(argv: list[str] | None = None) -> int:
             engine.close()
     elif args.cmd == "init":
         from grag.project import (
+            DeleteOp,
             SkipOp,
             WriteOp,
             apply_ops,
@@ -532,6 +540,7 @@ def main(argv: list[str] | None = None) -> int:
             plan_claude_md_op,
             plan_mcp_ops,
             plan_remove_ops,
+            plan_skill_ops,
         )
 
         project_root = Path.cwd()
@@ -558,6 +567,8 @@ def main(argv: list[str] | None = None) -> int:
                 for op in remove_ops:
                     if isinstance(op, SkipOp):
                         print(f"  skip:   {op.path}  ({op.reason})")
+                    elif isinstance(op, DeleteOp):
+                        print(f"  delete: {op.path}")
                     else:
                         print(f"  update: {op.path}")
             else:
@@ -565,7 +576,7 @@ def main(argv: list[str] | None = None) -> int:
                 apply_ops(remove_ops)
             return 0
 
-        ops: list[WriteOp | SkipOp] = []
+        ops: list[WriteOp | SkipOp | DeleteOp] = []
         if not args.no_mcp:
             ops.extend(
                 plan_mcp_ops(
@@ -578,9 +589,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         if not args.no_claude_md:
             ops.append(plan_claude_md_op(project_root, db_path, port=port))
+        if not args.no_skill:
+            ops.extend(plan_skill_ops(clients, project_root))
 
         if not ops:
-            print("Nothing to do (both --no-mcp and --no-claude-md were given).")
+            print("Nothing to do (--no-mcp, --no-claude-md and --no-skill all given).")
             return 0
 
         if args.dry_run:
@@ -588,6 +601,8 @@ def main(argv: list[str] | None = None) -> int:
             for op in ops:
                 if isinstance(op, SkipOp):
                     print(f"  skip:   {op.path}  ({op.reason})")
+                elif isinstance(op, DeleteOp):
+                    print(f"  delete: {op.path}")
                 else:
                     verb = "create" if op.created else "update"
                     print(f"  {verb}: {op.path}")

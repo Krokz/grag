@@ -11,6 +11,10 @@ The format is identical across all three (YAML frontmatter with ``name`` +
 ``description``, markdown body), so the copies are byte-for-byte the same. The
 sandbox bind-mounts the dot-directories as separate filesystems, so they cannot
 be hard/symlinked into one file; these tests fail the suite if the copies drift.
+
+A fourth copy lives at src/grag/assets/skill/SKILL.md — the template shipped in
+the wheel that ``grag init`` scaffolds into user projects. It is held to the
+same byte-for-byte rule.
 """
 
 from __future__ import annotations
@@ -28,6 +32,10 @@ SKILL_PATHS = [
     REPO_ROOT / ".agents" / "skills" / "grag" / "SKILL.md",
 ]
 
+# The copy shipped inside the wheel — `grag init` scaffolds this one into
+# user projects, so it must never drift from the harness copies above.
+PACKAGED_TEMPLATE = REPO_ROOT / "src" / "grag" / "assets" / "skill" / "SKILL.md"
+
 
 def _frontmatter(text: str) -> dict:
     m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
@@ -37,12 +45,14 @@ def _frontmatter(text: str) -> dict:
 
 def test_skill_copies_exist_and_stay_in_sync():
     contents = []
-    for p in SKILL_PATHS:
+    for p in [*SKILL_PATHS, PACKAGED_TEMPLATE]:
         assert p.is_file(), f"missing skill copy: {p.relative_to(REPO_ROOT)}"
         contents.append(p.read_bytes())
     assert len(set(contents)) == 1, (
-        "skill copies diverged — edit one and re-copy to the other two:\n  "
-        + "\n  ".join(str(p.relative_to(REPO_ROOT)) for p in SKILL_PATHS)
+        "skill copies diverged — edit one and re-copy to the rest:\n  "
+        + "\n  ".join(
+            str(p.relative_to(REPO_ROOT)) for p in [*SKILL_PATHS, PACKAGED_TEMPLATE]
+        )
     )
 
 

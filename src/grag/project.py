@@ -5,11 +5,18 @@ Supported clients and their MCP config locations:
     cursor   — project-root/.cursor/mcp.json
     windsurf — ~/.codeium/windsurf/mcp_config.json
     zed      — ~/.config/zed/settings.json   (JSONC — only if file is absent)
+
+Skill-capable harnesses also get the packaged grag SKILL.md (the operating
+guidance that makes the MCP tools effective):
+    claude   — project-root/.claude/skills/grag/SKILL.md
+    cursor   — project-root/.cursor/skills/grag/SKILL.md
+    codex    — project-root/.agents/skills/grag/SKILL.md  (detected, no MCP config)
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -113,6 +120,12 @@ class SkipOp(NamedTuple):
     path: Path
     reason: str
     snippet: str = ""
+
+
+class DeleteOp(NamedTuple):
+    """A file init created that --remove should delete outright."""
+
+    path: Path
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +251,107 @@ def plan_mcp_ops(
 
 
 # ---------------------------------------------------------------------------
+# SKILL.md scaffolding
+# ---------------------------------------------------------------------------
+
+# Harnesses that read a project-level SKILL.md, keyed by init client.
+# windsurf/zed have no skill mechanism.
+_SKILL_DIRS = {"claude": ".claude", "cursor": ".cursor"}
+
+
+def _skill_template() -> str:
+    """The canonical grag SKILL.md shipped inside the wheel."""
+    from importlib.resources import files
+
+    return files("grag.assets").joinpath("skill/SKILL.md").read_text(encoding="utf-8")
+
+
+def _skill_paths(clients: list[str], project_root: Path) -> list[Path]:
+    """Project-level SKILL.md targets for the initialised clients.
+
+    Codex (``.agents/skills/``) has no MCP config in ``grag init`` but reads the
+    same skill format — include it when the project or the user already uses it.
+    """
+    dirs = [_SKILL_DIRS[c] for c in clients if c in _SKILL_DIRS]
+    if (project_root / ".agents").is_dir() or (Path.home() / ".codex").is_dir():
+        dirs.append(".agents")
+    return [
+        project_root / d / "skills" / "grag" / "SKILL.md"
+        for d in dict.fromkeys(dirs)
+    ]
+
+
+def _is_grag_skill(text: str) -> bool:
+    """Whether an existing SKILL.md is grag's own (frontmatter ``name: grag``)."""
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+    if not m:
+        return False
+    for line in m.group(1).splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "name":
+            return value.strip() == "grag"
+    return False
+
+
+def plan_skill_ops(clients: list[str], project_root: Path) -> list[WriteOp]:
+    """Plan SKILL.md writes so agents get grag's operating guidance, not just tools.
+
+    An existing file is only replaced when it is grag's own skill (an older
+    template or a user-edited grag skill — frontmatter ``name: grag``). Any
+    other SKILL.md is user content: the template is appended, never clobbered.
+    """
+    template = _skill_template()
+    ops: list[WriteOp] = []
+    for path in _skill_paths(clients, project_root):
+        if not path.exists():
+            ops.append(WriteOp(path, template, True))
+            continue
+        try:
+            current = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if current == template:
+            continue  # already current — nothing to do
+        if _is_grag_skill(current):
+            ops.append(WriteOp(path, template, False))
+        else:
+            ops.append(
+                WriteOp(path, current.rstrip("\n") + "\n\n" + template, False)
+            )
+    return ops
+
+
+def plan_skill_removal_ops(
+    clients: list[str], project_root: Path
+) -> list[DeleteOp | SkipOp | WriteOp]:
+    """Plan SKILL.md removals.
+
+    A file holding only the template is deleted; a file the template was
+    appended to is restored to its pre-init content; anything else was
+    modified by the user and is skipped with a manual-removal note.
+    """
+    template = _skill_template()
+    ops: list[DeleteOp | SkipOp | WriteOp] = []
+    for path in _skill_paths(clients, project_root):
+        if not path.is_file():
+            continue
+        try:
+            current = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if current == template:
+            ops.append(DeleteOp(path))
+        elif current.endswith(template):
+            prefix = current[: -len(template)].rstrip("\n")
+            ops.append(WriteOp(path, prefix + "\n", False))
+        else:
+            ops.append(
+                SkipOp(path, "SKILL.md was modified after init — remove it manually")
+            )
+    return ops
+
+
+# ---------------------------------------------------------------------------
 # CLAUDE.md block
 # ---------------------------------------------------------------------------
 
@@ -277,7 +391,7 @@ def plan_claude_md_op(project_root: Path, db_path: Path, port: int = 8471) -> Wr
 # ---------------------------------------------------------------------------
 
 
-def apply_ops(ops: list[WriteOp | SkipOp]) -> None:
+def apply_ops(ops: list[WriteOp | SkipOp | DeleteOp]) -> None:
     """Write files and report; print manual instructions for SkipOps."""
     for op in ops:
         if isinstance(op, SkipOp):
@@ -287,6 +401,9 @@ def apply_ops(ops: list[WriteOp | SkipOp]) -> None:
                 for line in op.snippet.splitlines():
                     print(f"          {line}")
                 print()
+        elif isinstance(op, DeleteOp):
+            print(f"  delete: {op.path}")
+            op.path.unlink(missing_ok=True)
         else:
             verb = "create" if op.created else "update"
             print(f"  {verb}: {op.path}")
@@ -322,9 +439,11 @@ def _remove_json_entry(path: Path, section: str) -> WriteOp | SkipOp | None:
     return WriteOp(path, _dump_json(data), False)
 
 
-def plan_remove_ops(clients: list[str], project_root: Path) -> list[WriteOp | SkipOp]:
+def plan_remove_ops(
+    clients: list[str], project_root: Path
+) -> list[WriteOp | SkipOp | DeleteOp]:
     """Plan the write-ops that undo `grag init` for the given clients."""
-    ops: list[WriteOp | SkipOp | None] = []
+    ops: list[WriteOp | SkipOp | DeleteOp | None] = []
     if "claude" in clients:
         ops.append(_remove_json_entry(project_root / ".mcp.json", "mcpServers"))
     if "cursor" in clients:
@@ -345,7 +464,9 @@ def plan_remove_ops(clients: list[str], project_root: Path) -> list[WriteOp | Sk
             )
         )
     ops.append(plan_claude_md_removal(project_root))
-    return [op for op in ops if op is not None]
+    return [op for op in ops if op is not None] + plan_skill_removal_ops(
+        clients, project_root
+    )
 
 
 def plan_claude_md_removal(project_root: Path) -> WriteOp | None:

@@ -311,3 +311,122 @@ def test_remove_ops_skip_jsonc_config(tmp_path):
     ops = plan_remove_ops(["claude"], tmp_path)
     assert len(ops) == 1
     assert isinstance(ops[0], SkipOp)
+
+
+# ---------------------------------------------------------------------------
+# SKILL.md scaffolding
+# ---------------------------------------------------------------------------
+
+
+def test_skill_ops_claude_and_cursor_paths(tmp_path, monkeypatch):
+    from grag.project import plan_skill_ops
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    ops = plan_skill_ops(["claude", "cursor"], tmp_path)
+    paths = {op.path for op in ops}
+    assert paths == {
+        tmp_path / ".claude" / "skills" / "grag" / "SKILL.md",
+        tmp_path / ".cursor" / "skills" / "grag" / "SKILL.md",
+    }
+    assert all(op.created for op in ops)
+    assert all(op.content.startswith("---\n") for op in ops)
+
+
+def test_skill_ops_skip_clients_without_skill_support(tmp_path, monkeypatch):
+    from grag.project import plan_skill_ops
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    assert plan_skill_ops(["windsurf", "zed"], tmp_path) == []
+
+
+def test_skill_ops_include_agents_when_codex_present(tmp_path, monkeypatch):
+    from grag.project import plan_skill_ops
+
+    (tmp_path / ".agents").mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    ops = plan_skill_ops(["claude"], tmp_path)
+    assert tmp_path / ".agents" / "skills" / "grag" / "SKILL.md" in {
+        op.path for op in ops
+    }
+
+
+def test_skill_ops_replace_existing_grag_skill(tmp_path, monkeypatch):
+    """An existing grag skill (frontmatter name: grag) is upgraded in place."""
+    from grag.project import _skill_template, plan_skill_ops
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    existing = tmp_path / ".claude" / "skills" / "grag" / "SKILL.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("---\nname: grag\ndescription: old\n---\n\nold version\n")
+    ops = plan_skill_ops(["claude"], tmp_path)
+    assert len(ops) == 1
+    assert not ops[0].created
+    assert ops[0].content == _skill_template()
+
+
+def test_skill_ops_append_to_foreign_skill(tmp_path, monkeypatch):
+    """A non-grag SKILL.md is user content: append, never clobber."""
+    from grag.project import _skill_template, plan_skill_ops
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    existing = tmp_path / ".claude" / "skills" / "grag" / "SKILL.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("---\nname: mine\ndescription: mine\n---\n\nuser content\n")
+    ops = plan_skill_ops(["claude"], tmp_path)
+    assert len(ops) == 1
+    assert not ops[0].created
+    assert ops[0].content.startswith("---\nname: mine\n")
+    assert "user content" in ops[0].content
+    assert ops[0].content.endswith(_skill_template())
+
+
+def test_skill_ops_noop_when_already_current(tmp_path, monkeypatch):
+    from grag.project import apply_ops, plan_skill_ops
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    apply_ops(plan_skill_ops(["claude"], tmp_path))
+    assert plan_skill_ops(["claude"], tmp_path) == []
+
+
+def test_remove_ops_delete_unmodified_skill(tmp_path, monkeypatch):
+    from grag.project import DeleteOp, apply_ops, plan_remove_ops, plan_skill_ops
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    apply_ops(plan_skill_ops(["claude"], tmp_path))
+    skill = tmp_path / ".claude" / "skills" / "grag" / "SKILL.md"
+    assert skill.exists()
+    ops = plan_remove_ops(["claude"], tmp_path)
+    assert DeleteOp(skill) in ops
+    apply_ops(ops)
+    assert not skill.exists()
+
+
+def test_remove_ops_keep_modified_skill(tmp_path, monkeypatch):
+    from grag.project import apply_ops, plan_remove_ops, plan_skill_ops
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    apply_ops(plan_skill_ops(["claude"], tmp_path))
+    skill = tmp_path / ".claude" / "skills" / "grag" / "SKILL.md"
+    skill.write_text("user edits")
+    ops = plan_remove_ops(["claude"], tmp_path)
+    assert len(ops) == 1
+    assert isinstance(ops[0], SkipOp)
+    assert "modified" in ops[0].reason
+
+
+def test_remove_ops_restore_appended_skill(tmp_path, monkeypatch):
+    """--remove after an append restores the user's original file content."""
+    from grag.project import apply_ops, plan_remove_ops, plan_skill_ops
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    skill = tmp_path / ".claude" / "skills" / "grag" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    original = "---\nname: mine\ndescription: mine\n---\n\nuser content\n"
+    skill.write_text(original)
+    apply_ops(plan_skill_ops(["claude"], tmp_path))
+    assert skill.read_text() != original  # template was appended
+    ops = plan_remove_ops(["claude"], tmp_path)
+    assert len(ops) == 1
+    assert isinstance(ops[0], WriteOp)
+    apply_ops(ops)
+    assert skill.read_text() == original
