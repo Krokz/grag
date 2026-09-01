@@ -798,11 +798,18 @@ def test_stop_all_signals_only_health_verified_registration(tmp_path, monkeypatc
     monkeypatch.setattr(admin, "probe_health", probe)
     signaled = []
 
-    def kill(pid, sig):
-        signaled.append((pid, sig))
+    def signal_process(pid, *, force):
+        # This test exercises stop-all's ownership filtering, not the
+        # platform-specific signal implementation. On Windows the real
+        # fallback intentionally refuses TerminateProcess without --force;
+        # that policy is covered separately by
+        # test_windows_signal_fallback_requires_explicit_force.
+        assert force is False
+        signaled.append((pid, admin.signal.SIGTERM))
         alive[pid] = False
+        return True, "SIGTERM"
 
-    monkeypatch.setattr(admin.os, "kill", kill)
+    monkeypatch.setattr(admin, "_signal_process", signal_process)
     monkeypatch.setattr(admin.time, "sleep", lambda seconds: None)
     report = admin.stop_all()
 
