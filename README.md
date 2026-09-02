@@ -112,6 +112,19 @@ pre-0.6 inline behaviour (embed-on-search, ingest embeds its own writes). One-sh
 commands such as `grag ingest` still embed synchronously. Steady state is ~300ms/query
 on CPU.
 
+**What gets embedded, and how.** A node's embedding text is its STRING properties minus
+side-cars that only dilute the vector (`meta`, `path`, `heading_path`, `language`, git
+fields — `GRAG_EMBED_EXCLUDE_PROPS` overrides the list; `EmbedderConfig.text_props`
+pins an explicit list per label). Queries and documents get the retrieval prefixes the
+model family expects (bge/arctic/mxbai: query instruction; nomic: `search_query:` /
+`search_document:`; e5: `query:` / `passage:`), overridable with
+`GRAG_EMBED_QUERY_PREFIX` / `GRAG_EMBED_DOC_PREFIX`. Changing the model, the prefixes
+or the text policy invalidates stored vectors: run `grag reindex`. To pick a model on
+your own data rather than a leaderboard, `examples/embedding_eval.py` scores candidates
+(vector-only, BM25-only, hybrid recall@k and MRR, embed time, query latency) against a
+`grag export` and a question set — `--auto N` derives proxy questions from a
+`--sections` ingest.
+
 ```bash
 pip install -e ".[embed-local]"
 GRAG_EMBED_PROVIDER=fastembed grag --db knowledge.lbdb serve
@@ -383,6 +396,8 @@ unless you call `GragConfig.from_env()`.
 | `GRAG_ALLOW_INSECURE_HTTP` | `1`/`0` | `0` | Permit a plain-`http://` `GRAG_SERVER_URL` to a non-loopback host (the bearer token then travels unencrypted). |
 | `GRAG_WAL_AUTO_RECOVER` | `1`/`0` | `0` | Supervised servers (systemd, containers) have no TTY to approve WAL recovery; with `1` a corrupt WAL is recovered on open (writes since the last checkpoint are lost, vector indexes rebuilt) instead of crash-looping. |
 | `GRAG_EMBED_PROVIDER` | `fastembed` or `remote` | unset | Enables vector search. Unset means BM25/FTS-only retrieval. `fastembed` is local; `remote` sends embedding input to the configured OpenAI-compatible service. |
+| `GRAG_EMBED_QUERY_PREFIX` / `GRAG_EMBED_DOC_PREFIX` | String | by model family | Retrieval prefixes prepended to queries / node texts before embedding. Unset picks the family default (bge, nomic, e5, arctic, mxbai); empty string disables. Reindex after changing. |
+| `GRAG_EMBED_EXCLUDE_PROPS` | Comma list | `meta,path,heading_path,language,git_commit,git_branch,ingested_at` | STRING properties left out of the embedding text (they stay in the FTS index). Reindex after changing. |
 | `GRAG_EMBED_MODEL` | Provider model name | `BAAI/bge-small-en-v1.5` | Embedding model identifier, used only when `GRAG_EMBED_PROVIDER` is set. Changing it invalidates/rebuilds affected embeddings lazily. |
 | `GRAG_EMBED_DIM` | Positive integer | `384` | Embedding vector width. It must match the selected model's actual output dimension and the stored vector column. |
 | `GRAG_EMBED_BASE_URL` | URL | unset | OpenAI-compatible endpoint root for the `remote` provider; required when using a remote embedding service. |

@@ -147,6 +147,63 @@ class RemoteEmbedder:
 
 _EMBEDDER_CACHE: dict[tuple, Embedder] = {}
 
+# Retrieval prefixes by model family. Most modern embedders are trained
+# asymmetrically: a short query and a long passage get different instructions,
+# and skipping them costs measurable recall. Matched case-insensitively on a
+# substring of the model id; first hit wins.
+_BGE_QUERY = "Represent this sentence for searching relevant passages: "
+_MODEL_PREFIXES: tuple[tuple[str, str, str], ...] = (
+    ("bge-m3", "", ""),  # bge-m3 is symmetric
+    ("bge-", _BGE_QUERY, ""),
+    ("arctic-embed", _BGE_QUERY, ""),
+    ("nomic-embed", "search_query: ", "search_document: "),
+    ("e5-", "query: ", "passage: "),
+    ("mxbai-embed", _BGE_QUERY, ""),
+)
+
+
+def model_prefixes(model: str) -> tuple[str, str]:
+    """(query prefix, document prefix) a model family expects; ("", "") if none."""
+    lowered = model.lower()
+    for needle, query, document in _MODEL_PREFIXES:
+        if needle in lowered:
+            return query, document
+    return "", ""
+
+
+def resolve_prefixes(cfg: EmbedderConfig) -> tuple[str, str]:
+    """Configured prefixes with model-family defaults for the unset ones."""
+    auto_query, auto_doc = model_prefixes(cfg.model)
+    query = cfg.query_prefix if cfg.query_prefix is not None else auto_query
+    document = cfg.document_prefix if cfg.document_prefix is not None else auto_doc
+    return query, document
+
+
+def embed_text_props(
+    cfg: EmbedderConfig, table: str, props: dict[str, str]
+) -> list[str]:
+    """STRING properties of `table` that form its embedding text.
+
+    An explicit ``text_props[table]`` wins (unknown names are ignored so a
+    schema change cannot break embedding); otherwise every non-reserved
+    STRING prop minus ``exclude_props``. Falls back to all STRING props when
+    exclusion would leave nothing, so a table made only of "excluded" names
+    still embeds.
+    """
+    strings = [
+        p
+        for p, t in props.items()
+        if t.upper() == "STRING" and not p.startswith(RESERVED_PREFIX) and p not in VECTOR_PROPS
+    ]
+    explicit = cfg.text_props.get(table)
+    if explicit:
+        chosen = [p for p in explicit if p in strings]
+        if chosen:
+            return chosen
+    excluded = set(cfg.exclude_props)
+    kept = [p for p in strings if p not in excluded]
+    return kept or strings
+
 
 def get_embedder(config: GragConfig) -> Embedder | None:
     """Process-cached embedder for config.embedder; None when unconfigured."""
@@ -540,13 +597,8 @@ def embed_pending_nodes(
             f"Cannot embed table '{table}': primary key unknown.",
             hint="Define the table via define_schema so grag can key embedding writes.",
         )
-    text_props = [
-        p
-        for p, t in props.items()
-        if t.upper() == "STRING"
-        and not p.startswith(RESERVED_PREFIX)
-        and p not in VECTOR_PROPS
-    ]
+    text_props = embed_text_props(cfg, table, props)
+    _, document_prefix = resolve_prefixes(cfg)
     code_kind = props.get(EMB_CODE_PROP, "UINT8[]").upper()
     projection = f"n.{_ident(pk)}"
     if text_props:
@@ -567,7 +619,7 @@ def embed_pending_nodes(
         texts = []
         for row, key in zip(res.rows, keys, strict=True):
             parts = [str(v) for v in row[1:] if v is not None]
-            texts.append("\n".join(parts) if parts else str(key))
+            texts.append(document_prefix + ("\n".join(parts) if parts else str(key)))
         vectors = embedder.embed(texts)
         if len(vectors) != len(keys):
             raise ConfigurationError(
@@ -713,7 +765,10 @@ def vector_candidates(
         # Never embed on the request thread when a worker exists; just make
         # sure it is awake so the reported backlog shrinks.
         worker.wake()
-    q = np.asarray(embedder.embed([query_text])[0], dtype=np.float32).ravel()
+    query_prefix, _ = resolve_prefixes(cfg)
+    q = np.asarray(
+        embedder.embed([query_prefix + query_text])[0], dtype=np.float32
+    ).ravel()
     if q.size != cfg.dim:
         raise ConfigurationError(
             f"Embedder produced a {q.size}-dim query vector but config.embedder.dim={cfg.dim}.",

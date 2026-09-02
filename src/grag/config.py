@@ -39,6 +39,21 @@ def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Properties that never carry retrieval-worthy text: provenance-ish strings,
+# file paths and JSON side-cars. They stay in the FTS index (exact-match
+# lookups on a path are useful) but are kept out of the embedding text, where
+# they only dilute the vector of the prose next to them.
+DEFAULT_EMBED_EXCLUDE_PROPS = (
+    "meta",
+    "path",
+    "heading_path",
+    "language",
+    "git_commit",
+    "git_branch",
+    "ingested_at",
+)
+
+
 class EmbedderConfig(BaseModel):
     """Opt-in embedding provider. Without one, retrieval runs FTS-only."""
 
@@ -47,6 +62,19 @@ class EmbedderConfig(BaseModel):
     dim: int = 384
     base_url: str | None = None  # remote: OpenAI-compatible endpoint
     api_key_env: str | None = None  # remote: env var holding the API key
+    # Which STRING properties form a node's embedding text. `text_props` pins
+    # an explicit list per label ({"Function": ["name", "docstring"]});
+    # otherwise every non-reserved STRING prop minus `exclude_props` is used.
+    text_props: dict[str, list[str]] = Field(default_factory=dict)
+    exclude_props: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_EMBED_EXCLUDE_PROPS)
+    )
+    # Asymmetric-retrieval prefixes. None = pick by model family (bge/arctic:
+    # query instruction only; nomic: search_query/search_document; e5:
+    # query:/passage:); "" = none. Changing either invalidates stored
+    # vectors — run `grag reindex` afterwards.
+    query_prefix: str | None = None
+    document_prefix: str | None = None
 
 
 class GragConfig(BaseModel):
@@ -149,5 +177,11 @@ class GragConfig(BaseModel):
                 dim=int(os.environ.get("GRAG_EMBED_DIM", "384")),
                 base_url=os.environ.get("GRAG_EMBED_BASE_URL"),
                 api_key_env=os.environ.get("GRAG_EMBED_API_KEY_ENV"),
+                query_prefix=os.environ.get("GRAG_EMBED_QUERY_PREFIX"),
+                document_prefix=os.environ.get("GRAG_EMBED_DOC_PREFIX"),
             )
+            if excluded := os.environ.get("GRAG_EMBED_EXCLUDE_PROPS"):
+                cfg.embedder.exclude_props = [
+                    p.strip() for p in excluded.split(",") if p.strip()
+                ]
         return cfg
