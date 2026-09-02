@@ -64,7 +64,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   } catch {
     throw new ApiError(
       'cannot reach the grag server',
-      'is `grag serve` running on port 8471?',
+      `is \`grag serve\` running on ${window.location.host || 'this host'}?`,
       0,
     );
   }
@@ -101,6 +101,9 @@ export const api = {
     request<GraphSample>(
       `/api/graph/sample?limit=${limit}${label ? `&label=${encodeURIComponent(label)}` : ''}`,
     ),
+
+  // Every user node and edge, unclamped — feeds the whole-database SVG export.
+  full: () => request<GraphSample>('/api/graph/full'),
 
   query: (cypher: string, limit?: number) =>
     request<QueryResponse>('/api/query', {

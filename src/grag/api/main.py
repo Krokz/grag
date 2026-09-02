@@ -375,6 +375,10 @@ def create_app(config: GragConfig) -> FastAPI:
     ) -> GraphSample:
         return resolve(request).graph_sample(limit=limit, label=label)
 
+    @app.get("/api/graph/full", response_model=GraphSample)
+    def graph_full(request: Request) -> GraphSample:
+        return resolve(request).graph_full()
+
     # -- UI statics --------------------------------------------------------------
 
     if (_STATIC_DIR / "index.html").is_file():

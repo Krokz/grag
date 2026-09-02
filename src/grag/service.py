@@ -251,6 +251,34 @@ class GragService:
         )
         return GraphSample(subgraph=sub, stats=self._stats())
 
+    def graph_full(self) -> GraphSample:
+        """Every user node and edge, unclamped — for whole-database exports.
+
+        Unlike ``graph_sample`` this ignores ``max_query_limit`` on purpose:
+        the UI's full-graph SVG export needs the mass of the graph, not a
+        window into it. Internal ``_``-prefixed tables are still dropped.
+        """
+        pk_map = self._pk_map()
+        sub = extract_subgraph(self.engine.execute("MATCH (n) RETURN n"), pk_map)
+        try:
+            rels = self.engine.execute("MATCH (a)-[r]->(b) RETURN a, r, b")
+            sub = merge_subgraphs(sub, extract_subgraph(rels, pk_map))
+        except GragError:
+            pass  # no rel tables yet
+        nodes = [n for n in sub.nodes if not is_internal_label(n.label)]
+        kept = {n.id for n in nodes}
+        sub = Subgraph(
+            nodes=nodes,
+            edges=[
+                e
+                for e in sub.edges
+                if not is_internal_label(e.type)
+                and e.source in kept
+                and e.target in kept
+            ],
+        )
+        return GraphSample(subgraph=sub, stats=self._stats())
+
     def _stats(self) -> GraphStats:
         try:
             from grag.core.schema import table_stats

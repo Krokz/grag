@@ -15,6 +15,7 @@ Tool / endpoint contract (MCP tool = REST endpoint, same payloads):
     ingest_code(req)                  POST /api/ingest/code    -> CodeIngestResponse
     (ingest)                          POST /api/ingest         -> IngestResponse
     (ui)                              GET  /api/graph/sample   -> GraphSample
+    (ui)                              GET  /api/graph/full     -> GraphSample
     (ui)                              GET  /api/health         -> {"status": "ok", "version": str}
 
 Internal module contract (implemented by later waves, called via grag.service):

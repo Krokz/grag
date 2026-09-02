@@ -255,6 +255,33 @@ def test_graph_sample(seeded_client):
     assert any(e.type == "KNOWS" for e in ls2.subgraph.edges)
 
 
+def test_graph_full_returns_every_node_and_edge(seeded_client):
+    # Sample is a clamped window; full is the whole database, so a limit=1
+    # sample must be a strict subset of it and full must carry every edge.
+    extra = seeded_client.post(
+        "/api/nodes/upsert",
+        json={
+            "nodes": [
+                {"label": "Person", "key": f"p{i}", "properties": {"name": f"P{i}"}}
+                for i in range(5)
+            ]
+        },
+    )
+    assert extra.status_code == 200
+
+    res = seeded_client.get("/api/graph/full")
+    assert res.status_code == 200
+    full = GraphSample.model_validate(res.json())
+    assert len(full.subgraph.nodes) == full.stats.node_count == 7
+    assert len(full.subgraph.edges) == full.stats.edge_count == 1
+    assert {n.id for n in full.subgraph.nodes} >= {"Person:alice", "Person:bob"}
+    assert any(e.type == "KNOWS" for e in full.subgraph.edges)
+    assert not any(n.label.startswith("_") for n in full.subgraph.nodes)
+
+    window = seeded_client.get("/api/graph/sample", params={"limit": 1}).json()
+    assert len(window["subgraph"]["nodes"]) < len(full.subgraph.nodes)
+
+
 def test_graph_sample_rejects_injected_label_without_mutating(seeded_client):
     payload = "Person) RETURN n; MATCH (x:Person) DELETE x; //"
     res = seeded_client.get("/api/graph/sample", params={"label": payload})
