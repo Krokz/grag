@@ -75,8 +75,45 @@ jobs:
           }
           python -c "import ladybug._lbug; print('ladybug native backend OK')"
 
+      - name: Cache LadybugDB extensions
+        # FTS/VECTOR are downloaded from extension.ladybugdb.com on first use.
+        # A slow or flaky CDN otherwise turns into multi-minute stalls (or, on
+        # Windows, an access violation on LOAD of a partial download) inside
+        # pytest. Cache the store across runs and warm it explicitly below.
+        uses: actions/cache@v4
+        with:
+          path: ~/.lbdb/extension
+          key: lbdb-ext-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+
+      - name: Warm LadybugDB extensions (with retries)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import shutil, sys, tempfile, time
+          from pathlib import Path
+          from grag.config import GragConfig
+          from grag.core.engine import Engine
+          for attempt in range(1, 6):
+              tmp = Path(tempfile.mkdtemp())
+              try:
+                  eng = Engine(GragConfig(db_path=tmp / "warm.lbdb"))
+                  try:
+                      for name in ("FTS", "VECTOR"):
+                          eng.load_extension(name)
+                  finally:
+                      eng.close()
+                  print("extensions ready")
+                  break
+              except Exception as exc:  # noqa: BLE001
+                  print(f"attempt {attempt} failed: {exc}", file=sys.stderr)
+                  time.sleep(5 * attempt)
+              finally:
+                  shutil.rmtree(tmp, ignore_errors=True)
+          else:
+              sys.exit("could not install LadybugDB extensions after 5 attempts")
+          PY
+
       - name: Run tests
-        # LadybugDB downloads FTS/VECTOR extensions on first use; CI has network.
         run: pytest
 
   lint:
