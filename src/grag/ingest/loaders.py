@@ -163,6 +163,10 @@ def _embed_pending(engine: Engine, config: GragConfig, label: str) -> None:
     so ImportError/ConfigurationError degrade to a warning."""
     if config.embedder is None:
         return
+    from grag.embedworker import notify_embed_worker
+
+    if notify_embed_worker(engine, label):
+        return  # a serving process embeds on its worker thread, not here
     try:
         from grag.retrieval.vectors import embed_pending_nodes
 

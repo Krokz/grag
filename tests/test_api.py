@@ -101,6 +101,7 @@ def test_health(client):
         "pid": os.getpid(),
         "mcp_enabled": False,
         "mcp_path": None,
+        "embedding": None,
     }
 
 

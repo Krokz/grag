@@ -1105,6 +1105,11 @@ def ingest_code(
         summary = upsert_edges(engine, config, UpsertEdgesRequest(edges=batch))
         warnings.extend(summary.warnings)
 
+    if config.embedder is not None:
+        from grag.embedworker import notify_embed_worker
+
+        notify_embed_worker(engine)
+
     return CodeIngestResponse(
         repos=counts["Repo"],
         modules=counts["Module"],

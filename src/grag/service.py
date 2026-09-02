@@ -9,6 +9,7 @@ landed yet raises GragError("not implemented") instead of ImportError.
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from grag.config import GragConfig
 from grag.core.engine import (
@@ -41,6 +42,9 @@ from grag.core.types import (
     UpsertNodesRequest,
     merge_subgraphs,
 )
+
+if TYPE_CHECKING:
+    from grag.embedworker import EmbedWorker
 
 # Write keywords rejected on the read-only cypher_query path. Guardrail, not a
 # security boundary — the LLM contract steers writes to the upsert tools.
@@ -102,9 +106,35 @@ class GragService:
     def __init__(self, config: GragConfig | None = None):
         self.config = config or GragConfig.from_env()
         self.engine = Engine(self.config)
+        self.embed_worker: EmbedWorker | None = None
 
     def close(self) -> None:
+        if self.embed_worker is not None:
+            self.embed_worker.stop()
+            self.embed_worker = None
         self.engine.close()
+
+    # -- background embedding -------------------------------------------------------
+
+    def start_background_embedding(self) -> bool:
+        """Attach an EmbedWorker so ingests/searches never embed inline.
+
+        No-op (False) without an embedder. Serving processes call this via
+        ServiceRegistry; one-shot CLI commands keep the synchronous path.
+        """
+        if self.config.embedder is None:
+            return False
+        if self.embed_worker is None:
+            from grag.embedworker import EmbedWorker
+
+            worker = EmbedWorker(self.engine, self.config)
+            self.engine.embed_worker = worker  # type: ignore[attr-defined]
+            worker.start()
+            self.embed_worker = worker
+        return True
+
+    def embedding_status(self) -> dict | None:
+        return None if self.embed_worker is None else self.embed_worker.status()
 
     # -- schema ---------------------------------------------------------------
 
@@ -129,7 +159,10 @@ class GragService:
             from grag.core.mutate import upsert_nodes
         except ImportError:
             raise _not_implemented("grag.core.mutate") from None
-        return upsert_nodes(self.engine, self.config, req)
+        summary = upsert_nodes(self.engine, self.config, req)
+        if self.embed_worker is not None:
+            self.embed_worker.wake()
+        return summary
 
     def upsert_edges(self, req: UpsertEdgesRequest) -> MutationSummary:
         try:

@@ -87,8 +87,14 @@ class GragConfig(BaseModel):
     cors_origins: list[str] = Field(default_factory=list)
     # Max nodes embedded synchronously per search call. The remainder stays
     # pending (reported as SearchResponse.pending_embeddings) and drains over
-    # later searches; ingest paths embed their own writes in full.
+    # later searches; ingest paths embed their own writes in full. Only used
+    # when no background embedding worker is attached to the engine (a
+    # serving process runs one; see grag.embedworker).
     max_embed_per_search: int = 256
+    # Run a background embedding worker in serving processes so searches and
+    # ingests never embed on the request thread. Off means the legacy inline
+    # behaviour (embed-on-search, ingest embeds its own writes).
+    embed_in_background: bool = True
     # Remote-server mode for the MCP proxy: when set, `grag mcp` bridges stdio
     # to an already-running grag server at this origin (e.g. a cloud host)
     # instead of auto-serving a local daemon. The proxy never opens a .lbdb.
@@ -121,6 +127,8 @@ class GragConfig(BaseModel):
             cfg.cors_origins = [o.strip() for o in origins.split(",") if o.strip()]
         if cap := os.environ.get("GRAG_MAX_EMBED_PER_SEARCH"):
             cfg.max_embed_per_search = int(cap)
+        if background := os.environ.get("GRAG_EMBED_BACKGROUND"):
+            cfg.embed_in_background = _truthy(background)
         if url := os.environ.get("GRAG_SERVER_URL"):
             cfg.server_url = url
         if name := os.environ.get("GRAG_SERVER_DB"):

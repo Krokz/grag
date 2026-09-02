@@ -296,6 +296,9 @@ def create_app(config: GragConfig) -> FastAPI:
             "pid": os.getpid(),
             "mcp_enabled": config.mcp_path is not None,
             "mcp_path": config.mcp_path,
+            # None when no embedder is configured; otherwise the background
+            # worker's counters (running / idle / embedded_total / last_error).
+            "embedding": service.embedding_status() if service is not None else None,
         }
 
     @app.post(_SHUTDOWN_PATH, include_in_schema=False, status_code=202)
