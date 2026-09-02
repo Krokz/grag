@@ -35,6 +35,10 @@ def derive_port(path: Path) -> int:
     return 41000 + int(database_identity(path)[:8], 16) % 8152
 
 
+def _truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class EmbedderConfig(BaseModel):
     """Opt-in embedding provider. Without one, retrieval runs FTS-only."""
 
@@ -85,6 +89,16 @@ class GragConfig(BaseModel):
     # pending (reported as SearchResponse.pending_embeddings) and drains over
     # later searches; ingest paths embed their own writes in full.
     max_embed_per_search: int = 256
+    # Remote-server mode for the MCP proxy: when set, `grag mcp` bridges stdio
+    # to an already-running grag server at this origin (e.g. a cloud host)
+    # instead of auto-serving a local daemon. The proxy never opens a .lbdb.
+    server_url: str | None = None
+    # Database name sent as the x-grag-db header when the remote server runs
+    # in multi-db (--db-dir) mode.
+    server_db: str | None = None
+    # Allow a plain-http (non-TLS) remote server_url on a non-loopback host.
+    # The bearer token travels in clear text then — for trusted networks only.
+    allow_insecure_http: bool = False
 
     @classmethod
     def from_env(cls) -> GragConfig:
@@ -107,6 +121,12 @@ class GragConfig(BaseModel):
             cfg.cors_origins = [o.strip() for o in origins.split(",") if o.strip()]
         if cap := os.environ.get("GRAG_MAX_EMBED_PER_SEARCH"):
             cfg.max_embed_per_search = int(cap)
+        if url := os.environ.get("GRAG_SERVER_URL"):
+            cfg.server_url = url
+        if name := os.environ.get("GRAG_SERVER_DB"):
+            cfg.server_db = name
+        if insecure := os.environ.get("GRAG_ALLOW_INSECURE_HTTP"):
+            cfg.allow_insecure_http = _truthy(insecure)
         if provider := os.environ.get("GRAG_EMBED_PROVIDER"):
             cfg.embedder = EmbedderConfig(
                 provider=provider,  # type: ignore[arg-type]
