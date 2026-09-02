@@ -75,7 +75,7 @@ don't stall.
 
 Pick the first surface that is available, in this order:
 
-1. **MCP tools** — if the `grag` MCP server is configured, the 8 tools appear directly.
+1. **MCP tools** — if the `grag` MCP server is configured, the 10 tools appear directly.
 2. **REST** — if `grag serve` is running (default `http://127.0.0.1:8471`):
    `POST /api/{query,search,context,ingest,ingest/code}`, `GET /api/{schema,graph/sample,health}`,
    `POST /api/{schema/define,nodes/upsert,edges/upsert}`.
@@ -118,7 +118,7 @@ using the same `--db` path that `grag init` wrote into the MCP config:
 5. Only if all of that fails: tell the user what you tried and show the log
    excerpt. Never silently retry-loop.
 
-## The 8 tools
+## The 10 tools
 
 | tool | use |
 |---|---|
@@ -129,10 +129,12 @@ using the same `--db` path that `grag init` wrote into the MCP config:
 | `search_knowledge` | Hybrid BM25 + vector seeds, RRF fusion, **per-label diversity cap**, k-hop expansion, token-budgeted cited context. The main RAG entry point. |
 | `get_context` | Re-pack chosen node ids (from a prior search) into a fresh token budget. |
 | `ingest_code` | Index a repo's code STRUCTURE (Python/TS/JS/C#/Terraform/Go): Repo/Module/Class/Function/TerraformModuleCall nodes + CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Structure only — never source bodies. |
+| `ingest_docs` | Index Markdown/text files on the server as a graph: `Document -> Section` from the heading hierarchy (`SUBSECTION_OF`, `NEXT_SECTION`), body chunks `IN_SECTION`, and `MENTIONS_FUNCTION/CLASS/MODULE` edges for backtick-mentioned code symbols. Run `ingest_code` first so those resolve. Use for specs and design docs. |
+| `job_status` | Poll a background ingest (`ingest_code` / `ingest_docs` with `background=true`) by id — use background mode for large trees so the call returns immediately. |
 
 ## Working with an unfamiliar codebase (code graph)
 
-`ingest_code` (the 8th tool) is the token-frugal way to explore a repo. The loop:
+`ingest_code` is the token-frugal way to explore a repo. The loop:
 
 1. **Index first**: call `ingest_code` on the repo path(s) BEFORE reading files.
    Re-running synchronizes by stable ids and prunes removed files/symbols/edges,
