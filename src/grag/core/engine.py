@@ -295,7 +295,7 @@ class Engine:
         compiles a fresh plan every time.
 
         Ladybug keys its implicit prepared-statement cache on query text and
-        parameter type signature. On 0.20.1, repeated writes with same-typed
+        parameter type signature. On 0.20.x, repeated writes with same-typed
         params have been observed to reuse stale first-execution state instead
         of re-scanning with the new parameters. The result is silent corruption
         across the write path: a second upsert of the same node raises
@@ -336,7 +336,7 @@ class Engine:
                 "LadybugDB query safety check failed: the runtime does not "
                 "expose the prepared-statement cache internals grag requires; "
                 "refusing the query to prevent cached-plan data corruption.",
-                hint="Install the verified runtime with: pip install 'ladybug==0.20.1'.",
+                hint="Install the verified runtime with: pip install 'ladybug==0.20.2'.",
             )
         with lock:
             prepared_statements = list(cache.values())

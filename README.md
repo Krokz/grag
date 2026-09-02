@@ -92,7 +92,7 @@ pip install -e ".[embed-remote]"  # optional: OpenAI-compatible remote embedding
 
 Without an embedder, everything works FTS-only (BM25 is native to the engine).
 
-**LadybugDB compatibility.** This release pins LadybugDB 0.20.1 and guards its
+**LadybugDB compatibility.** This release pins LadybugDB 0.20.2 and guards its
 implicit prepared-write cache in grag's engine. Do not downgrade an existing
 database in place: a file opened by 0.20.x uses storage version 47 and cannot be
 opened by 0.19.1 (storage version 43). A rollback requires exporting with the
