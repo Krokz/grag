@@ -100,11 +100,29 @@ class Engine:
             if db_path == ":memory:" or "wal" not in str(exc).lower():
                 raise
             if not sys.stdin.isatty():
+                if not config.wal_auto_recover:
+                    logger.warning(
+                        "WAL replay failed (%s). Run 'grag reindex' to repair the "
+                        "database, or set GRAG_WAL_AUTO_RECOVER=1 for supervised "
+                        "servers.",
+                        exc,
+                    )
+                    raise
                 logger.warning(
-                    "WAL replay failed (%s). Run 'grag reindex' to repair the database.",
+                    "WAL replay failed (%s); GRAG_WAL_AUTO_RECOVER is set — "
+                    "reopening in failure-tolerant mode. Writes since the last "
+                    "checkpoint are lost and vector indexes will be rebuilt.",
                     exc,
                 )
-                raise
+                self.wal_recovered = True
+                try:
+                    return lb.Database(
+                        db_path,
+                        throw_on_wal_replay_failure=False,
+                        buffer_pool_size=config.buffer_pool_size,
+                    )
+                except TypeError:
+                    return lb.Database(db_path, throw_on_wal_replay_failure=False)
             print(
                 f"\nWARNING: WAL replay failed:\n  {exc}\n\n"
                 "Auto-recovery will reopen the database in failure-tolerant mode.\n"
@@ -277,7 +295,7 @@ class Engine:
         compiles a fresh plan every time.
 
         Ladybug keys its implicit prepared-statement cache on query text and
-        parameter type signature. On 0.20.1, repeated writes with same-typed
+        parameter type signature. On 0.20.x, repeated writes with same-typed
         params have been observed to reuse stale first-execution state instead
         of re-scanning with the new parameters. The result is silent corruption
         across the write path: a second upsert of the same node raises
@@ -318,7 +336,7 @@ class Engine:
                 "LadybugDB query safety check failed: the runtime does not "
                 "expose the prepared-statement cache internals grag requires; "
                 "refusing the query to prevent cached-plan data corruption.",
-                hint="Install the verified runtime with: pip install 'ladybug==0.20.1'.",
+                hint="Install the verified runtime with: pip install 'ladybug==0.20.2'.",
             )
         with lock:
             prepared_statements = list(cache.values())

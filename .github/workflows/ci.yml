@@ -75,8 +75,63 @@ jobs:
           }
           python -c "import ladybug._lbug; print('ladybug native backend OK')"
 
+      - name: Fetch LadybugDB extensions (cache-busting; verify build generation)
+        # FTS/VECTOR are downloaded from extension.ladybugdb.com on first use and
+        # keyed by MINOR version (v0.20.0/), so a republish for a new patch wheel
+        # replaces them in place. After the 0.20.2 republish Cloudflare edges kept
+        # serving the old binaries to some runners (cache HIT, ETag 6a9306b5…)
+        # and the new ones to others (ETag 6a975e…); a wheel/extension mismatch
+        # segfaults inside ladybug. Fetch with a cache-busting query so the edge
+        # revalidates, insist on the current generation, and pre-place the files
+        # — ladybug's INSTALL leaves an existing file alone.
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux) plat=linux_amd64 ;; macOS) plat=osx_arm64 ;; Windows) plat=win_amd64 ;;
+          esac
+          base="$HOME/.lbdb/extension/0.20.0/$plat"
+          for ext in fts vector; do
+            mkdir -p "$base/$ext"
+            ok=0
+            for attempt in 1 2 3 4 5 6; do
+              url="https://extension.ladybugdb.com/v0.20.0/$plat/$ext/lib$ext.lbug_extension?bust=$RANDOM$RANDOM$attempt"
+              if curl -fsSL "$url" -D hdr.txt -o "$base/$ext/lib$ext.lbug_extension" \
+                 && grep -qiE '^etag: "6a975e' hdr.txt; then ok=1; break; fi
+              echo "attempt $attempt: $(grep -i '^etag' hdr.txt | tr -d '\r')"; sleep $((attempt * 5))
+            done
+            [ "$ok" = 1 ] || { echo "::error::CDN kept serving a pre-0.20.2 $ext extension for $plat"; exit 1; }
+            echo "$ext: $(grep -i '^etag' hdr.txt | tr -d '\r') $(wc -c < "$base/$ext/lib$ext.lbug_extension") bytes"
+          done
+
+      - name: Warm LadybugDB extensions (with retries)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import shutil, sys, tempfile, time
+          from pathlib import Path
+          from grag.config import GragConfig
+          from grag.core.engine import Engine
+          for attempt in range(1, 6):
+              tmp = Path(tempfile.mkdtemp())
+              try:
+                  eng = Engine(GragConfig(db_path=tmp / "warm.lbdb"))
+                  try:
+                      for name in ("FTS", "VECTOR"):
+                          eng.load_extension(name)
+                  finally:
+                      eng.close()
+                  print("extensions ready")
+                  break
+              except Exception as exc:  # noqa: BLE001
+                  print(f"attempt {attempt} failed: {exc}", file=sys.stderr)
+                  time.sleep(5 * attempt)
+              finally:
+                  shutil.rmtree(tmp, ignore_errors=True)
+          else:
+              sys.exit("could not install LadybugDB extensions after 5 attempts")
+          PY
+
       - name: Run tests
-        # LadybugDB downloads FTS/VECTOR extensions on first use; CI has network.
         run: pytest
 
   lint:

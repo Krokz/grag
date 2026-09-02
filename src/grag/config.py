@@ -35,6 +35,10 @@ def derive_port(path: Path) -> int:
     return 41000 + int(database_identity(path)[:8], 16) % 8152
 
 
+def _truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class EmbedderConfig(BaseModel):
     """Opt-in embedding provider. Without one, retrieval runs FTS-only."""
 
@@ -83,8 +87,29 @@ class GragConfig(BaseModel):
     cors_origins: list[str] = Field(default_factory=list)
     # Max nodes embedded synchronously per search call. The remainder stays
     # pending (reported as SearchResponse.pending_embeddings) and drains over
-    # later searches; ingest paths embed their own writes in full.
+    # later searches; ingest paths embed their own writes in full. Only used
+    # when no background embedding worker is attached to the engine (a
+    # serving process runs one; see grag.embedworker).
     max_embed_per_search: int = 256
+    # Run a background embedding worker in serving processes so searches and
+    # ingests never embed on the request thread. Off means the legacy inline
+    # behaviour (embed-on-search, ingest embeds its own writes).
+    embed_in_background: bool = True
+    # Remote-server mode for the MCP proxy: when set, `grag mcp` bridges stdio
+    # to an already-running grag server at this origin (e.g. a cloud host)
+    # instead of auto-serving a local daemon. The proxy never opens a .lbdb.
+    server_url: str | None = None
+    # Database name sent as the x-grag-db header when the remote server runs
+    # in multi-db (--db-dir) mode.
+    server_db: str | None = None
+    # Allow a plain-http (non-TLS) remote server_url on a non-loopback host.
+    # The bearer token travels in clear text then — for trusted networks only.
+    allow_insecure_http: bool = False
+    # Supervised servers (systemd / containers) have no TTY to approve WAL
+    # recovery on; with this set a corrupt WAL is recovered automatically on
+    # open (writes since the last checkpoint are lost, HNSW indexes rebuilt)
+    # instead of crash-looping under the supervisor. Off by default.
+    wal_auto_recover: bool = False
 
     @classmethod
     def from_env(cls) -> GragConfig:
@@ -107,6 +132,16 @@ class GragConfig(BaseModel):
             cfg.cors_origins = [o.strip() for o in origins.split(",") if o.strip()]
         if cap := os.environ.get("GRAG_MAX_EMBED_PER_SEARCH"):
             cfg.max_embed_per_search = int(cap)
+        if background := os.environ.get("GRAG_EMBED_BACKGROUND"):
+            cfg.embed_in_background = _truthy(background)
+        if url := os.environ.get("GRAG_SERVER_URL"):
+            cfg.server_url = url
+        if name := os.environ.get("GRAG_SERVER_DB"):
+            cfg.server_db = name
+        if insecure := os.environ.get("GRAG_ALLOW_INSECURE_HTTP"):
+            cfg.allow_insecure_http = _truthy(insecure)
+        if recover := os.environ.get("GRAG_WAL_AUTO_RECOVER"):
+            cfg.wal_auto_recover = _truthy(recover)
         if provider := os.environ.get("GRAG_EMBED_PROVIDER"):
             cfg.embedder = EmbedderConfig(
                 provider=provider,  # type: ignore[arg-type]

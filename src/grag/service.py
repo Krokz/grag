@@ -9,6 +9,7 @@ landed yet raises GragError("not implemented") instead of ImportError.
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from grag.config import GragConfig
 from grag.core.engine import (
@@ -18,7 +19,7 @@ from grag.core.engine import (
     extract_subgraph,
     is_internal_label,
 )
-from grag.core.errors import GragError, ReadOnlyViolation, SchemaError
+from grag.core.errors import GragError, NotFoundError, ReadOnlyViolation, SchemaError
 from grag.core.ident import validate_identifier
 from grag.core.types import (
     CodeIngestRequest,
@@ -30,6 +31,7 @@ from grag.core.types import (
     GraphStats,
     IngestRequest,
     IngestResponse,
+    JobRecord,
     MutationSummary,
     QueryRequest,
     QueryResponse,
@@ -41,6 +43,10 @@ from grag.core.types import (
     UpsertNodesRequest,
     merge_subgraphs,
 )
+
+if TYPE_CHECKING:
+    from grag.embedworker import EmbedWorker
+    from grag.jobs import JobManager
 
 # Write keywords rejected on the read-only cypher_query path. Guardrail, not a
 # security boundary — the LLM contract steers writes to the upsert tools.
@@ -102,9 +108,49 @@ class GragService:
     def __init__(self, config: GragConfig | None = None):
         self.config = config or GragConfig.from_env()
         self.engine = Engine(self.config)
+        self.embed_worker: EmbedWorker | None = None
+        # Background ingest jobs (POST /api/jobs/...), created lazily.
+        self._jobs: JobManager | None = None
 
     def close(self) -> None:
+        if self.embed_worker is not None:
+            self.embed_worker.stop()
+            self.embed_worker = None
+        if self._jobs is not None:
+            self._jobs.shutdown()
         self.engine.close()
+
+    # -- background embedding -------------------------------------------------------
+
+    def start_background_embedding(self) -> bool:
+        """Attach an EmbedWorker so ingests/searches never embed inline.
+
+        No-op (False) without an embedder. Serving processes call this via
+        ServiceRegistry; one-shot CLI commands keep the synchronous path.
+        """
+        if self.config.embedder is None:
+            return False
+        if self.embed_worker is None:
+            from grag.embedworker import EmbedWorker
+
+            worker = EmbedWorker(self.engine, self.config)
+            self.engine.embed_worker = worker  # type: ignore[attr-defined]
+            worker.start()
+            self.embed_worker = worker
+        return True
+
+    def embedding_status(self) -> dict | None:
+        return None if self.embed_worker is None else self.embed_worker.status()
+
+    # -- background jobs -----------------------------------------------------------
+
+    @property
+    def jobs(self) -> JobManager:
+        if self._jobs is None:
+            from grag.jobs import JobManager
+
+            self._jobs = JobManager()
+        return self._jobs
 
     # -- schema ---------------------------------------------------------------
 
@@ -129,7 +175,10 @@ class GragService:
             from grag.core.mutate import upsert_nodes
         except ImportError:
             raise _not_implemented("grag.core.mutate") from None
-        return upsert_nodes(self.engine, self.config, req)
+        summary = upsert_nodes(self.engine, self.config, req)
+        if self.embed_worker is not None:
+            self.embed_worker.wake()
+        return summary
 
     def upsert_edges(self, req: UpsertEdgesRequest) -> MutationSummary:
         try:
@@ -204,6 +253,32 @@ class GragService:
             raise _not_implemented("grag.ingest.code") from None
         return ingest_code(self.engine, self.config, req)
 
+    # -- background ingest jobs ---------------------------------------------------------
+
+    def submit_ingest_code(self, req: CodeIngestRequest) -> JobRecord:
+        """Queue ingest_code on the service's job thread; poll with get_job."""
+        return self.jobs.submit(
+            "ingest_code", lambda: self.ingest_code(req), req.model_dump()
+        )
+
+    def submit_ingest(self, req: IngestRequest) -> JobRecord:
+        params = req.model_dump(exclude={"documents"})
+        params["documents"] = len(req.documents)
+        return self.jobs.submit("ingest", lambda: self.ingest(req), params)
+
+    def get_job(self, job_id: str) -> JobRecord:
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise NotFoundError(
+                f"No job with id {job_id!r}.",
+                hint="Jobs live in memory for the serving process; list them via "
+                "GET /api/jobs.",
+            )
+        return job
+
+    def list_jobs(self, limit: int = 50) -> list[JobRecord]:
+        return self.jobs.list(limit)
+
     # -- ui -----------------------------------------------------------------------------
 
     def graph_sample(self, limit: int = 200, label: str | None = None) -> GraphSample:
@@ -234,6 +309,34 @@ class GragService:
                 rels = self.engine.execute(
                     f"MATCH (a)-[r]->(b) RETURN a, r, b LIMIT {limit}"
                 )
+            sub = merge_subgraphs(sub, extract_subgraph(rels, pk_map))
+        except GragError:
+            pass  # no rel tables yet
+        nodes = [n for n in sub.nodes if not is_internal_label(n.label)]
+        kept = {n.id for n in nodes}
+        sub = Subgraph(
+            nodes=nodes,
+            edges=[
+                e
+                for e in sub.edges
+                if not is_internal_label(e.type)
+                and e.source in kept
+                and e.target in kept
+            ],
+        )
+        return GraphSample(subgraph=sub, stats=self._stats())
+
+    def graph_full(self) -> GraphSample:
+        """Every user node and edge, unclamped — for whole-database exports.
+
+        Unlike ``graph_sample`` this ignores ``max_query_limit`` on purpose:
+        the UI's full-graph SVG export needs the mass of the graph, not a
+        window into it. Internal ``_``-prefixed tables are still dropped.
+        """
+        pk_map = self._pk_map()
+        sub = extract_subgraph(self.engine.execute("MATCH (n) RETURN n"), pk_map)
+        try:
+            rels = self.engine.execute("MATCH (a)-[r]->(b) RETURN a, r, b")
             sub = merge_subgraphs(sub, extract_subgraph(rels, pk_map))
         except GragError:
             pass  # no rel tables yet

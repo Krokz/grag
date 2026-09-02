@@ -60,6 +60,11 @@ class ServiceRegistry:
             svc = self._services.get(key)
             if svc is None:
                 svc = GragService(self.config.model_copy(update={"db_path": resolved}))
+                # A registry only exists in serving processes (REST/UI/MCP);
+                # give each database its background embedder so no request
+                # thread ever embeds under the write lock.
+                if self.config.embed_in_background:
+                    svc.start_background_embedding()
                 self._services[key] = svc
         return svc
 

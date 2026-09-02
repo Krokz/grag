@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import grag
@@ -38,6 +38,7 @@ from grag.core.types import (
     GraphSample,
     IngestRequest,
     IngestResponse,
+    JobRecord,
     MutationSummary,
     QueryRequest,
     QueryResponse,
@@ -296,6 +297,9 @@ def create_app(config: GragConfig) -> FastAPI:
             "pid": os.getpid(),
             "mcp_enabled": config.mcp_path is not None,
             "mcp_path": config.mcp_path,
+            # None when no embedder is configured; otherwise the background
+            # worker's counters (running / idle / embedded_total / last_error).
+            "embedding": service.embedding_status() if service is not None else None,
         }
 
     @app.post(_SHUTDOWN_PATH, include_in_schema=False, status_code=202)
@@ -367,6 +371,48 @@ def create_app(config: GragConfig) -> FastAPI:
     def ingest_code(request: Request, req: CodeIngestRequest) -> CodeIngestResponse:
         return resolve(request).ingest_code(req)
 
+    # -- background jobs: long ingests return a job id instead of blocking -------
+
+    @app.post("/api/jobs/ingest/code", response_model=JobRecord, status_code=202)
+    def submit_ingest_code(request: Request, req: CodeIngestRequest) -> JobRecord:
+        return resolve(request).submit_ingest_code(req)
+
+    @app.post("/api/jobs/ingest", response_model=JobRecord, status_code=202)
+    def submit_ingest(request: Request, req: IngestRequest) -> JobRecord:
+        return resolve(request).submit_ingest(req)
+
+    @app.get("/api/jobs")
+    def list_jobs(request: Request, limit: int = Query(default=50)) -> dict:
+        return {"jobs": [j.model_dump() for j in resolve(request).list_jobs(limit)]}
+
+    @app.get("/api/jobs/{job_id}", response_model=JobRecord)
+    def get_job(request: Request, job_id: str) -> JobRecord:
+        return resolve(request).get_job(job_id)
+
+    @app.get("/api/export")
+    def export_jsonl(request: Request) -> StreamingResponse:
+        """Online backup: stream the portable JSONL export of the live database.
+
+        The CLI's `grag export` needs exclusive access to the .lbdb (single
+        writer); a serving process cannot be stopped for every backup, so
+        the same stream is offered here. Bearer-protected like every /api
+        route. Reads run on pooled connections, so writes are not blocked.
+        """
+        from grag.transfer import export_lines
+
+        engine = resolve(request).engine
+
+        def body():
+            for line in export_lines(engine):
+                yield line + "\n"
+
+        name = resolve(request).config.db_path.stem or "grag"
+        return StreamingResponse(
+            body(),
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition": f'attachment; filename="{name}.jsonl"'},
+        )
+
     @app.get("/api/graph/sample", response_model=GraphSample)
     def graph_sample(
         request: Request,
@@ -374,6 +420,10 @@ def create_app(config: GragConfig) -> FastAPI:
         label: str | None = Query(default=None),
     ) -> GraphSample:
         return resolve(request).graph_sample(limit=limit, label=label)
+
+    @app.get("/api/graph/full", response_model=GraphSample)
+    def graph_full(request: Request) -> GraphSample:
+        return resolve(request).graph_full()
 
     # -- UI statics --------------------------------------------------------------
 

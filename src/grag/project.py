@@ -103,6 +103,52 @@ def _url_entry(port: int) -> dict:
     return {"url": f"http://127.0.0.1:{port}/mcp/"}
 
 
+# The token is referenced, never stored: MCP configs live in the repo, and
+# Claude Code / Cursor expand ${VAR} from the client's environment at spawn.
+_TOKEN_REF = "${GRAG_API_TOKEN}"  # noqa: S105 — a reference, not a secret
+
+
+def _remote_stdio_entry(server_url: str, server_db: str | None = None) -> dict:
+    """Stdio entry that proxies to a remote grag server (no local database).
+
+    ``grag mcp --server-url`` never opens a .lbdb and never spawns a daemon;
+    it reconnects when the remote restarts. The bearer token comes from the
+    client's environment via ``${GRAG_API_TOKEN}``.
+    """
+    args = ["mcp", "--server-url", server_url]
+    if server_db:
+        args += ["--server-db", server_db]
+    return {
+        "command": _grag_bin(),
+        "args": args,
+        "env": {"GRAG_API_TOKEN": _TOKEN_REF},
+    }
+
+
+def _remote_url_entry(server_url: str, server_db: str | None = None) -> dict:
+    """Direct streamable-http entry for clients that speak HTTP MCP natively."""
+    headers = {"Authorization": f"Bearer {_TOKEN_REF}"}
+    if server_db:
+        headers["x-grag-db"] = server_db
+    return {"type": "http", "url": f"{server_url}/mcp/", "headers": headers}
+
+
+def _mcp_entry(
+    db_path: Path,
+    stdio: bool,
+    port: int,
+    server_url: str | None,
+    server_db: str | None,
+) -> dict:
+    if server_url:
+        return (
+            _remote_stdio_entry(server_url, server_db)
+            if stdio
+            else _remote_url_entry(server_url, server_db)
+        )
+    return _stdio_entry(db_path, port) if stdio else _url_entry(port)
+
+
 # ---------------------------------------------------------------------------
 # write-op plan
 # ---------------------------------------------------------------------------
@@ -133,43 +179,68 @@ class DeleteOp(NamedTuple):
 # ---------------------------------------------------------------------------
 
 
-def _op_claude(project_root: Path, db_path: Path, stdio: bool, port: int) -> WriteOp:
+def _op_claude(
+    project_root: Path,
+    db_path: Path,
+    stdio: bool,
+    port: int,
+    server_url: str | None = None,
+    server_db: str | None = None,
+) -> WriteOp:
     path = project_root / ".mcp.json"
     data = _load_json(path)
-    data.setdefault("mcpServers", {})["grag"] = (
-        _stdio_entry(db_path, port) if stdio else _url_entry(port)
+    data.setdefault("mcpServers", {})["grag"] = _mcp_entry(
+        db_path, stdio, port, server_url, server_db
     )
     return WriteOp(path, _dump_json(data), not path.exists())
 
 
-def _op_cursor(project_root: Path, db_path: Path, stdio: bool, port: int) -> WriteOp:
+def _op_cursor(
+    project_root: Path,
+    db_path: Path,
+    stdio: bool,
+    port: int,
+    server_url: str | None = None,
+    server_db: str | None = None,
+) -> WriteOp:
     path = project_root / ".cursor" / "mcp.json"
     data = _load_json(path)
-    data.setdefault("mcpServers", {})["grag"] = (
-        _stdio_entry(db_path, port) if stdio else _url_entry(port)
+    data.setdefault("mcpServers", {})["grag"] = _mcp_entry(
+        db_path, stdio, port, server_url, server_db
     )
     return WriteOp(path, _dump_json(data), not path.exists())
 
 
-def _op_windsurf(db_path: Path, stdio: bool, port: int) -> WriteOp:
+def _op_windsurf(
+    db_path: Path,
+    stdio: bool,
+    port: int,
+    server_url: str | None = None,
+    server_db: str | None = None,
+) -> WriteOp:
     path = Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
     data = _load_json(path)
-    data.setdefault("mcpServers", {})["grag"] = (
-        _stdio_entry(db_path, port) if stdio else _url_entry(port)
+    data.setdefault("mcpServers", {})["grag"] = _mcp_entry(
+        db_path, stdio, port, server_url, server_db
     )
     return WriteOp(path, _dump_json(data), not path.exists())
 
 
-def _op_zed(db_path: Path, port: int = 8471) -> WriteOp | SkipOp:
+def _op_zed(
+    db_path: Path,
+    port: int = 8471,
+    server_url: str | None = None,
+    server_db: str | None = None,
+) -> WriteOp | SkipOp:
     """Zed context_servers only support stdio; always writes stdio regardless of transport mode.
 
     Also skips when settings.json contains JSONC comments — merge would lose them.
     """
     path = Path.home() / ".config" / "zed" / "settings.json"
+    entry = _mcp_entry(db_path, True, port, server_url, server_db)
     if path.exists():
         raw = path.read_text(encoding="utf-8")
         if "//" in raw or "/*" in raw:
-            entry = _stdio_entry(db_path, port)
             snippet = json.dumps(
                 {"context_servers": {"grag": _zed_command(entry)}},
                 indent=2,
@@ -182,7 +253,6 @@ def _op_zed(db_path: Path, port: int = 8471) -> WriteOp | SkipOp:
         data = _load_json(path)
     else:
         data = {}
-    entry = _stdio_entry(db_path, port)
     data.setdefault("context_servers", {})["grag"] = _zed_command(entry)
     return WriteOp(path, _dump_json(data), not path.exists())
 
@@ -224,6 +294,8 @@ def plan_mcp_ops(
     *,
     stdio: bool = True,
     port: int = 8471,
+    server_url: str | None = None,
+    server_db: str | None = None,
 ) -> list[WriteOp | SkipOp]:
     """Plan MCP config write-ops.
 
@@ -236,17 +308,27 @@ def plan_mcp_ops(
     Pass ``stdio=False`` for explicit URL transport: writes ``{"url": "http://..."}``
     and requires the user to start ``grag serve --with-mcp`` manually before
     connecting.
+
+    Pass ``server_url`` to target a remote grag server instead of a local
+    database: stdio writes ``grag mcp --server-url`` (self-healing proxy),
+    URL transport writes the server's ``/mcp/`` endpoint with a bearer
+    header. Both reference ``${GRAG_API_TOKEN}`` rather than storing it.
     """
     ops: list[WriteOp | SkipOp] = []
     for client in clients:
         if client == "claude":
-            ops.append(_op_claude(project_root, db_path, stdio, port))
+            ops.append(
+                _op_claude(project_root, db_path, stdio, port, server_url, server_db)
+            )
         elif client == "cursor":
-            ops.append(_op_cursor(project_root, db_path, stdio, port))
+            ops.append(
+                _op_cursor(project_root, db_path, stdio, port, server_url, server_db)
+            )
         elif client == "windsurf":
-            ops.append(_op_windsurf(db_path, stdio, port))
+            ops.append(_op_windsurf(db_path, stdio, port, server_url, server_db))
         elif client == "zed":
-            ops.append(_op_zed(db_path, port))  # Zed context_servers are stdio-only
+            # Zed context_servers are stdio-only
+            ops.append(_op_zed(db_path, port, server_url, server_db))
     return ops
 
 
@@ -362,7 +444,26 @@ def plan_skill_removal_ops(
 # ---------------------------------------------------------------------------
 
 
-def _claude_md_block(db_path: Path, port: int = 8471) -> str:
+def _claude_md_block(
+    db_path: Path,
+    port: int = 8471,
+    server_url: str | None = None,
+    server_db: str | None = None,
+) -> str:
+    if server_url:
+        where = f"`{server_url}`" + (f" (database `{server_db}`)" if server_db else "")
+        return (
+            f"{_BLOCK_START}\n"
+            "## grag\n\n"
+            f"Shared knowledge graph served remotely at {where}.  \n"
+            "Connect: `grag mcp --server-url "
+            f"{server_url}` with `GRAG_API_TOKEN` exported; the graph is shared "
+            "with the whole team, so writes land for everyone.\n\n"
+            "**Always call `search_knowledge` before answering questions about this project.**  \n"
+            "Code is indexed on the server (do not `ingest_code` local paths). "
+            "New facts: `upsert_nodes` / `upsert_edges`.\n"
+            f"{_BLOCK_END}"
+        )
     db = db_path.resolve()
     return (
         f"{_BLOCK_START}\n"
@@ -375,10 +476,16 @@ def _claude_md_block(db_path: Path, port: int = 8471) -> str:
     )
 
 
-def plan_claude_md_op(project_root: Path, db_path: Path, port: int = 8471) -> WriteOp:
+def plan_claude_md_op(
+    project_root: Path,
+    db_path: Path,
+    port: int = 8471,
+    server_url: str | None = None,
+    server_db: str | None = None,
+) -> WriteOp:
     """Build a write-op that inserts or replaces the grag block in CLAUDE.md."""
     path = project_root / "CLAUDE.md"
-    block = _claude_md_block(db_path, port)
+    block = _claude_md_block(db_path, port, server_url, server_db)
     if path.exists():
         text = path.read_text(encoding="utf-8")
         start = text.find(_BLOCK_START)

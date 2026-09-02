@@ -14,7 +14,13 @@ Tool / endpoint contract (MCP tool = REST endpoint, same payloads):
     get_context(req)                  POST /api/context        -> ContextResponse
     ingest_code(req)                  POST /api/ingest/code    -> CodeIngestResponse
     (ingest)                          POST /api/ingest         -> IngestResponse
+    ingest_code(req, background=true) POST /api/jobs/ingest/code -> JobRecord (202)
+    (ingest, background)              POST /api/jobs/ingest    -> JobRecord (202)
+    job_status(job_id)                GET  /api/jobs/{id}      -> JobRecord
+    (jobs)                            GET  /api/jobs           -> {"jobs": [JobRecord]}
+    (backup)                          GET  /api/export         -> JSONL stream (grag export)
     (ui)                              GET  /api/graph/sample   -> GraphSample
+    (ui)                              GET  /api/graph/full     -> GraphSample
     (ui)                              GET  /api/health         -> {"status": "ok", "version": str}
 
 Internal module contract (implemented by later waves, called via grag.service):
@@ -310,18 +316,31 @@ class IngestRequest(BaseModel):
     chunk: bool = True
     chunk_size: int = 1200  # characters
     chunk_overlap: int = 150
+    # Section-aware mode (grag.ingest.markdown): parse the heading hierarchy
+    # into Document/Section nodes, chunk each section's body under it, and
+    # link backtick-mentioned code symbols to the code graph. False keeps the
+    # flat chunk loader.
+    sections: bool = False
 
 
 class IngestResponse(BaseModel):
     label: str
-    nodes_created: int
+    nodes_created: int  # chunk nodes written
     nodes_pruned: int = 0
+    documents: int = 0  # sections mode: Document nodes written
+    sections: int = 0  # sections mode: Section nodes written
+    code_links: int = 0  # sections mode: MENTIONS_* edges to code symbols
 
 
 class CodeIngestRequest(BaseModel):
     paths: list[str]
     calls: bool = True
     max_file_kb: int = 1024
+    # Skip the database writes for files whose content (and parse options)
+    # match the hash recorded at their last ingest. Every file is still
+    # parsed so cross-file IMPORTS/CALLS/INHERITS resolve, but only changed
+    # files' nodes and edges touch the write lock. False forces a full rewrite.
+    incremental: bool = True
 
 
 class CodeIngestResponse(BaseModel):
@@ -333,7 +352,31 @@ class CodeIngestResponse(BaseModel):
     edges: int = 0
     nodes_pruned: int = 0
     edges_pruned: int = 0
+    # Incremental accounting: files parsed this run, and how many of them
+    # were unchanged since their last ingest (their writes were skipped).
+    files_parsed: int = 0
+    files_unchanged: int = 0
     warnings: list[str] = Field(default_factory=list)
+
+
+# --- background jobs ----------------------------------------------------------------
+
+JobStatus = Literal["queued", "running", "done", "failed"]
+
+
+class JobRecord(BaseModel):
+    """One background ingest run (POST /api/jobs/...). Kept in memory for the
+    life of the serving process; ``result`` is the ingest response model dump."""
+
+    id: str
+    kind: str  # "ingest_code" | "ingest"
+    status: JobStatus = "queued"
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] | None = None
+    error: str | None = None
 
 
 # --- UI -------------------------------------------------------------------------

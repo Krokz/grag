@@ -1,5 +1,5 @@
-"""grag MCP server: the frozen tool contract (7 knowledge tools + ingest_code)
-over stdio or streamable-http.
+"""grag MCP server: the frozen tool contract (7 knowledge tools + ingest_code,
+ingest_docs and job_status) over stdio or streamable-http.
 
 Tool logic lives in plain module-level functions (a GragService is the first
 argument) so tests exercise them without any MCP machinery. `create_server`
@@ -35,6 +35,7 @@ from grag.core.types import (
     CodeIngestRequest,
     ContextRequest,
     DefineSchemaRequest,
+    IngestRequest,
     MutationSummary,
     NodeTableSpec,
     QueryRequest,
@@ -55,6 +56,8 @@ __all__ = [
     "describe_schema",
     "get_context",
     "ingest_code",
+    "ingest_docs",
+    "job_status",
     "run",
     "search_knowledge",
     "upsert_edges",
@@ -144,8 +147,9 @@ _INSTRUCTIONS = (
     "local, no API key, ONNX-based). If the user has not enabled it, suggest: "
     "pip install 'gragdb[embed-local]' then restart the server with "
     "GRAG_EMBED_PROVIDER=fastembed. When search_knowledge returns "
-    "pending_embeddings > 0, nodes are still being embedded — recall improves "
-    "as later searches drain the backlog. When it returns \"vector\": \"off\", "
+    "pending_embeddings > 0, nodes are still being embedded — the server's "
+    "background worker drains the backlog on its own, so recall improves on "
+    "later searches. When it returns \"vector\": \"off\", "
     "no embedder is configured on this server process — FTS-only is expected "
     "and pending_embeddings will never appear, so don't mistake that for "
     "\"fully embedded.\" \"vector\": \"error\" means an embedder is configured "
@@ -427,6 +431,7 @@ def ingest_code(
     paths: list[str],
     calls: bool = True,
     max_file_kb: int = 1024,
+    background: bool = False,
 ) -> str:
     """Call this on any repository or file tree before answering questions about
     its code structure. Indexes the STRUCTURE of one or more code repositories into the graph:
@@ -455,15 +460,93 @@ def ingest_code(
             skipped automatically.
         calls: also record resolvable CALLS edges (default true).
         max_file_kb: skip files larger than this many KB (default 1024).
+        background: queue the ingest on the server and return immediately
+            with {"id": ..., "status": "queued"}; poll job_status(id) for the
+            result. Use for large trees so this call does not block for
+            minutes. Re-ingests are incremental either way: unchanged files
+            are parsed for cross-file resolution but never rewritten.
 
     Returns compact JSON {"repos": n, "modules": n, "classes": n,
     "functions": n, "module_calls": n, "edges": n, "nodes_pruned": n,
-    "edges_pruned": n, "warnings": [...]} — always check "warnings" for
-    skipped files.
+    "edges_pruned": n, "files_parsed": n, "files_unchanged": n,
+    "warnings": [...]} — always check "warnings" for skipped files.
     """
     req = CodeIngestRequest(paths=paths, calls=calls, max_file_kb=max_file_kb)
+    if background:
+        job = service.submit_ingest_code(req)
+        return json.dumps(job.model_dump(), ensure_ascii=False, separators=_COMPACT)
     resp = service.ingest_code(req)
     return json.dumps(resp.model_dump(), ensure_ascii=False, separators=_COMPACT)
+
+
+@_return_errors
+def ingest_docs(
+    service: GragService,
+    paths: list[str],
+    sections: bool = True,
+    label: str = "Chunk",
+    background: bool = False,
+) -> str:
+    """Index documents (.md/.txt/.json/.jsonl files or directories of them) on
+    the server's filesystem into the graph. With sections=true (default) a
+    Markdown file's heading hierarchy becomes Document -> Section nodes
+    (SUBSECTION_OF / NEXT_SECTION between sections), each section's body is
+    chunked under it (Chunk -IN_SECTION-> Section), and any code symbol the
+    text names in backticks that exists in the code graph gets a
+    MENTIONS_FUNCTION / MENTIONS_CLASS / MENTIONS_MODULE edge. Run ingest_code
+    first so those links resolve. Use this for specs and design documents;
+    sections=false is the flat chunk loader for loose notes.
+
+    Re-running on the same files is an authoritative sync: current sections
+    and chunks are merged, stale ones pruned. Section ids are stable
+    ("<doc>#<heading/slug/path>"), so the empty IMPLEMENTS (Function ->
+    Section) and IMPLEMENTS_CLASS tables are ready for you to record which
+    code realises which part of the spec via upsert_edges.
+
+    Args:
+        paths: files or directories on the server, e.g. ["docs/algo-bible.md"].
+        sections: heading-aware graph (default true) vs flat chunks.
+        label: chunk node label (default "Chunk").
+        background: queue the ingest and return {"id", "status": "queued"};
+            poll job_status(id). Use for large documents.
+
+    Returns compact JSON {"label", "nodes_created", "nodes_pruned",
+    "documents", "sections", "code_links", "files_read", "warnings": [...]}.
+    """
+    from pathlib import Path
+
+    from grag.ingest.loaders import load_paths
+
+    documents, warnings, files_read = load_paths([Path(p) for p in paths])
+    req = IngestRequest(documents=documents, label=label, sections=sections)
+    if background:
+        job = service.submit_ingest(req)
+        payload = job.model_dump()
+        payload["files_read"] = files_read
+        payload["warnings"] = warnings
+        return json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
+    resp = service.ingest(req)
+    payload = resp.model_dump()
+    payload["files_read"] = files_read
+    payload["warnings"] = warnings
+    return json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
+
+
+@_return_errors
+def job_status(service: GragService, job_id: str) -> str:
+    """Poll a background job started with ingest_code(background=true).
+
+    Args:
+        job_id: the "id" returned when the job was queued.
+
+    Returns compact JSON {"id", "kind", "status": "queued"|"running"|"done"|
+    "failed", "created_at", "started_at", "finished_at", "result", "error"}.
+    "result" holds the ingest response once status is "done"; "error" the
+    failure message when "failed". Unknown ids are an error (jobs live in
+    memory for the serving process).
+    """
+    job = service.get_job(job_id)
+    return json.dumps(job.model_dump(), ensure_ascii=False, separators=_COMPACT)
 
 
 # --- MCP wiring ---------------------------------------------------------------------
@@ -571,9 +654,30 @@ def create_server(
         paths: list[str],
         calls: bool = True,
         max_file_kb: int = 1024,
+        background: bool = False,
         ctx: Context | None = None,
     ) -> str:
-        return ingest_code(_resolve_service(registry, ctx), paths, calls, max_file_kb)
+        return ingest_code(
+            _resolve_service(registry, ctx), paths, calls, max_file_kb, background
+        )
+
+    @server.tool(name="ingest_docs", description=_doc(ingest_docs))
+    @_return_errors
+    def ingest_docs_tool(
+        paths: list[str],
+        sections: bool = True,
+        label: str = "Chunk",
+        background: bool = False,
+        ctx: Context | None = None,
+    ) -> str:
+        return ingest_docs(
+            _resolve_service(registry, ctx), paths, sections, label, background
+        )
+
+    @server.tool(name="job_status", description=_doc(job_status))
+    @_return_errors
+    def job_status_tool(job_id: str, ctx: Context | None = None) -> str:
+        return job_status(_resolve_service(registry, ctx), job_id)
 
     # Handles for lifecycle management (run closes the registry) and for
     # tests. grag_service is the default service for back-compat; in multi-db

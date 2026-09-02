@@ -194,6 +194,45 @@ def export_to(engine: Engine, out: TextIO) -> int:
     return count
 
 
+def export_from_server(
+    server_url: str,
+    out_path: str | None,
+    *,
+    api_token: str | None = None,
+    db_name: str | None = None,
+    allow_insecure: bool = False,
+) -> int:
+    """Stream ``GET <server>/api/export`` (an online backup of a live server)
+    into `out_path` (or stdout). Returns the number of lines written.
+
+    Stdlib-only so a backup cron on a minimal host needs nothing beyond grag.
+    """
+    import sys
+    import urllib.request
+
+    from grag.proxy import validate_server_url
+
+    origin = validate_server_url(server_url, allow_insecure=allow_insecure)
+    req = urllib.request.Request(f"{origin}/api/export")  # noqa: S310 — https/loopback enforced above
+    if api_token:
+        req.add_header("Authorization", f"Bearer {api_token}")
+    if db_name:
+        req.add_header("x-grag-db", db_name)
+    count = 0
+    with urllib.request.urlopen(req, timeout=600) as resp:  # noqa: S310
+        if resp.status != 200:
+            raise OSError(f"server returned HTTP {resp.status}")
+        sink = open(out_path, "w", encoding="utf-8") if out_path else sys.stdout  # noqa: SIM115
+        try:
+            for raw in resp:
+                sink.write(raw.decode("utf-8"))
+                count += 1
+        finally:
+            if out_path:
+                sink.close()
+    return count
+
+
 # ---------------------------------------------------------------------------
 # import
 # ---------------------------------------------------------------------------

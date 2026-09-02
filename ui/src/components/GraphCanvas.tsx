@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import type { EdgeRecord, GraphStats, NodeRecord, Subgraph } from '../types';
 import { colorForLabel, displayName } from '../graph-utils';
+import { api, toFailure } from '../api';
+import { layoutOffscreen } from '../layout';
 
 export interface SeedInfo {
   score: number;
@@ -120,6 +122,12 @@ export function GraphCanvas({
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const exportTaskTimer = useRef<number | null>(null);
   const exportNoticeTimer = useRef<number | null>(null);
+  // Whole-database export: null when idle, otherwise the progress caption
+  // shown on its button ("Fetching…", "Laying out 42%", …).
+  const [fullExportStage, setFullExportStage] = useState<string | null>(null);
+  const [fullExportNotice, setFullExportNotice] = useState<string | null>(null);
+  const fullExportRun = useRef(0);
+  const fullExportNoticeTimer = useRef<number | null>(null);
   // Label bounding boxes already drawn this frame — cleared in
   // onRenderFramePre, filled as labels render, used to skip overlaps.
   const drawnLabels = useRef<LabelRect[]>([]);
@@ -172,7 +180,14 @@ export function GraphCanvas({
     exportTaskTimer.current = window.setTimeout(() => {
       exportTaskTimer.current = null;
       try {
-        if (!buildAndDownloadSvg(data)) {
+        if (
+          !buildAndDownloadSvg(data, {
+            filename: 'grag-view.svg',
+            title: 'grag canvas view',
+            describe: (n, e) =>
+              `Currently loaded and filtered canvas view with ${n} nodes and ${e} edges.`,
+          })
+        ) {
           setExportNotice('Layout not ready');
           const timer = window.setTimeout(() => {
             // A newer export may have replaced or cancelled this notice. Only
@@ -191,8 +206,72 @@ export function GraphCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, pkMap]);
 
+  // Export every node and edge in the database, not just what is loaded on
+  // the canvas: fetch the whole graph, settle it with a headless force layout
+  // (chunked so the button keeps repainting progress), then write the SVG.
+  const exportFullSvg = useCallback(() => {
+    const run = ++fullExportRun.current;
+    const cancelled = () => fullExportRun.current !== run;
+    if (fullExportNoticeTimer.current !== null) {
+      window.clearTimeout(fullExportNoticeTimer.current);
+      fullExportNoticeTimer.current = null;
+    }
+    setFullExportNotice(null);
+    setFullExportStage('Fetching…');
+    const showNotice = (text: string) => {
+      setFullExportNotice(text);
+      const timer = window.setTimeout(() => {
+        if (fullExportNoticeTimer.current === timer) {
+          fullExportNoticeTimer.current = null;
+          setFullExportNotice(null);
+        }
+      }, 2500);
+      fullExportNoticeTimer.current = timer;
+    };
+    void (async () => {
+      try {
+        const full = await api.full();
+        if (cancelled()) return;
+        if (full.subgraph.nodes.length === 0) {
+          showNotice('Graph is empty');
+          return;
+        }
+        const laidOut = await layoutOffscreen(
+          full.subgraph,
+          (fraction) => {
+            if (!cancelled()) {
+              setFullExportStage(`Laying out ${Math.round(fraction * 100)}%`);
+            }
+          },
+          cancelled,
+        );
+        if (!laidOut || cancelled()) return;
+        setFullExportStage('Writing…');
+        // Yield once so "Writing…" paints before the synchronous SVG build.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (cancelled()) return;
+        buildAndDownloadSvg(laidOut, {
+          filename: 'grag-full-graph.svg',
+          title: 'grag full graph',
+          describe: (n, e) => `Every node and edge in the database: ${n} nodes and ${e} edges.`,
+        });
+      } catch (e) {
+        if (!cancelled()) showNotice(`Export failed: ${toFailure(e).message}`);
+      } finally {
+        if (!cancelled()) setFullExportStage(null);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pkMap]);
+
   useEffect(
     () => () => {
+      // Bumping the run counter makes any in-flight full export drop its
+      // results instead of setting state on an unmounted component.
+      fullExportRun.current += 1;
+      if (fullExportNoticeTimer.current !== null) {
+        window.clearTimeout(fullExportNoticeTimer.current);
+      }
       if (exportNoticeTimer.current !== null) {
         window.clearTimeout(exportNoticeTimer.current);
       }
@@ -206,13 +285,20 @@ export function GraphCanvas({
   // ForceGraph writes x/y onto the same node objects held in `data.nodes`, and
   // replaces each link's source/target with the node reference — so the live
   // layout can be read straight off `data`, no imperative ref needed.
-  const buildAndDownloadSvg = (graph: {
-    nodes: FgNode[];
-    links: (Omit<EdgeRecord, 'source' | 'target'> & {
-      source: FgNode | string;
-      target: FgNode | string;
-    })[];
-  }) => {
+  const buildAndDownloadSvg = (
+    graph: {
+      nodes: FgNode[];
+      links: (Omit<EdgeRecord, 'source' | 'target'> & {
+        source: FgNode | string;
+        target: FgNode | string;
+      })[];
+    },
+    meta: {
+      filename: string;
+      title: string;
+      describe: (nodeCount: number, edgeCount: number) => string;
+    },
+  ) => {
     const { nodes, links } = graph;
     const byId = new Map(nodes.map((n) => [n.id, n]));
     const resolve = (v: FgNode | string): FgNode | undefined =>
@@ -221,13 +307,25 @@ export function GraphCanvas({
       (n) => Number.isFinite(n.x) && Number.isFinite(n.y),
     );
     if (pts.length === 0) return false;
-    const xs = pts.map((n) => n.x as number);
-    const ys = pts.map((n) => n.y as number);
+    // A loop, not Math.min(...xs): spreading a whole-database export's
+    // coordinates into one call overflows the argument limit past ~100k nodes.
+    let loX = Infinity;
+    let loY = Infinity;
+    let hiX = -Infinity;
+    let hiY = -Infinity;
+    for (const n of pts) {
+      const x = n.x as number;
+      const y = n.y as number;
+      if (x < loX) loX = x;
+      if (x > hiX) hiX = x;
+      if (y < loY) loY = y;
+      if (y > hiY) hiY = y;
+    }
     const pad = 24;
-    const minX = Math.min(...xs) - pad;
-    const minY = Math.min(...ys) - pad;
-    const w = Math.max(...xs) - minX + pad;
-    const h = Math.max(...ys) - minY + pad;
+    const minX = loX - pad;
+    const minY = loY - pad;
+    const w = hiX - minX + pad;
+    const h = hiY - minY + pad;
     const f = (v: number) => v.toFixed(1);
     const edges = links
       .map((l) => {
@@ -255,10 +353,15 @@ export function GraphCanvas({
         },
       )
       .join('');
+    // width/height="100%" plus a "meet" aspect ratio makes the file fill
+    // whatever viewport opens it (browser tab, <img>, <object>) while keeping
+    // the layout's proportions; the viewBox alone leaves that to the viewer.
     const svg =
-      `<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="grag-view-title grag-view-desc" viewBox="${f(minX)} ${f(minY)} ${f(w)} ${f(h)}">` +
-      `<title id="grag-view-title">grag canvas view</title>` +
-      `<desc id="grag-view-desc">Currently loaded and filtered canvas view with ${pts.length} nodes and ${links.length} edges.</desc>` +
+      `<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="grag-view-title grag-view-desc" ` +
+      `width="100%" height="100%" preserveAspectRatio="xMidYMid meet" style="background:#0b0f14" ` +
+      `viewBox="${f(minX)} ${f(minY)} ${f(w)} ${f(h)}">` +
+      `<title id="grag-view-title">${escapeXml(meta.title)}</title>` +
+      `<desc id="grag-view-desc">${escapeXml(meta.describe(pts.length, links.length))}</desc>` +
       `<defs><marker id="grag-arrow" viewBox="0 0 5 5" refX="5" refY="2.5" markerWidth="5" markerHeight="5" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 5 2.5 L 0 5 z" fill="#8895a7" fill-opacity="0.5"/></marker></defs>` +
       `<rect x="${f(minX)}" y="${f(minY)}" width="${f(w)}" height="${f(h)}" fill="#0b0f14"/>` +
       `<g stroke="#8895a7" stroke-width="0.5" stroke-opacity="0.25" marker-end="url(#grag-arrow)">${edges}</g>` +
@@ -266,7 +369,7 @@ export function GraphCanvas({
     const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'grag-view.svg';
+    a.download = meta.filename;
     // Must be in the document for the download to fire in Firefox/Safari; a
     // detached anchor with a blob URL silently no-ops.
     document.body.appendChild(a);
@@ -545,6 +648,15 @@ export function GraphCanvas({
           disabled={data.nodes.length === 0 || exporting}
         >
           {exporting ? 'Exporting…' : (exportNotice ?? 'Export SVG view')}
+        </button>
+        <button
+          type="button"
+          className="reset-view-btn"
+          title="Lay out and save every node and edge in the database as SVG"
+          onClick={exportFullSvg}
+          disabled={empty || fullExportStage !== null}
+        >
+          {fullExportStage ?? fullExportNotice ?? 'Export full SVG'}
         </button>
       </div>
 

@@ -628,6 +628,8 @@ def _prune_code_nodes(
     authoritative_sources: set[str],
     desired_by_label_source: dict[str, dict[str, set[str]]],
 ) -> int:
+    if not authoritative_sources:
+        return 0
     pruned = 0
     for label in ("Module", "Class", "Function", "TerraformModuleCall"):
         desired_by_source = desired_by_label_source[label]
@@ -653,6 +655,8 @@ def _prune_code_edges(
 ) -> int:
     """Delete only generated edges absent from the newly resolved graph."""
 
+    if not authoritative_sources:
+        return 0
     pruned = 0
     for spec in _CODE_REL_TABLES:
         rows = engine.execute(
@@ -715,22 +719,75 @@ def _prune_legacy_repos(engine: Engine, repos: dict[str, UpsertNode]) -> int:
 
 _REPO_STALENESS_COLUMNS = ("git_commit", "git_branch", "ingested_at")
 
+# Per-module fingerprint of (file bytes, parse options, parser revision),
+# written outside the upsert path because reserved "_" props are grag-internal
+# and — unlike a declared STRING prop — never enter the FTS index or the
+# embedding text. A matching fingerprint on re-ingest means the file's nodes
+# and generated edges are already correct and its writes are skipped.
+_INGEST_HASH_PROP = "_ingest_hash"
+
 
 def _ensure_repo_staleness_columns(engine: Engine) -> None:
-    """ALTER pre-existing Repo tables to add the staleness columns.
-
+    """ALTER pre-existing Repo/Module tables to add columns added after v0.
     define_schema never alters an existing table (if_not_exists skips it), so
     databases ingested before these columns existed need an explicit ADD.
     """
+    _ensure_columns(engine, "Repo", _REPO_STALENESS_COLUMNS)
+    _ensure_columns(engine, "Module", (_INGEST_HASH_PROP,))
+
+
+def _ensure_columns(engine: Engine, table: str, columns: tuple[str, ...]) -> None:
     try:
-        res = engine.execute("CALL TABLE_INFO('Repo') RETURN *")
+        res = engine.execute(f"CALL TABLE_INFO('{table}') RETURN *")
     except GragError:
         return
     existing = {str(row[1]) for row in res.rows}
-    for column in _REPO_STALENESS_COLUMNS:
+    for column in columns:
         if column not in existing:
             with suppress(GragError):
-                engine.execute_write(f"ALTER TABLE Repo ADD {column} STRING")
+                engine.execute_write(f"ALTER TABLE {table} ADD {column} STRING")
+
+
+def _ingest_hash(data: bytes, *, calls: bool) -> str:
+    """Fingerprint of one source file under the current parse options.
+
+    The grag version is folded in so a parser improvement re-ingests every
+    file once after an upgrade instead of leaving stale structure behind.
+    """
+    from grag import __version__
+
+    h = hashlib.sha256(data)
+    h.update(f"\x00calls={int(calls)}\x00grag={__version__}".encode())
+    return h.hexdigest()
+
+
+def _stored_ingest_hashes(engine: Engine, roots: set[Path]) -> dict[str, str]:
+    """_source -> recorded fingerprint for every Module below `roots`."""
+    stored: dict[str, str] = {}
+    for root in roots:
+        prefix = f"{root}{os.sep}"
+        try:
+            rows = engine.execute(
+                f"MATCH (n:Module) WHERE n._source STARTS WITH $prefix "
+                f"AND n.{_INGEST_HASH_PROP} IS NOT NULL "
+                f"RETURN n._source, n.{_INGEST_HASH_PROP}",
+                {"prefix": prefix},
+            ).rows
+        except GragError:
+            return {}
+        for source, digest in rows:
+            if source and digest:
+                stored[str(source)] = str(digest)
+    return stored
+
+
+def _record_ingest_hashes(engine: Engine, hashes: dict[str, str]) -> None:
+    """Stamp the fingerprint on each (just upserted) Module by its _source."""
+    for source, digest in hashes.items():
+        engine.execute_write(
+            f"MATCH (n:Module) WHERE n._source = $source SET n.{_INGEST_HASH_PROP} = $h",
+            {"source": source, "h": digest},
+        )
 
 
 def _git_state(root: Path) -> dict[str, str]:
@@ -808,6 +865,14 @@ def ingest_code(
     }
     parsed_modules: list[_ParsedModule] = []
     successful_sources: set[str] = set()
+    # Files whose fingerprint differs from the one recorded at their last
+    # ingest (or every parsed file on a full run). Only these touch the write
+    # lock; unchanged files are parsed for cross-file resolution only.
+    changed_sources: set[str] = set()
+    new_hashes: dict[str, str] = {}
+    stored_hashes = (
+        _stored_ingest_hashes(engine, set(roots.values())) if req.incremental else {}
+    )
     unsupported: dict[str, int] = {}
 
     for walked_root, walked_file in _walk(input_paths, req.max_file_kb, warnings):
@@ -825,12 +890,18 @@ def ingest_code(
         repo = _repo_id(root)
         repo_name = root.name or "repo"
         try:
-            source = file.read_text(encoding="utf-8")
+            raw = file.read_bytes()
+            source = raw.decode("utf-8")
             parsed = parser(file, source, repo=repo, rel_path=rel_path, calls=req.calls)
             if rel_path == "__init__.py":
                 parsed.dotted = repo_name
             parsed_modules.append(parsed)
-            successful_sources.add(str(file))
+            key = str(file)
+            successful_sources.add(key)
+            digest = _ingest_hash(raw, calls=req.calls)
+            if not req.incremental or stored_hashes.get(key) != digest:
+                changed_sources.add(key)
+                new_hashes[key] = digest
         except (OSError, UnicodeDecodeError) as exc:
             warnings.append(f"skipped {file}: could not read ({exc})")
         except (SyntaxError, ValueError) as exc:
@@ -977,21 +1048,37 @@ def ingest_code(
     }
     for label, nodes in nodes_by_label:
         counts[label] = len(nodes)
+        to_write = list(nodes.values())
         if label in desired_by_label_source:
             for node in nodes.values():
                 source = str(node.source)
                 desired_by_label_source[label].setdefault(source, set()).add(
                     str(node.key)
                 )
-        if nodes:
-            summary = upsert_nodes(
-                engine, config, UpsertNodesRequest(nodes=list(nodes.values()))
-            )
+            to_write = [n for n in to_write if str(n.source) in changed_sources]
+        if to_write:
+            summary = upsert_nodes(engine, config, UpsertNodesRequest(nodes=to_write))
             warnings.extend(summary.warnings)
+    _record_ingest_hashes(engine, new_hashes)
 
-    authoritative_sources = successful_sources | _missing_module_sources(
+    # Pruning and edge writes are scoped to changed + deleted files. An edge
+    # is (re)written when its own file changed OR its target's file changed:
+    # a symbol added to B that an unchanged A already referenced gains its
+    # edge without rewriting all of A.
+    authoritative_sources = changed_sources | _missing_module_sources(
         engine, directory_roots
     )
+    module_source = {mid: str(pm.module.source) for mid, pm in by_module.items()}
+
+    def owning_source(key: str) -> str | None:
+        return module_source.get(key.split("#", 1)[0])
+
+    live_edges = [
+        edge
+        for edge in edges.values()
+        if str(edge.source) in changed_sources
+        or owning_source(str(edge.to_key)) in changed_sources
+    ]
     desired_edges = {
         (edge.type, str(edge.from_key), str(edge.to_key), str(edge.source))
         for edge in edges.values()
@@ -1009,7 +1096,7 @@ def ingest_code(
     nodes_pruned += _prune_legacy_repos(engine, repos)
 
     edges_by_type: dict[str, list[UpsertEdge]] = {}
-    for edge in edges.values():
+    for edge in live_edges:
         edges_by_type.setdefault(edge.type, []).append(edge)
     edge_count = 0
     for rel_type in sorted(edges_by_type):
@@ -1018,15 +1105,22 @@ def ingest_code(
         summary = upsert_edges(engine, config, UpsertEdgesRequest(edges=batch))
         warnings.extend(summary.warnings)
 
+    if config.embedder is not None:
+        from grag.embedworker import notify_embed_worker
+
+        notify_embed_worker(engine)
+
     return CodeIngestResponse(
         repos=counts["Repo"],
         modules=counts["Module"],
         classes=counts["Class"],
         functions=counts["Function"],
         module_calls=counts["TerraformModuleCall"],
-        edges=edge_count,
+        edges=len(edges),
         nodes_pruned=nodes_pruned,
         edges_pruned=edges_pruned,
+        files_parsed=len(successful_sources),
+        files_unchanged=len(successful_sources) - len(changed_sources),
         warnings=warnings,
     )
 
@@ -1059,7 +1153,8 @@ def ingest_code_paths(
         (
             f"Ingested code from {len(paths)} path(s): "
             f"{resp.repos} repo(s), {resp.modules} module(s), {resp.classes} class(es), "
-            f"{resp.functions} function(s), {resp.edges} edge(s) written; "
+            f"{resp.functions} function(s), {resp.edges} edge(s) resolved; "
+            f"{resp.files_unchanged}/{resp.files_parsed} file(s) unchanged (skipped); "
             f"{resp.nodes_pruned} stale node(s) and {resp.edges_pruned} stale edge(s) "
             f"pruned in {config.db_path}."
         )

@@ -700,11 +700,19 @@ def vector_candidates(
     tables = candidate_tables(engine, config, labels)
     if not tables:
         return []
+    from grag.embedworker import attached_worker
+
+    worker = attached_worker(engine)
     for table in tables:
         ensure_vector_storage(engine, config, table)
-        embed_pending_nodes(
-            engine, config, table, max_nodes=config.max_embed_per_search
-        )
+        if worker is None:
+            embed_pending_nodes(
+                engine, config, table, max_nodes=config.max_embed_per_search
+            )
+    if worker is not None:
+        # Never embed on the request thread when a worker exists; just make
+        # sure it is awake so the reported backlog shrinks.
+        worker.wake()
     q = np.asarray(embedder.embed([query_text])[0], dtype=np.float32).ravel()
     if q.size != cfg.dim:
         raise ConfigurationError(

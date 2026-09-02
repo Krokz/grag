@@ -137,9 +137,38 @@ def main(argv: list[str] | None = None) -> int:
             "so the browser UI and LLM tools work simultaneously"
         ),
     )
+    mcp.add_argument(
+        "--server-url",
+        default=None,
+        help=(
+            "proxy stdio to an already-running remote grag server at this origin "
+            "(e.g. https://grag.example.com); never starts a local daemon, "
+            "reconnects when the server restarts (env: GRAG_SERVER_URL; send "
+            "GRAG_API_TOKEN as the bearer token)"
+        ),
+    )
+    mcp.add_argument(
+        "--server-db",
+        default=None,
+        help="database name (x-grag-db header) when the remote server runs "
+        "--db-dir multi-db mode (env: GRAG_SERVER_DB)",
+    )
+    mcp.add_argument(
+        "--insecure-http",
+        action="store_true",
+        help="allow a plain-http --server-url to a non-loopback host "
+        "(env: GRAG_ALLOW_INSECURE_HTTP=1)",
+    )
 
     ingest = sub.add_parser("ingest", help="ingest files into the graph")
-    ingest.add_argument("paths", nargs="+")
+    ingest.add_argument("paths", nargs="+", help="files or directories (.md/.txt/.json/.jsonl)")
+    ingest.add_argument(
+        "--sections",
+        action="store_true",
+        help="section-aware Markdown ingest: Document/Section nodes from the "
+        "heading hierarchy, chunks linked to their section, backtick-mentioned "
+        "code symbols linked to the code graph (recommended for specs)",
+    )
 
     ingest_code = sub.add_parser(
         "ingest-code", help="ingest code structure (Repo/Module/Class/Function)"
@@ -235,6 +264,18 @@ def main(argv: list[str] | None = None) -> int:
     export.add_argument(
         "--out", "-o", default=None, help="output file (default: stdout)"
     )
+    export.add_argument(
+        "--url",
+        default=None,
+        help="export from a RUNNING server instead of the local file: streams "
+        "GET <url>/api/export with GRAG_API_TOKEN as bearer (online backup; "
+        "env: GRAG_SERVER_URL)",
+    )
+    export.add_argument(
+        "--server-db",
+        default=None,
+        help="with --url: database name on a multi-db (--db-dir) server",
+    )
 
     import_ = sub.add_parser(
         "import", help="replay a 'grag export' JSONL file into this database"
@@ -289,6 +330,21 @@ def main(argv: list[str] | None = None) -> int:
             "--with-mcp' to be running before the LLM client connects; the client "
             "will not auto-start grag."
         ),
+    )
+    init.add_argument(
+        "--server-url",
+        default=None,
+        help=(
+            "register a remote grag server (https://host[:port]) instead of a "
+            "local database: MCP config points 'grag mcp --server-url' at it and "
+            "CLAUDE.md documents the shared graph; GRAG_API_TOKEN is read from "
+            "the environment at connect time"
+        ),
+    )
+    init.add_argument(
+        "--server-db",
+        default=None,
+        help="with --server-url: database name on a multi-db (--db-dir) server",
     )
     init.add_argument(
         "--no-mcp",
@@ -380,7 +436,21 @@ def main(argv: list[str] | None = None) -> int:
                 target, owner_pid=os.getpid(), shutdown_token=shutdown_token
             )
     elif args.cmd == "mcp":
-        if getattr(args, "auto_serve", False):
+        server_url = args.server_url or cfg.server_url
+        if server_url:
+            import asyncio
+
+            from grag.proxy import run_remote_proxy
+
+            asyncio.run(
+                run_remote_proxy(
+                    server_url,
+                    api_token=cfg.api_token,
+                    db_name=args.server_db or cfg.server_db,
+                    allow_insecure=args.insecure_http or cfg.allow_insecure_http,
+                )
+            )
+        elif getattr(args, "auto_serve", False):
             if cfg.db_dir is not None:
                 parser.error(
                     "--db-dir cannot be used with 'mcp --auto-serve'; auto-serve "
@@ -406,7 +476,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "ingest":
         from grag.ingest.loaders import ingest_paths
 
-        summary = ingest_paths(cfg, [Path(p) for p in args.paths])
+        summary = ingest_paths(
+            cfg, [Path(p) for p in args.paths], sections=args.sections
+        )
         print(summary)
     elif args.cmd == "ingest-code":
         from grag.ingest.code import ingest_code_paths
@@ -475,6 +547,24 @@ def main(argv: list[str] | None = None) -> int:
         from grag.core.engine import Engine
         from grag.transfer import export_to
 
+        export_url = args.url or cfg.server_url
+        if export_url:
+            from grag.transfer import export_from_server
+
+            try:
+                n = export_from_server(
+                    export_url,
+                    args.out,
+                    api_token=cfg.api_token,
+                    db_name=args.server_db or cfg.server_db,
+                    allow_insecure=cfg.allow_insecure_http,
+                )
+            except (OSError, SystemExit) as exc:
+                print(f"export failed: {exc}", file=sys.stderr)
+                return 1
+            if args.out:
+                print(f"Exported {n} line(s) from {export_url} to {args.out}", file=sys.stderr)
+            return 0
         if find_server(cfg.db_path) is not None:
             print(
                 "A server is running on this database (single-writer lock).\n"
@@ -576,6 +666,23 @@ def main(argv: list[str] | None = None) -> int:
                 apply_ops(remove_ops)
             return 0
 
+        server_url = args.server_url
+        if server_url:
+            from grag.proxy import validate_server_url
+
+            try:
+                server_url = validate_server_url(server_url, allow_insecure=True)
+            except SystemExit as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            if args.ingest:
+                print(
+                    "--ingest is ignored with --server-url: ingest on the server "
+                    "host (or POST /api/jobs/ingest/code) instead.",
+                    file=sys.stderr,
+                )
+                args.ingest = False
+
         ops: list[WriteOp | SkipOp | DeleteOp] = []
         if not args.no_mcp:
             ops.extend(
@@ -585,10 +692,20 @@ def main(argv: list[str] | None = None) -> int:
                     db_path,
                     stdio=not args.url,
                     port=port,
+                    server_url=server_url,
+                    server_db=args.server_db,
                 )
             )
         if not args.no_claude_md:
-            ops.append(plan_claude_md_op(project_root, db_path, port=port))
+            ops.append(
+                plan_claude_md_op(
+                    project_root,
+                    db_path,
+                    port=port,
+                    server_url=server_url,
+                    server_db=args.server_db,
+                )
+            )
         if not args.no_skill:
             ops.extend(plan_skill_ops(clients, project_root))
 
@@ -619,6 +736,16 @@ def main(argv: list[str] | None = None) -> int:
             summary = ingest_code_paths(cfg, [project_root])
             print(summary)
 
+        if server_url:
+            print(
+                "\nDone. Next steps:\n"
+                "  1. Export GRAG_API_TOKEN in the environment your MCP client "
+                "runs in (the config references it, never stores it).\n"
+                "  2. Restart your MCP client (Claude Code / Cursor / ...) so it "
+                "picks up the config.\n"
+                f"  3. Browse the shared graph: {server_url}/"
+            )
+            return 0
         print(
             "\nDone. Next steps:\n"
             "  1. Restart your MCP client (Claude Code / Cursor / ...) so it "

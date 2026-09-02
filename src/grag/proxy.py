@@ -10,16 +10,32 @@ through.  The proxy process itself never opens the .lbdb file, so the
 single-writer constraint is satisfied: only ``grag serve`` holds the
 write lock.
 
+Two modes share the relay/heal machinery:
+
+* **local** (``run_proxy``): the upstream is ``http://127.0.0.1:<port>``;
+  a missing server is spawned as a detached daemon and a crashed one is
+  respawned.
+* **remote** (``run_remote_proxy``): the upstream is an operator-run grag
+  server at ``GRAG_SERVER_URL`` (a cloud host). The proxy never spawns
+  anything; when the upstream drops it waits for the host's supervisor
+  (systemd / container restart policy) to bring it back, then reconnects
+  and replays the handshake exactly like the local heal path. The
+  server's ``database_id`` is pinned on first contact so a reconnect can
+  never silently land on a different database.
+
 Usage (written by ``grag init``)::
 
     grag --db /path/to/db.lbdb mcp --auto-serve --port 8471
+    grag mcp --server-url https://grag.example.com
 """
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -29,20 +45,31 @@ from grag.config import database_identity
 
 _MCP_DEFAULT_TIMEOUT = 30.0
 _MCP_SSE_READ_TIMEOUT = 300.0
+# Remote health probes cross a real network; give them more room than the
+# 2 s loopback budget.
+_REMOTE_PROBE_TIMEOUT = 5.0
+# How long a remote heal waits for the host supervisor to restart the server
+# before the proxy gives up on this attempt (the supervisor loop retries up
+# to _MAX_SESSION_RESTARTS times, so the overall patience is several minutes).
+_REMOTE_READY_WAIT_SECONDS = 60.0
 
 
 async def _probe_server(
     url: str,
+    *,
+    trust_env: bool = False,
+    timeout: float = 2.0,
 ) -> tuple[bool, str | None, bool | None, str | None]:
     """Return server identity and MCP metadata from a health endpoint."""
     import httpx2
 
     try:
-        # This is always a local control-plane probe. Ignore HTTP_PROXY so a
-        # machine-wide proxy cannot intercept it or make localhost readiness
-        # depend on NO_PROXY being configured correctly.
-        async with httpx2.AsyncClient(trust_env=False) as c:
-            r = await c.get(url, timeout=2.0)
+        # Local probes ignore HTTP_PROXY so a machine-wide proxy cannot
+        # intercept them or make localhost readiness depend on NO_PROXY being
+        # configured correctly. Remote probes honour the environment (corporate
+        # proxies, custom CA bundles) like any other outbound HTTPS call.
+        async with httpx2.AsyncClient(trust_env=trust_env) as c:
+            r = await c.get(url, timeout=timeout)
             if r.status_code >= 500:
                 return False, None, None, None
             try:
@@ -70,23 +97,25 @@ def _wrong_database(port: int) -> SystemExit:
     )
 
 
-def _mcp_disabled(port: int) -> SystemExit:
+def _mcp_disabled(target: int | str) -> SystemExit:
+    where = f"port {target}" if isinstance(target, int) else target
     return SystemExit(
-        f"grag proxy: port {port} is serving the requested database, but its MCP "
+        f"grag proxy: {where} is serving the requested database, but its MCP "
         "endpoint is disabled. Restart it with 'grag restart --with-mcp', or stop "
         "it and let auto-serve start an MCP-enabled server."
     )
 
 
-def _invalid_mcp_path(port: int) -> SystemExit:
+def _invalid_mcp_path(target: int | str) -> SystemExit:
+    where = f"port {target}" if isinstance(target, int) else target
     return SystemExit(
-        f"grag proxy: port {port} reported an invalid MCP path in /api/health. "
+        f"grag proxy: {where} reported an invalid MCP path in /api/health. "
         "Refusing to connect; restart the server with a valid --mcp-path."
     )
 
 
 def _validated_mcp_path(
-    *, mcp_enabled: bool | None, mcp_path: str | None, port: int
+    *, mcp_enabled: bool | None, mcp_path: str | None, port: int | str
 ) -> str:
     """Return a canonical mounted path without allowing an origin override."""
     if mcp_enabled is False:
@@ -218,6 +247,107 @@ async def _ensure_server(db_path: Path, port: int, url: str) -> str:
 
     sys.exit(f"grag proxy: server at {url} did not become ready (waited 20 s)")
 
+
+# --- remote mode --------------------------------------------------------------------
+
+
+def _is_loopback_host(host: str) -> bool:
+    candidate = host.strip().strip("[]")
+    if candidate.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_server_url(url: str, *, allow_insecure: bool = False) -> str:
+    """Normalise a remote grag origin (``scheme://host[:port]``).
+
+    Rejects anything but http(s), a path component (the MCP path is discovered
+    from ``/api/health``, never configured on the client), and plain http to a
+    non-loopback host unless ``allow_insecure`` — the bearer token would travel
+    in clear text otherwise. Raises SystemExit with an operator-facing message.
+    """
+    raw = url.strip()
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise SystemExit(
+            f"grag proxy: invalid --server-url {url!r}; expected "
+            "https://host[:port] (or http://127.0.0.1:port for a local server)."
+        )
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise SystemExit(
+            f"grag proxy: --server-url {url!r} must be an origin without a path, "
+            "query or fragment; the MCP mount path is discovered from /api/health."
+        )
+    if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname):
+        if not allow_insecure:
+            raise SystemExit(
+                f"grag proxy: refusing plain http to non-loopback host "
+                f"{parsed.hostname!r}: the bearer token would be sent in clear "
+                "text. Use https://, or set GRAG_ALLOW_INSECURE_HTTP=1 on a "
+                "trusted network."
+            )
+        print(
+            "grag proxy: WARNING — connecting over plain http; the bearer token "
+            "is not encrypted in transit",
+            file=sys.stderr,
+        )
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _remote_changed_database(origin: str) -> SystemExit:
+    return SystemExit(
+        f"grag proxy: {origin} now serves a different database than it did when "
+        "this session started. Refusing to reconnect; restart the MCP client to "
+        "attach to the new database deliberately."
+    )
+
+
+async def _ensure_remote_server(
+    origin: str, pinned: dict, *, wait_seconds: float = _REMOTE_READY_WAIT_SECONDS
+) -> str:
+    """Wait for the remote server to answer /api/health; return its MCP path.
+
+    Nothing is spawned: the host's supervisor owns the server's lifecycle. The
+    first successful probe pins the server's ``database_id``; later probes
+    (heals) must report the same id or the proxy exits rather than silently
+    bridging the client onto a different database.
+    """
+    health_url = f"{origin}/api/health"
+    deadline = time.monotonic() + wait_seconds
+    first = True
+    while True:
+        reachable, actual, mcp_enabled, mcp_path = await _probe_server(
+            health_url, trust_env=True, timeout=_REMOTE_PROBE_TIMEOUT
+        )
+        if reachable:
+            if "database_id" not in pinned:
+                pinned["database_id"] = actual
+            elif pinned["database_id"] != actual:
+                raise _remote_changed_database(origin)
+            return _validated_mcp_path(
+                mcp_enabled=mcp_enabled, mcp_path=mcp_path, port=origin
+            )
+        if first:
+            print(
+                f"grag proxy: waiting for {origin} to become ready",
+                file=sys.stderr,
+            )
+            first = False
+        if time.monotonic() >= deadline:
+            raise ConnectionError(
+                f"grag proxy: server at {origin} did not become ready "
+                f"(waited {int(wait_seconds)} s)"
+            )
+        await asyncio.sleep(1.0)
+
+
+# --- relay ------------------------------------------------------------------------
 
 # How often the proxy re-establishes a dead upstream session before giving up.
 # A session that survives this long resets the counter, so a server that
@@ -362,17 +492,80 @@ def _deliberately_stopped(db_path: Path) -> bool:
     return not pidfile_path(db_path).exists()
 
 
+async def _supervise(
+    *,
+    origin: str,
+    ensure: Callable[[], Awaitable[str]],
+    stopped: Callable[[], bool],
+    http_client,
+    stdio_read,
+    stdio_write,
+) -> None:
+    """Relay stdio ↔ upstream until the client leaves, healing upstream losses.
+
+    ``ensure`` readies the upstream and returns its mounted MCP path;
+    ``stopped`` reports whether the upstream went away deliberately (never
+    resurrected). Shared by the local and remote proxies.
+    """
+    handshake: dict = {}
+    restarts = 0
+    last_error: BaseException | None = None
+    while True:
+        mcp_path = await ensure()
+        # Keep the origin fixed rather than resolving server-provided
+        # metadata as a URL; _validated_mcp_path rejects overrides.
+        mcp_url = f"{origin}{mcp_path}/"
+        started = time.monotonic()
+        try:
+            side = await _relay_session(
+                mcp_url, http_client, stdio_read, stdio_write, handshake
+            )
+            last_error = None
+        except Exception as exc:  # noqa: BLE001 — upstream connect/relay failed
+            side = "upstream"
+            last_error = exc
+        if side == "stdio":
+            return  # MCP client disconnected — normal shutdown
+        if stopped():
+            # Return (not sys.exit) so the stdio context exits cleanly —
+            # a SystemExit through the anyio task group surfaces to the
+            # MCP client as an alarming BaseExceptionGroup traceback.
+            print(
+                "grag proxy: the server was stopped deliberately "
+                "(grag stop); respecting that and exiting. Run "
+                "'grag start' or reconnect the MCP server to resume.",
+                file=sys.stderr,
+            )
+            return
+        if time.monotonic() - started > _HEALTHY_SESSION_SECONDS:
+            restarts = 0
+        restarts += 1
+        if restarts > _MAX_SESSION_RESTARTS:
+            if last_error is not None:
+                raise last_error
+            print(
+                f"grag proxy: upstream server kept failing after "
+                f"{_MAX_SESSION_RESTARTS} restarts; giving up",
+                file=sys.stderr,
+            )
+            return
+        print(
+            f"grag proxy: upstream server lost — reconnecting "
+            f"({restarts}/{_MAX_SESSION_RESTARTS})",
+            file=sys.stderr,
+        )
+        await asyncio.sleep(min(0.5 * restarts, 5.0))
+
+
 async def run_proxy(db_path: Path, port: int, *, api_token: str | None = None) -> None:
     """Bridge stdio ↔ streamable-http, healing the upstream server on crashes."""
     import httpx2
     from mcp.server.stdio import stdio_server
 
+    origin = f"http://127.0.0.1:{port}"
     # Ping the REST health endpoint — GET /mcp/ opens an SSE stream and hangs.
-    health_url = f"http://127.0.0.1:{port}/api/health"
+    health_url = f"{origin}/api/health"
     headers = {"Authorization": f"Bearer {api_token}"} if api_token else None
-    handshake: dict = {}
-    restarts = 0
-    last_error: BaseException | None = None
     async with (
         httpx2.AsyncClient(
             headers=headers,
@@ -384,53 +577,60 @@ async def run_proxy(db_path: Path, port: int, *, api_token: str | None = None) -
         stdio_server() as (stdio_read, stdio_write),
     ):
         try:
-            while True:
-                mcp_path = await _ensure_server(db_path, port, health_url)
-                # Keep the origin fixed rather than resolving server-provided
-                # metadata as a URL; _validated_mcp_path rejects overrides.
-                mcp_url = f"http://127.0.0.1:{port}{mcp_path}/"
-                started = time.monotonic()
-                try:
-                    side = await _relay_session(
-                        mcp_url, http_client, stdio_read, stdio_write, handshake
-                    )
-                    last_error = None
-                except Exception as exc:  # noqa: BLE001 — upstream connect/relay failed
-                    side = "upstream"
-                    last_error = exc
-                if side == "stdio":
-                    return  # MCP client disconnected — normal shutdown
-                if _deliberately_stopped(db_path):
-                    # Return (not sys.exit) so the stdio context exits cleanly —
-                    # a SystemExit through the anyio task group surfaces to the
-                    # MCP client as an alarming BaseExceptionGroup traceback.
-                    print(
-                        "grag proxy: the server was stopped deliberately "
-                        "(grag stop); respecting that and exiting. Run "
-                        "'grag start' or reconnect the MCP server to resume.",
-                        file=sys.stderr,
-                    )
-                    return
-                if time.monotonic() - started > _HEALTHY_SESSION_SECONDS:
-                    restarts = 0
-                restarts += 1
-                if restarts > _MAX_SESSION_RESTARTS:
-                    if last_error is not None:
-                        raise last_error
-                    print(
-                        f"grag proxy: upstream server kept failing after "
-                        f"{_MAX_SESSION_RESTARTS} restarts; giving up",
-                        file=sys.stderr,
-                    )
-                    return
-                print(
-                    f"grag proxy: upstream server lost — restarting and "
-                    f"reconnecting ({restarts}/{_MAX_SESSION_RESTARTS})",
-                    file=sys.stderr,
-                )
-                await asyncio.sleep(min(0.5 * restarts, 5.0))
+            await _supervise(
+                origin=origin,
+                ensure=lambda: _ensure_server(db_path, port, health_url),
+                stopped=lambda: _deliberately_stopped(db_path),
+                http_client=http_client,
+                stdio_read=stdio_read,
+                stdio_write=stdio_write,
+            )
         finally:
             # Close the write end so the stdout_writer task sees EndOfStream.
+            close = getattr(stdio_write, "aclose", None)
+            if close is not None:
+                await close()
+
+
+async def run_remote_proxy(
+    server_url: str,
+    *,
+    api_token: str | None = None,
+    db_name: str | None = None,
+    allow_insecure: bool = False,
+) -> None:
+    """Bridge stdio ↔ a remote grag server; reconnect (never spawn) on loss."""
+    import httpx2
+    from mcp.server.stdio import stdio_server
+
+    origin = validate_server_url(server_url, allow_insecure=allow_insecure)
+    headers: dict[str, str] = {}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    if db_name:
+        headers["x-grag-db"] = db_name
+    pinned: dict = {}
+    async with (
+        httpx2.AsyncClient(
+            headers=headers or None,
+            # No redirects: a redirect could carry the bearer token to another
+            # origin. The operator configures the final origin directly.
+            follow_redirects=False,
+            timeout=httpx2.Timeout(_MCP_DEFAULT_TIMEOUT, read=_MCP_SSE_READ_TIMEOUT),
+            trust_env=True,
+        ) as http_client,
+        stdio_server() as (stdio_read, stdio_write),
+    ):
+        try:
+            await _supervise(
+                origin=origin,
+                ensure=lambda: _ensure_remote_server(origin, pinned),
+                stopped=lambda: False,
+                http_client=http_client,
+                stdio_read=stdio_read,
+                stdio_write=stdio_write,
+            )
+        finally:
             close = getattr(stdio_write, "aclose", None)
             if close is not None:
                 await close()

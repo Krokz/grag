@@ -92,7 +92,7 @@ pip install -e ".[embed-remote]"  # optional: OpenAI-compatible remote embedding
 
 Without an embedder, everything works FTS-only (BM25 is native to the engine).
 
-**LadybugDB compatibility.** This release pins LadybugDB 0.20.1 and guards its
+**LadybugDB compatibility.** This release pins LadybugDB 0.20.2 and guards its
 implicit prepared-write cache in grag's engine. Do not downgrade an existing
 database in place: a file opened by 0.20.x uses storage version 47 and cannot be
 opened by 0.19.1 (storage version 43). A rollback requires exporting with the
@@ -100,9 +100,14 @@ newer compatible grag/Ladybug installation and importing into a fresh database.
 
 **Enabling semantic search:** install `embed-local`, then set `GRAG_EMBED_PROVIDER=fastembed`
 when serving. This uses ONNX Runtime — **no PyTorch** — so grag stays light (~50-100MB,
-model downloads once then works offline). Nodes are (re)embedded lazily on the next
-search whenever their embedding is NULL. First query downloads the model + embeds all
-nodes (seconds); steady state is ~300ms/query on CPU.
+model downloads once then works offline). A serving process (`serve`, `mcp`) runs a
+background embedding worker: ingests return immediately and the worker embeds new
+nodes on its own thread, so neither ingest nor search ever embeds under the write lock
+(`/api/health` reports its counters under `embedding`; `search_knowledge` reports
+`pending_embeddings` while a backlog drains). `GRAG_EMBED_BACKGROUND=0` restores the
+pre-0.6 inline behaviour (embed-on-search, ingest embeds its own writes). One-shot CLI
+commands such as `grag ingest` still embed synchronously. Steady state is ~300ms/query
+on CPU.
 
 ```bash
 pip install -e ".[embed-local]"
@@ -171,7 +176,7 @@ grag --db examples/knowledge.lbdb serve --with-mcp
 python examples/demo_e2e.py
 ```
 
-The UI: force-graph explorer (click = inspect, double-click = expand neighbors), Cypher console (Ctrl+Enter, graph/table results), schema sidebar, and a search bar that shows the exact grounding text an LLM would receive. **Click a label in the legend** (bottom-left) to view just that label and its 1-hop relationships — e.g. click `Decision` to see only your Decisions and what they document/motivate; run a query or reload to reset the canvas. **Export SVG view** saves the currently loaded and filtered canvas view (not the whole database), including directional edges and accessible node/relationship titles.
+The UI: force-graph explorer (click = inspect, double-click = expand neighbors), Cypher console (Ctrl+Enter, graph/table results), schema sidebar, and a search bar that shows the exact grounding text an LLM would receive. **Click a label in the legend** (bottom-left) to view just that label and its 1-hop relationships — e.g. click `Decision` to see only your Decisions and what they document/motivate; run a query or reload to reset the canvas. **Export SVG view** saves the currently loaded and filtered canvas view (not the whole database), including directional edges and accessible node/relationship titles. **Export full SVG** fetches every node and edge in the database (`GET /api/graph/full`, unclamped), settles them with a headless force layout in the browser, and saves the whole mass as one SVG — thousands of nodes are fine; the button shows layout progress while it runs.
 
 **One process, one live file.** LadybugDB is single-writer, so `serve` and `mcp` can't share a `.lbdb` as separate processes. `serve --with-mcp` mounts the MCP endpoint *inside* the REST/UI server, so UI + REST + MCP share one registry and one write connection — the UI watches the AI's writes land live instead of reading a stale copy. Use `--mcp-path` to change the MCP mount path (default `/mcp`).
 
@@ -194,7 +199,7 @@ Cursor / `.cursor/mcp.json`:
 }
 ```
 
-Any MCP client gets these 8 tools:
+Any MCP client gets these 10 tools:
 
 | tool | purpose |
 |---|---|
@@ -204,7 +209,9 @@ Any MCP client gets these 8 tools:
 | `cypher_query` | read-only Cypher; errors come back with correction hints |
 | `search_knowledge` | hybrid BM25 + vector seeds → RRF fusion → per-label diversity cap → k-hop expansion → cited, token-budgeted context |
 | `get_context` | re-pack chosen node ids into a token budget |
-| `ingest_code` | index a repo's code STRUCTURE (Repo/Module/Class/Function + CONTAINS/IMPORTS/CALLS/INHERITS) — never source bodies |
+| `ingest_code` | index a repo's code STRUCTURE (Repo/Module/Class/Function + CONTAINS/IMPORTS/CALLS/INHERITS) — never source bodies; incremental on re-run, `background=true` returns a job id |
+| `ingest_docs` | index Markdown/text files on the server as `Document → Section → Chunk` graphs with `MENTIONS_*` links into the code graph (`sections=false` for flat chunks) |
+| `job_status` | poll a background ingest by id |
 
 Errors are returned as `ERROR: ... HINT: ...` tool output so the model self-corrects in-loop.
 
@@ -218,7 +225,7 @@ grag --db knowledge.lbdb ingest-code src/ ../other-repo [--no-calls] [--max-file
 ```
 
 ```
-# MCP (8th tool) — an agent indexes a repo on demand
+# MCP — an agent indexes a repo on demand (background=true for large trees)
 ingest_code(paths=["src/"], calls=true, max_file_kb=1024)
 ```
 
@@ -233,7 +240,7 @@ graph LR
   F -->|CALLS| F
 ```
 
-Nodes carry path, line range, signature and docstring — **structure only, no source bodies** — with ids like `Module:repo-<canonical-path-sha256>:src/a.py` and `Function:repo-<canonical-path-sha256>:src/a.py#Class.method`. The path-derived repo component prevents same-named checkouts from colliding. Re-ingesting preserves unchanged nodes while pruning removed files, symbols, and generated edges. Three recipes:
+Nodes carry path, line range, signature and docstring — **structure only, no source bodies** — with ids like `Module:repo-<canonical-path-sha256>:src/a.py` and `Function:repo-<canonical-path-sha256>:src/a.py#Class.method`. The path-derived repo component prevents same-named checkouts from colliding. Re-ingesting is incremental: every file is parsed (cross-file `IMPORTS`/`CALLS` need the whole set) but only files whose content changed are rewritten, and pruning of removed files, symbols and generated edges is scoped to those files. Three recipes:
 
 ```cypher
 // what imports module X?
@@ -246,6 +253,27 @@ WHERE r1.id <> r2.id RETURN a.id, b.id
 ```
 
 Python parses via stdlib `ast` in every install. TypeScript/JavaScript/C#/Terraform (`.ts/.tsx/.js/.jsx/.mjs/.cjs/.cs/.tf`) parse via tree-sitter and need `pip install "gragdb[code]"`; without it those files raise a hint-carrying error. CALLS/INHERITS edges are Python-only for now; IMPORTS is best-effort (path/namespace-based) for the tree-sitter languages.
+
+## Cloud / team deployment (one writer, many clients)
+
+grag's engine is embedded and single-writer, so a shared graph is one `grag serve --with-mcp` process that owns the `.lbdb`; nobody else opens the file. Every developer's editor connects to it over HTTPS and CI keeps the code graph fresh through the jobs API. `deploy/` has a Dockerfile, compose file, systemd unit, backup and CI scripts, and a walkthrough.
+
+```bash
+# server (Docker; put a TLS proxy in front)
+export GRAG_API_TOKEN="$(openssl rand -hex 32)"
+docker compose -f deploy/docker-compose.yml up -d --build
+
+# each client: writes .mcp.json with `grag mcp --server-url …` and references
+# ${GRAG_API_TOKEN} from the environment (never stores it)
+grag init --server-url https://grag.example.com
+```
+
+What the server does differently from a laptop:
+
+- **Remote proxy mode.** `grag mcp --server-url URL` (env `GRAG_SERVER_URL`) bridges stdio to the remote server, never spawns a local daemon, and when the server restarts it waits, reconnects and replays the MCP handshake — the client sees at most one failed tool call. It pins the server's `database_id` on first contact and refuses to silently bridge onto a different database. Plain `http://` to a non-loopback host is refused unless `GRAG_ALLOW_INSECURE_HTTP=1`.
+- **Ingest never stalls searches.** `ingest_code` is incremental: every file is parsed (cross-file `IMPORTS`/`CALLS` need the whole set) but only files whose content hash changed touch the write lock. Embeddings are produced by a background worker in the serving process (`/api/health` → `embedding`); neither ingest nor search embeds on the request thread. Long ingests go through `POST /api/jobs/ingest/code` (or `ingest_code(background=true)` + `job_status`) and return a job id.
+- **Specs become a graph.** `grag ingest --sections doc.md` (MCP: `ingest_docs`) turns the heading hierarchy into `Document → Section` nodes (`SUBSECTION_OF`, `NEXT_SECTION`), chunks each section's body under it (`Chunk -IN_SECTION-> Section`, so a hit always cites its section path), and links backtick-mentioned symbols that exist in the code graph (`MENTIONS_FUNCTION` / `MENTIONS_CLASS` / `MENTIONS_MODULE`). Empty `IMPLEMENTS` (Function→Section) / `IMPLEMENTS_CLASS` tables are defined for an agent to fill with the semantic spec↔code links.
+- **Online backup.** `GET /api/export` (CLI: `grag export --url URL -o backup.jsonl`) streams the JSONL export from the live server; `GRAG_WAL_AUTO_RECOVER=1` lets a supervised server recover a corrupt WAL without a TTY.
 
 ## Multiple projects
 
@@ -345,7 +373,12 @@ unless you call `GragConfig.from_env()`.
 | `GRAG_SEARCH_LABEL_CAP` | Integer | `2` | Maximum fused search seeds contributed by one node label before other labels get a turn. Prevents large tables such as `Function` from crowding out `Decision`/`Concept`. Set `0` or a negative value to disable diversity capping and use pure fused rank order. |
 | `GRAG_VECTOR_CODEC` | `fp32`, `int8`, `binary`, `polar` | `fp32` | Storage/candidate-generation codec for newly embedded vectors. `fp32` uses native HNSW; compressed codecs scan compact codes for candidates and exactly rescore shortlisted fp32 vectors. Keep this consistent with existing stored codes or reindex. |
 | `GRAG_POLAR_BITS_PER_DIM` | Float in `(0, 8]` | `1.0` | Approximate angular bits per vector dimension when `GRAG_VECTOR_CODEC=polar`. Higher values improve reconstruction at the cost of larger codes. Read directly by the polar codec. |
-| `GRAG_MAX_EMBED_PER_SEARCH` | Non-negative integer | `256` | Maximum pending nodes embedded synchronously by one search. Remaining work is reported as `pending_embeddings` and drains over later searches. Ingest operations embed their own writes in full. |
+| `GRAG_MAX_EMBED_PER_SEARCH` | Non-negative integer | `256` | Maximum pending nodes embedded synchronously by one search when no background worker is running (`GRAG_EMBED_BACKGROUND=0`, or library use without a serving process). Remaining work is reported as `pending_embeddings`. |
+| `GRAG_EMBED_BACKGROUND` | `1`/`0` | `1` | Serving processes run a background embedding worker per database, so ingests and searches never embed on the request thread. `0` restores inline embedding (search embeds up to `GRAG_MAX_EMBED_PER_SEARCH`; ingest embeds its own writes). |
+| `GRAG_SERVER_URL` | `https://host[:port]` | unset | Remote-server mode: `grag mcp` proxies stdio to this already-running grag server instead of auto-serving a local daemon, and `grag export` streams `GET /api/export` from it. The proxy never opens a `.lbdb`; it reconnects and replays the MCP handshake when the server restarts. |
+| `GRAG_SERVER_DB` | Database name | unset | With `GRAG_SERVER_URL`: the `x-grag-db` header for a multi-db (`--db-dir`) server. |
+| `GRAG_ALLOW_INSECURE_HTTP` | `1`/`0` | `0` | Permit a plain-`http://` `GRAG_SERVER_URL` to a non-loopback host (the bearer token then travels unencrypted). |
+| `GRAG_WAL_AUTO_RECOVER` | `1`/`0` | `0` | Supervised servers (systemd, containers) have no TTY to approve WAL recovery; with `1` a corrupt WAL is recovered on open (writes since the last checkpoint are lost, vector indexes rebuilt) instead of crash-looping. |
 | `GRAG_EMBED_PROVIDER` | `fastembed` or `remote` | unset | Enables vector search. Unset means BM25/FTS-only retrieval. `fastembed` is local; `remote` sends embedding input to the configured OpenAI-compatible service. |
 | `GRAG_EMBED_MODEL` | Provider model name | `BAAI/bge-small-en-v1.5` | Embedding model identifier, used only when `GRAG_EMBED_PROVIDER` is set. Changing it invalidates/rebuilds affected embeddings lazily. |
 | `GRAG_EMBED_DIM` | Positive integer | `384` | Embedding vector width. It must match the selected model's actual output dimension and the stored vector column. |
@@ -381,7 +414,8 @@ in the next table.
 The remaining `GragConfig` fields map directly to the environment table:
 `db_path`, `db_dir`, `buffer_pool_size` (bytes rather than MiB),
 `default_token_budget`, `search_label_cap`, `vector_codec`, `embedder`,
-`api_token`, `cors_origins`, and `max_embed_per_search`. `EmbedderConfig` contains
+`api_token`, `cors_origins`, `max_embed_per_search`, `embed_in_background`, `server_url`,
+`server_db`, `allow_insecure_http`, and `wal_auto_recover`. `EmbedderConfig` contains
 `provider`, `model`, `dim`, `base_url`, and `api_key_env`, with the same meanings and
 defaults listed above.
 
@@ -403,6 +437,10 @@ The configuration-affecting options are:
 | `mcp --port PORT` | `8471` | Standalone HTTP MCP port, or the shared server target for `--auto-serve`. |
 | `mcp --path PATH` | `/mcp` | Standalone streamable HTTP endpoint path. |
 | `mcp --auto-serve` | off | Keeps the client transport on stdio but proxies it to a shared `serve --with-mcp` process, starting that process when needed. |
+| `mcp --server-url URL` | `GRAG_SERVER_URL` or unset | Proxies stdio to a remote, already-running grag server (cloud host). Never spawns a daemon; waits and reconnects across server restarts; pins the server's `database_id`. Takes precedence over `--auto-serve`. |
+| `mcp --server-db NAME` | `GRAG_SERVER_DB` or unset | Database name sent as `x-grag-db` to a multi-db remote server. |
+| `mcp --insecure-http` | off | Allow a plain-http `--server-url` to a non-loopback host. |
+| `ingest --sections` | off | Section-aware Markdown ingest: `Document → Section` nodes from the heading hierarchy, chunks linked `IN_SECTION`, backtick-mentioned code symbols linked to the code graph. Paths may be directories. |
 | `start --host HOST` | `127.0.0.1` | Starts a managed background REST/UI server on this host. Non-loopback binds require `GRAG_API_TOKEN`. |
 | `start --port PORT` | per-database derived port | Port for the managed background server. |
 | `start --no-mcp` | off | Starts the managed server without its normally enabled MCP endpoint. |
@@ -422,12 +460,14 @@ The configuration-affecting options are:
 | `stop --force` | off | Also permits signaling a live legacy/unverified registration; use only after independently verifying its recorded PID. |
 | `doctor` | — | Install/runtime health report: extras, embedder, env, server, code-index staleness vs git HEAD. |
 | `export --out FILE` | stdout | Dumps the database as portable JSONL (schema, nodes, edges, provenance; embeddings excluded). |
+| `export --url URL` | `GRAG_SERVER_URL` or unset | Online backup: streams `GET /api/export` from a running server (bearer from `GRAG_API_TOKEN`) instead of opening the file, which the single-writer lock forbids while a server runs. `--server-db` selects the database on a multi-db server. |
 | `import FILE` | — | Replays a `grag export` file into the selected database (idempotent merge). |
 | `init --client CLIENT` | `auto` | MCP client to configure: `claude`, `cursor`, `windsurf`, `zed`, or auto-detection. |
 | `init --port PORT` | derived per-project | Port written into generated MCP/shared-server configuration. The default is derived from the database path (41000–49151), so initialised projects don't collide on one port. |
 | `init --ingest` | off | Also runs `ingest-code` on the current directory immediately. |
 | `init --remove` | off | Undoes init: removes the grag MCP entry and the CLAUDE.md block. |
 | `init --url` | off | Writes direct HTTP URL transport instead of stdio plus auto-serve; the shared server must already be running. |
+| `init --server-url URL` | unset | Registers a remote grag server instead of a local database: MCP config runs `grag mcp --server-url` (or, with `--url`, points at the server's `/mcp/` with a bearer header), referencing `${GRAG_API_TOKEN}` rather than storing it; CLAUDE.md documents the shared graph. `--server-db` selects a multi-db database. |
 | `init --no-mcp` | off | Skips MCP client configuration. |
 | `init --no-claude-md` | off | Skips the `CLAUDE.md` guidance block. |
 | `init --dry-run` | off | Shows planned configuration writes without changing files. |

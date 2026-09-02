@@ -108,7 +108,7 @@ def test_write_fails_closed_without_cache_internals(engine: Engine, attribute: s
         setattr(conn, attribute, original)
 
     assert "refusing the query" in captured.value.message
-    assert "ladybug==0.20.1" in (captured.value.hint or "")
+    assert "ladybug==0.20.2" in (captured.value.hint or "")
     assert engine.execute("MATCH (n:SafeWrite) RETURN count(n)").rows == [[0]]
 
 
