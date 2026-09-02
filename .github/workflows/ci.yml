@@ -75,15 +75,33 @@ jobs:
           }
           python -c "import ladybug._lbug; print('ladybug native backend OK')"
 
-      - name: Cache LadybugDB extensions
-        # FTS/VECTOR are downloaded from extension.ladybugdb.com on first use.
-        # A slow or flaky CDN otherwise turns into multi-minute stalls (or, on
-        # Windows, an access violation on LOAD of a partial download) inside
-        # pytest. Cache the store across runs and warm it explicitly below.
-        uses: actions/cache@v4
-        with:
-          path: ~/.lbdb/extension
-          key: lbdb-ext-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+      - name: Fetch LadybugDB extensions (cache-busting; verify build generation)
+        # FTS/VECTOR are downloaded from extension.ladybugdb.com on first use and
+        # keyed by MINOR version (v0.20.0/), so a republish for a new patch wheel
+        # replaces them in place. After the 0.20.2 republish Cloudflare edges kept
+        # serving the old binaries to some runners (cache HIT, ETag 6a9306b5…)
+        # and the new ones to others (ETag 6a975e…); a wheel/extension mismatch
+        # segfaults inside ladybug. Fetch with a cache-busting query so the edge
+        # revalidates, insist on the current generation, and pre-place the files
+        # — ladybug's INSTALL leaves an existing file alone.
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux) plat=linux_amd64 ;; macOS) plat=osx_arm64 ;; Windows) plat=win_amd64 ;;
+          esac
+          base="$HOME/.lbdb/extension/0.20.0/$plat"
+          for ext in fts vector; do
+            mkdir -p "$base/$ext"
+            ok=0
+            for attempt in 1 2 3 4 5 6; do
+              url="https://extension.ladybugdb.com/v0.20.0/$plat/$ext/lib$ext.lbug_extension?bust=$RANDOM$RANDOM$attempt"
+              if curl -fsSL "$url" -D hdr.txt -o "$base/$ext/lib$ext.lbug_extension" \
+                 && grep -qiE '^etag: "6a975e' hdr.txt; then ok=1; break; fi
+              echo "attempt $attempt: $(grep -i '^etag' hdr.txt | tr -d '\r')"; sleep $((attempt * 5))
+            done
+            [ "$ok" = 1 ] || { echo "::error::CDN kept serving a pre-0.20.2 $ext extension for $plat"; exit 1; }
+            echo "$ext: $(grep -i '^etag' hdr.txt | tr -d '\r') $(wc -c < "$base/$ext/lib$ext.lbug_extension") bytes"
+          done
 
       - name: Warm LadybugDB extensions (with retries)
         shell: bash
