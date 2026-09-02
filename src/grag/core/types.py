@@ -18,6 +18,7 @@ Tool / endpoint contract (MCP tool = REST endpoint, same payloads):
     (ingest, background)              POST /api/jobs/ingest    -> JobRecord (202)
     job_status(job_id)                GET  /api/jobs/{id}      -> JobRecord
     (jobs)                            GET  /api/jobs           -> {"jobs": [JobRecord]}
+    (backup)                          GET  /api/export         -> JSONL stream (grag export)
     (ui)                              GET  /api/graph/sample   -> GraphSample
     (ui)                              GET  /api/graph/full     -> GraphSample
     (ui)                              GET  /api/health         -> {"status": "ok", "version": str}

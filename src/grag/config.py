@@ -105,6 +105,11 @@ class GragConfig(BaseModel):
     # Allow a plain-http (non-TLS) remote server_url on a non-loopback host.
     # The bearer token travels in clear text then — for trusted networks only.
     allow_insecure_http: bool = False
+    # Supervised servers (systemd / containers) have no TTY to approve WAL
+    # recovery on; with this set a corrupt WAL is recovered automatically on
+    # open (writes since the last checkpoint are lost, HNSW indexes rebuilt)
+    # instead of crash-looping under the supervisor. Off by default.
+    wal_auto_recover: bool = False
 
     @classmethod
     def from_env(cls) -> GragConfig:
@@ -135,6 +140,8 @@ class GragConfig(BaseModel):
             cfg.server_db = name
         if insecure := os.environ.get("GRAG_ALLOW_INSECURE_HTTP"):
             cfg.allow_insecure_http = _truthy(insecure)
+        if recover := os.environ.get("GRAG_WAL_AUTO_RECOVER"):
+            cfg.wal_auto_recover = _truthy(recover)
         if provider := os.environ.get("GRAG_EMBED_PROVIDER"):
             cfg.embedder = EmbedderConfig(
                 provider=provider,  # type: ignore[arg-type]

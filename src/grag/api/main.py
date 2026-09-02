@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import grag
@@ -388,6 +388,30 @@ def create_app(config: GragConfig) -> FastAPI:
     @app.get("/api/jobs/{job_id}", response_model=JobRecord)
     def get_job(request: Request, job_id: str) -> JobRecord:
         return resolve(request).get_job(job_id)
+
+    @app.get("/api/export")
+    def export_jsonl(request: Request) -> StreamingResponse:
+        """Online backup: stream the portable JSONL export of the live database.
+
+        The CLI's `grag export` needs exclusive access to the .lbdb (single
+        writer); a serving process cannot be stopped for every backup, so
+        the same stream is offered here. Bearer-protected like every /api
+        route. Reads run on pooled connections, so writes are not blocked.
+        """
+        from grag.transfer import export_lines
+
+        engine = resolve(request).engine
+
+        def body():
+            for line in export_lines(engine):
+                yield line + "\n"
+
+        name = resolve(request).config.db_path.stem or "grag"
+        return StreamingResponse(
+            body(),
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition": f'attachment; filename="{name}.jsonl"'},
+        )
 
     @app.get("/api/graph/sample", response_model=GraphSample)
     def graph_sample(

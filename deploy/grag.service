@@ -1,0 +1,42 @@
+# systemd unit for a bare-metal / VM grag server (alternative to Docker).
+#
+#   sudo cp deploy/grag.service /etc/systemd/system/grag.service
+#   sudo mkdir -p /etc/grag && sudo chmod 700 /etc/grag
+#   printf 'GRAG_API_TOKEN=%s\n' "$(openssl rand -hex 32)" | sudo tee /etc/grag/env
+#   sudo systemctl enable --now grag
+#
+# Install grag for the service user first:
+#   sudo -u grag pipx install 'gragdb[embed-local,code]'
+[Unit]
+Description=grag knowledge-graph server (single writer for the team graph)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=grag
+Group=grag
+EnvironmentFile=/etc/grag/env
+Environment=GRAG_DB_PATH=/var/lib/grag/grag.lbdb
+Environment=GRAG_EMBED_PROVIDER=fastembed
+Environment=GRAG_WAL_AUTO_RECOVER=1
+Environment=HOME=/var/lib/grag
+StateDirectory=grag
+StateDirectoryMode=0700
+ExecStart=/var/lib/grag/.local/bin/grag serve --host 127.0.0.1 --port 47832 --with-mcp
+# Bind to loopback and let a TLS reverse proxy (Caddy/nginx) face the network.
+# To expose directly instead: --host 0.0.0.0 (GRAG_API_TOKEN is still required).
+Restart=always
+RestartSec=3s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/grag
+
+[Install]
+WantedBy=multi-user.target

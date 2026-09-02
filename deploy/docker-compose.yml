@@ -1,0 +1,32 @@
+# One grag server = one writer for the team graph. Clients never open the
+# database file; they talk to this process over HTTPS (put a TLS-terminating
+# reverse proxy such as Caddy/Traefik/nginx in front, or a cloud load balancer).
+services:
+  grag:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: grag:latest
+    restart: unless-stopped            # crash → supervisor restarts; proxies reconnect
+    ports:
+      - "127.0.0.1:47832:47832"        # expose only to the reverse proxy on this host
+    environment:
+      GRAG_API_TOKEN: ${GRAG_API_TOKEN:?set GRAG_API_TOKEN in .env}
+      GRAG_EMBED_PROVIDER: fastembed
+      GRAG_EMBED_MODEL: ${GRAG_EMBED_MODEL:-BAAI/bge-small-en-v1.5}
+      GRAG_EMBED_DIM: ${GRAG_EMBED_DIM:-384}
+      GRAG_BUFFER_POOL_MB: ${GRAG_BUFFER_POOL_MB:-1024}
+      GRAG_WAL_AUTO_RECOVER: "1"
+    volumes:
+      - grag-data:/data                # the .lbdb, WAL, pidfile, model cache
+      - ${GRAG_REPOS_DIR:-./repos}:/repos:ro   # checkouts the server ingests (see ci-ingest.sh)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:47832/api/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    stop_grace_period: 30s             # lets the engine checkpoint on SIGTERM
+
+volumes:
+  grag-data:

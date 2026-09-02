@@ -264,6 +264,18 @@ def main(argv: list[str] | None = None) -> int:
     export.add_argument(
         "--out", "-o", default=None, help="output file (default: stdout)"
     )
+    export.add_argument(
+        "--url",
+        default=None,
+        help="export from a RUNNING server instead of the local file: streams "
+        "GET <url>/api/export with GRAG_API_TOKEN as bearer (online backup; "
+        "env: GRAG_SERVER_URL)",
+    )
+    export.add_argument(
+        "--server-db",
+        default=None,
+        help="with --url: database name on a multi-db (--db-dir) server",
+    )
 
     import_ = sub.add_parser(
         "import", help="replay a 'grag export' JSONL file into this database"
@@ -535,6 +547,24 @@ def main(argv: list[str] | None = None) -> int:
         from grag.core.engine import Engine
         from grag.transfer import export_to
 
+        export_url = args.url or cfg.server_url
+        if export_url:
+            from grag.transfer import export_from_server
+
+            try:
+                n = export_from_server(
+                    export_url,
+                    args.out,
+                    api_token=cfg.api_token,
+                    db_name=args.server_db or cfg.server_db,
+                    allow_insecure=cfg.allow_insecure_http,
+                )
+            except (OSError, SystemExit) as exc:
+                print(f"export failed: {exc}", file=sys.stderr)
+                return 1
+            if args.out:
+                print(f"Exported {n} line(s) from {export_url} to {args.out}", file=sys.stderr)
+            return 0
         if find_server(cfg.db_path) is not None:
             print(
                 "A server is running on this database (single-writer lock).\n"

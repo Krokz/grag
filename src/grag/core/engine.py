@@ -100,11 +100,29 @@ class Engine:
             if db_path == ":memory:" or "wal" not in str(exc).lower():
                 raise
             if not sys.stdin.isatty():
+                if not config.wal_auto_recover:
+                    logger.warning(
+                        "WAL replay failed (%s). Run 'grag reindex' to repair the "
+                        "database, or set GRAG_WAL_AUTO_RECOVER=1 for supervised "
+                        "servers.",
+                        exc,
+                    )
+                    raise
                 logger.warning(
-                    "WAL replay failed (%s). Run 'grag reindex' to repair the database.",
+                    "WAL replay failed (%s); GRAG_WAL_AUTO_RECOVER is set — "
+                    "reopening in failure-tolerant mode. Writes since the last "
+                    "checkpoint are lost and vector indexes will be rebuilt.",
                     exc,
                 )
-                raise
+                self.wal_recovered = True
+                try:
+                    return lb.Database(
+                        db_path,
+                        throw_on_wal_replay_failure=False,
+                        buffer_pool_size=config.buffer_pool_size,
+                    )
+                except TypeError:
+                    return lb.Database(db_path, throw_on_wal_replay_failure=False)
             print(
                 f"\nWARNING: WAL replay failed:\n  {exc}\n\n"
                 "Auto-recovery will reopen the database in failure-tolerant mode.\n"

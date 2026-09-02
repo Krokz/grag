@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -938,3 +939,70 @@ def test_serve_with_mcp_mount_shares_one_db(tmp_path):
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+# --- online export (backup of a live server) ---------------------------------------
+
+
+def test_export_endpoint_streams_jsonl(client):
+    client.post(
+        "/api/schema/define",
+        json={
+            "node_tables": [{"name": "Thing", "properties": [{"name": "title"}]}],
+            "rel_tables": [],
+        },
+    )
+    client.post(
+        "/api/nodes/upsert",
+        json={"nodes": [{"label": "Thing", "key": "t1", "properties": {"title": "x"}}]},
+    )
+    res = client.get("/api/export")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/x-ndjson")
+    lines = [json.loads(line) for line in res.text.splitlines() if line]
+    assert lines[0]["type"] == "grag_export"
+    assert lines[1]["type"] == "schema"
+    assert any(r["type"] == "node" and r["key"] == "t1" for r in lines)
+
+
+def test_export_endpoint_requires_token(token_client):
+    assert token_client.get("/api/export").status_code == 401
+
+
+def test_export_from_server_streams_to_file(tmp_path, monkeypatch):
+    import io
+
+    from grag.transfer import export_from_server
+
+    seen = {}
+
+    class Resp(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        seen["auth"] = req.get_header("Authorization")
+        seen["db"] = req.get_header("X-grag-db")
+        return Resp(b'{"type":"grag_export"}\n{"type":"schema"}\n')
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    out = tmp_path / "backup.jsonl"
+    n = export_from_server(
+        "https://grag.example.com/",
+        str(out),
+        api_token="secret",  # noqa: S106 — test fixture
+        db_name="algo4",
+    )
+    assert n == 2
+    assert seen == {
+        "url": "https://grag.example.com/api/export",
+        "auth": "Bearer secret",
+        "db": "algo4",
+    }
+    assert out.read_text().count("\n") == 2
