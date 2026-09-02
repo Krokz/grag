@@ -458,8 +458,8 @@ def ingest_code(
 
     Returns compact JSON {"repos": n, "modules": n, "classes": n,
     "functions": n, "module_calls": n, "edges": n, "nodes_pruned": n,
-    "edges_pruned": n, "warnings": [...]} — always check "warnings" for
-    skipped files.
+    "edges_pruned": n, "files_parsed": n, "files_unchanged": n,
+    "warnings": [...]} — always check "warnings" for skipped files.
     """
     req = CodeIngestRequest(paths=paths, calls=calls, max_file_kb=max_file_kb)
     resp = service.ingest_code(req)

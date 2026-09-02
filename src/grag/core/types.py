@@ -323,6 +323,11 @@ class CodeIngestRequest(BaseModel):
     paths: list[str]
     calls: bool = True
     max_file_kb: int = 1024
+    # Skip the database writes for files whose content (and parse options)
+    # match the hash recorded at their last ingest. Every file is still
+    # parsed so cross-file IMPORTS/CALLS/INHERITS resolve, but only changed
+    # files' nodes and edges touch the write lock. False forces a full rewrite.
+    incremental: bool = True
 
 
 class CodeIngestResponse(BaseModel):
@@ -334,6 +339,10 @@ class CodeIngestResponse(BaseModel):
     edges: int = 0
     nodes_pruned: int = 0
     edges_pruned: int = 0
+    # Incremental accounting: files parsed this run, and how many of them
+    # were unchanged since their last ingest (their writes were skipped).
+    files_parsed: int = 0
+    files_unchanged: int = 0
     warnings: list[str] = Field(default_factory=list)
 
 
