@@ -55,7 +55,12 @@ def ingest_documents(
 
     The chunk table (id PK, text/meta, searchable) is defined idempotently on
     every call; all chunks go in via one batched upsert_nodes call.
+    ``req.sections`` routes to the section-aware Markdown loader instead.
     """
+    if req.sections:
+        from grag.ingest.markdown import ingest_markdown
+
+        return ingest_markdown(engine, config, req)
     define_schema(
         engine,
         config,
@@ -180,19 +185,28 @@ def _embed_pending(engine: Engine, config: GragConfig, label: str) -> None:
 # --- public: ingest_paths (CLI) ---------------------------------------------------
 
 
-def ingest_paths(config: GragConfig, paths: list[Path]) -> str:
-    """Load .md/.txt/.json/.jsonl files and ingest them as chunked documents.
+def load_paths(paths: list[Path]) -> tuple[list[IngestDocument], list[str], int]:
+    """Load .md/.txt/.json/.jsonl files (directories walked recursively).
 
-    Returns a human-readable summary for the CLI. Unreadable files and
-    unsupported extensions are collected as warnings instead of failing the
-    batch.
+    Returns (documents, warnings, files_read). Unreadable files and
+    unsupported extensions are collected as warnings instead of failing.
     """
-    from grag.service import GragService
-
     documents: list[IngestDocument] = []
     warnings: list[str] = []
     files_read = 0
+    expanded: list[Path] = []
     for path in paths:
+        if path.is_dir():
+            expanded.extend(
+                sorted(
+                    p
+                    for p in path.rglob("*")
+                    if p.is_file() and p.suffix.lower() in _SUPPORTED_SUFFIXES
+                )
+            )
+        else:
+            expanded.append(path)
+    for path in expanded:
         suffix = path.suffix.lower()
         if suffix not in _SUPPORTED_SUFFIXES:
             warnings.append(
@@ -210,18 +224,38 @@ def ingest_paths(config: GragConfig, paths: list[Path]) -> str:
             continue
         documents.extend(loaded)
         files_read += 1
+    return documents, warnings, files_read
 
+
+def ingest_paths(
+    config: GragConfig, paths: list[Path], *, sections: bool = False
+) -> str:
+    """Load .md/.txt/.json/.jsonl files and ingest them as chunked documents
+    (or, with ``sections``, as Document/Section/Chunk graphs).
+
+    Returns a human-readable summary for the CLI.
+    """
+    from grag.service import GragService
+
+    documents, warnings, files_read = load_paths(paths)
     service = GragService(config)
     try:
-        resp = service.ingest(IngestRequest(documents=documents))
+        resp = service.ingest(IngestRequest(documents=documents, sections=sections))
     finally:
         service.close()
 
+    structure = (
+        f" {resp.documents} document node(s), {resp.sections} section(s), "
+        f"{resp.code_links} code link(s);"
+        if sections
+        else ""
+    )
     lines = [
         (
-            f"Ingested {len(documents)} document(s) from {files_read} file(s): "
-            f"{resp.nodes_created} node(s) written, {resp.nodes_pruned} stale node(s) "
-            f"pruned from label '{resp.label}' in {config.db_path}."
+            f"Ingested {len(documents)} document(s) from {files_read} file(s):"
+            f"{structure} "
+            f"{resp.nodes_created} chunk node(s) written, {resp.nodes_pruned} stale "
+            f"node(s) pruned from label '{resp.label}' in {config.db_path}."
         )
     ]
     if warnings:

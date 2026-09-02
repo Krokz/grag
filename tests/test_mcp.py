@@ -26,6 +26,7 @@ FROZEN_TOOLS = {
     "search_knowledge",
     "get_context",
     "ingest_code",
+    "ingest_docs",
     "job_status",
 }
 

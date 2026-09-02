@@ -1,5 +1,5 @@
-"""grag MCP server: the frozen tool contract (7 knowledge tools + ingest_code
-and job_status) over stdio or streamable-http.
+"""grag MCP server: the frozen tool contract (7 knowledge tools + ingest_code,
+ingest_docs and job_status) over stdio or streamable-http.
 
 Tool logic lives in plain module-level functions (a GragService is the first
 argument) so tests exercise them without any MCP machinery. `create_server`
@@ -35,6 +35,7 @@ from grag.core.types import (
     CodeIngestRequest,
     ContextRequest,
     DefineSchemaRequest,
+    IngestRequest,
     MutationSummary,
     NodeTableSpec,
     QueryRequest,
@@ -55,6 +56,7 @@ __all__ = [
     "describe_schema",
     "get_context",
     "ingest_code",
+    "ingest_docs",
     "job_status",
     "run",
     "search_knowledge",
@@ -478,6 +480,59 @@ def ingest_code(
 
 
 @_return_errors
+def ingest_docs(
+    service: GragService,
+    paths: list[str],
+    sections: bool = True,
+    label: str = "Chunk",
+    background: bool = False,
+) -> str:
+    """Index documents (.md/.txt/.json/.jsonl files or directories of them) on
+    the server's filesystem into the graph. With sections=true (default) a
+    Markdown file's heading hierarchy becomes Document -> Section nodes
+    (SUBSECTION_OF / NEXT_SECTION between sections), each section's body is
+    chunked under it (Chunk -IN_SECTION-> Section), and any code symbol the
+    text names in backticks that exists in the code graph gets a
+    MENTIONS_FUNCTION / MENTIONS_CLASS / MENTIONS_MODULE edge. Run ingest_code
+    first so those links resolve. Use this for specs and design documents;
+    sections=false is the flat chunk loader for loose notes.
+
+    Re-running on the same files is an authoritative sync: current sections
+    and chunks are merged, stale ones pruned. Section ids are stable
+    ("<doc>#<heading/slug/path>"), so the empty IMPLEMENTS (Function ->
+    Section) and IMPLEMENTS_CLASS tables are ready for you to record which
+    code realises which part of the spec via upsert_edges.
+
+    Args:
+        paths: files or directories on the server, e.g. ["docs/algo-bible.md"].
+        sections: heading-aware graph (default true) vs flat chunks.
+        label: chunk node label (default "Chunk").
+        background: queue the ingest and return {"id", "status": "queued"};
+            poll job_status(id). Use for large documents.
+
+    Returns compact JSON {"label", "nodes_created", "nodes_pruned",
+    "documents", "sections", "code_links", "files_read", "warnings": [...]}.
+    """
+    from pathlib import Path
+
+    from grag.ingest.loaders import load_paths
+
+    documents, warnings, files_read = load_paths([Path(p) for p in paths])
+    req = IngestRequest(documents=documents, label=label, sections=sections)
+    if background:
+        job = service.submit_ingest(req)
+        payload = job.model_dump()
+        payload["files_read"] = files_read
+        payload["warnings"] = warnings
+        return json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
+    resp = service.ingest(req)
+    payload = resp.model_dump()
+    payload["files_read"] = files_read
+    payload["warnings"] = warnings
+    return json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
+
+
+@_return_errors
 def job_status(service: GragService, job_id: str) -> str:
     """Poll a background job started with ingest_code(background=true).
 
@@ -604,6 +659,19 @@ def create_server(
     ) -> str:
         return ingest_code(
             _resolve_service(registry, ctx), paths, calls, max_file_kb, background
+        )
+
+    @server.tool(name="ingest_docs", description=_doc(ingest_docs))
+    @_return_errors
+    def ingest_docs_tool(
+        paths: list[str],
+        sections: bool = True,
+        label: str = "Chunk",
+        background: bool = False,
+        ctx: Context | None = None,
+    ) -> str:
+        return ingest_docs(
+            _resolve_service(registry, ctx), paths, sections, label, background
         )
 
     @server.tool(name="job_status", description=_doc(job_status))

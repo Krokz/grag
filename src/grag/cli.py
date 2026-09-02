@@ -161,7 +161,14 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     ingest = sub.add_parser("ingest", help="ingest files into the graph")
-    ingest.add_argument("paths", nargs="+")
+    ingest.add_argument("paths", nargs="+", help="files or directories (.md/.txt/.json/.jsonl)")
+    ingest.add_argument(
+        "--sections",
+        action="store_true",
+        help="section-aware Markdown ingest: Document/Section nodes from the "
+        "heading hierarchy, chunks linked to their section, backtick-mentioned "
+        "code symbols linked to the code graph (recommended for specs)",
+    )
 
     ingest_code = sub.add_parser(
         "ingest-code", help="ingest code structure (Repo/Module/Class/Function)"
@@ -457,7 +464,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "ingest":
         from grag.ingest.loaders import ingest_paths
 
-        summary = ingest_paths(cfg, [Path(p) for p in args.paths])
+        summary = ingest_paths(
+            cfg, [Path(p) for p in args.paths], sections=args.sections
+        )
         print(summary)
     elif args.cmd == "ingest-code":
         from grag.ingest.code import ingest_code_paths

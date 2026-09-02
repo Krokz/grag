@@ -315,12 +315,20 @@ class IngestRequest(BaseModel):
     chunk: bool = True
     chunk_size: int = 1200  # characters
     chunk_overlap: int = 150
+    # Section-aware mode (grag.ingest.markdown): parse the heading hierarchy
+    # into Document/Section nodes, chunk each section's body under it, and
+    # link backtick-mentioned code symbols to the code graph. False keeps the
+    # flat chunk loader.
+    sections: bool = False
 
 
 class IngestResponse(BaseModel):
     label: str
-    nodes_created: int
+    nodes_created: int  # chunk nodes written
     nodes_pruned: int = 0
+    documents: int = 0  # sections mode: Document nodes written
+    sections: int = 0  # sections mode: Section nodes written
+    code_links: int = 0  # sections mode: MENTIONS_* edges to code symbols
 
 
 class CodeIngestRequest(BaseModel):
