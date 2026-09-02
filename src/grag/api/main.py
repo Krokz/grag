@@ -38,6 +38,7 @@ from grag.core.types import (
     GraphSample,
     IngestRequest,
     IngestResponse,
+    JobRecord,
     MutationSummary,
     QueryRequest,
     QueryResponse,
@@ -369,6 +370,24 @@ def create_app(config: GragConfig) -> FastAPI:
     @app.post("/api/ingest/code", response_model=CodeIngestResponse)
     def ingest_code(request: Request, req: CodeIngestRequest) -> CodeIngestResponse:
         return resolve(request).ingest_code(req)
+
+    # -- background jobs: long ingests return a job id instead of blocking -------
+
+    @app.post("/api/jobs/ingest/code", response_model=JobRecord, status_code=202)
+    def submit_ingest_code(request: Request, req: CodeIngestRequest) -> JobRecord:
+        return resolve(request).submit_ingest_code(req)
+
+    @app.post("/api/jobs/ingest", response_model=JobRecord, status_code=202)
+    def submit_ingest(request: Request, req: IngestRequest) -> JobRecord:
+        return resolve(request).submit_ingest(req)
+
+    @app.get("/api/jobs")
+    def list_jobs(request: Request, limit: int = Query(default=50)) -> dict:
+        return {"jobs": [j.model_dump() for j in resolve(request).list_jobs(limit)]}
+
+    @app.get("/api/jobs/{job_id}", response_model=JobRecord)
+    def get_job(request: Request, job_id: str) -> JobRecord:
+        return resolve(request).get_job(job_id)
 
     @app.get("/api/graph/sample", response_model=GraphSample)
     def graph_sample(

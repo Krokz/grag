@@ -1,5 +1,5 @@
-"""grag MCP server: the frozen tool contract (7 knowledge tools + ingest_code)
-over stdio or streamable-http.
+"""grag MCP server: the frozen tool contract (7 knowledge tools + ingest_code
+and job_status) over stdio or streamable-http.
 
 Tool logic lives in plain module-level functions (a GragService is the first
 argument) so tests exercise them without any MCP machinery. `create_server`
@@ -55,6 +55,7 @@ __all__ = [
     "describe_schema",
     "get_context",
     "ingest_code",
+    "job_status",
     "run",
     "search_knowledge",
     "upsert_edges",
@@ -428,6 +429,7 @@ def ingest_code(
     paths: list[str],
     calls: bool = True,
     max_file_kb: int = 1024,
+    background: bool = False,
 ) -> str:
     """Call this on any repository or file tree before answering questions about
     its code structure. Indexes the STRUCTURE of one or more code repositories into the graph:
@@ -456,6 +458,11 @@ def ingest_code(
             skipped automatically.
         calls: also record resolvable CALLS edges (default true).
         max_file_kb: skip files larger than this many KB (default 1024).
+        background: queue the ingest on the server and return immediately
+            with {"id": ..., "status": "queued"}; poll job_status(id) for the
+            result. Use for large trees so this call does not block for
+            minutes. Re-ingests are incremental either way: unchanged files
+            are parsed for cross-file resolution but never rewritten.
 
     Returns compact JSON {"repos": n, "modules": n, "classes": n,
     "functions": n, "module_calls": n, "edges": n, "nodes_pruned": n,
@@ -463,8 +470,28 @@ def ingest_code(
     "warnings": [...]} — always check "warnings" for skipped files.
     """
     req = CodeIngestRequest(paths=paths, calls=calls, max_file_kb=max_file_kb)
+    if background:
+        job = service.submit_ingest_code(req)
+        return json.dumps(job.model_dump(), ensure_ascii=False, separators=_COMPACT)
     resp = service.ingest_code(req)
     return json.dumps(resp.model_dump(), ensure_ascii=False, separators=_COMPACT)
+
+
+@_return_errors
+def job_status(service: GragService, job_id: str) -> str:
+    """Poll a background job started with ingest_code(background=true).
+
+    Args:
+        job_id: the "id" returned when the job was queued.
+
+    Returns compact JSON {"id", "kind", "status": "queued"|"running"|"done"|
+    "failed", "created_at", "started_at", "finished_at", "result", "error"}.
+    "result" holds the ingest response once status is "done"; "error" the
+    failure message when "failed". Unknown ids are an error (jobs live in
+    memory for the serving process).
+    """
+    job = service.get_job(job_id)
+    return json.dumps(job.model_dump(), ensure_ascii=False, separators=_COMPACT)
 
 
 # --- MCP wiring ---------------------------------------------------------------------
@@ -572,9 +599,17 @@ def create_server(
         paths: list[str],
         calls: bool = True,
         max_file_kb: int = 1024,
+        background: bool = False,
         ctx: Context | None = None,
     ) -> str:
-        return ingest_code(_resolve_service(registry, ctx), paths, calls, max_file_kb)
+        return ingest_code(
+            _resolve_service(registry, ctx), paths, calls, max_file_kb, background
+        )
+
+    @server.tool(name="job_status", description=_doc(job_status))
+    @_return_errors
+    def job_status_tool(job_id: str, ctx: Context | None = None) -> str:
+        return job_status(_resolve_service(registry, ctx), job_id)
 
     # Handles for lifecycle management (run closes the registry) and for
     # tests. grag_service is the default service for back-compat; in multi-db

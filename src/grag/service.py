@@ -19,7 +19,7 @@ from grag.core.engine import (
     extract_subgraph,
     is_internal_label,
 )
-from grag.core.errors import GragError, ReadOnlyViolation, SchemaError
+from grag.core.errors import GragError, NotFoundError, ReadOnlyViolation, SchemaError
 from grag.core.ident import validate_identifier
 from grag.core.types import (
     CodeIngestRequest,
@@ -31,6 +31,7 @@ from grag.core.types import (
     GraphStats,
     IngestRequest,
     IngestResponse,
+    JobRecord,
     MutationSummary,
     QueryRequest,
     QueryResponse,
@@ -45,6 +46,7 @@ from grag.core.types import (
 
 if TYPE_CHECKING:
     from grag.embedworker import EmbedWorker
+    from grag.jobs import JobManager
 
 # Write keywords rejected on the read-only cypher_query path. Guardrail, not a
 # security boundary — the LLM contract steers writes to the upsert tools.
@@ -107,11 +109,15 @@ class GragService:
         self.config = config or GragConfig.from_env()
         self.engine = Engine(self.config)
         self.embed_worker: EmbedWorker | None = None
+        # Background ingest jobs (POST /api/jobs/...), created lazily.
+        self._jobs: JobManager | None = None
 
     def close(self) -> None:
         if self.embed_worker is not None:
             self.embed_worker.stop()
             self.embed_worker = None
+        if self._jobs is not None:
+            self._jobs.shutdown()
         self.engine.close()
 
     # -- background embedding -------------------------------------------------------
@@ -135,6 +141,16 @@ class GragService:
 
     def embedding_status(self) -> dict | None:
         return None if self.embed_worker is None else self.embed_worker.status()
+
+    # -- background jobs -----------------------------------------------------------
+
+    @property
+    def jobs(self) -> JobManager:
+        if self._jobs is None:
+            from grag.jobs import JobManager
+
+            self._jobs = JobManager()
+        return self._jobs
 
     # -- schema ---------------------------------------------------------------
 
@@ -236,6 +252,32 @@ class GragService:
         except ImportError:
             raise _not_implemented("grag.ingest.code") from None
         return ingest_code(self.engine, self.config, req)
+
+    # -- background ingest jobs ---------------------------------------------------------
+
+    def submit_ingest_code(self, req: CodeIngestRequest) -> JobRecord:
+        """Queue ingest_code on the service's job thread; poll with get_job."""
+        return self.jobs.submit(
+            "ingest_code", lambda: self.ingest_code(req), req.model_dump()
+        )
+
+    def submit_ingest(self, req: IngestRequest) -> JobRecord:
+        params = req.model_dump(exclude={"documents"})
+        params["documents"] = len(req.documents)
+        return self.jobs.submit("ingest", lambda: self.ingest(req), params)
+
+    def get_job(self, job_id: str) -> JobRecord:
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise NotFoundError(
+                f"No job with id {job_id!r}.",
+                hint="Jobs live in memory for the serving process; list them via "
+                "GET /api/jobs.",
+            )
+        return job
+
+    def list_jobs(self, limit: int = 50) -> list[JobRecord]:
+        return self.jobs.list(limit)
 
     # -- ui -----------------------------------------------------------------------------
 

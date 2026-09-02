@@ -14,6 +14,10 @@ Tool / endpoint contract (MCP tool = REST endpoint, same payloads):
     get_context(req)                  POST /api/context        -> ContextResponse
     ingest_code(req)                  POST /api/ingest/code    -> CodeIngestResponse
     (ingest)                          POST /api/ingest         -> IngestResponse
+    ingest_code(req, background=true) POST /api/jobs/ingest/code -> JobRecord (202)
+    (ingest, background)              POST /api/jobs/ingest    -> JobRecord (202)
+    job_status(job_id)                GET  /api/jobs/{id}      -> JobRecord
+    (jobs)                            GET  /api/jobs           -> {"jobs": [JobRecord]}
     (ui)                              GET  /api/graph/sample   -> GraphSample
     (ui)                              GET  /api/graph/full     -> GraphSample
     (ui)                              GET  /api/health         -> {"status": "ok", "version": str}
@@ -344,6 +348,26 @@ class CodeIngestResponse(BaseModel):
     files_parsed: int = 0
     files_unchanged: int = 0
     warnings: list[str] = Field(default_factory=list)
+
+
+# --- background jobs ----------------------------------------------------------------
+
+JobStatus = Literal["queued", "running", "done", "failed"]
+
+
+class JobRecord(BaseModel):
+    """One background ingest run (POST /api/jobs/...). Kept in memory for the
+    life of the serving process; ``result`` is the ingest response model dump."""
+
+    id: str
+    kind: str  # "ingest_code" | "ingest"
+    status: JobStatus = "queued"
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] | None = None
+    error: str | None = None
 
 
 # --- UI -------------------------------------------------------------------------
