@@ -94,7 +94,10 @@ def test_parameterized_write_and_read(docs: Engine):
     ["_pybind_implicit_prepared_cache", "_prepared_cache_lock"],
 )
 def test_write_fails_closed_without_cache_internals(engine: Engine, attribute: str):
+    """Legacy runtimes (no plan-cache kill switch) must refuse to write when
+    the private eviction internals are missing rather than corrupt data."""
     engine.execute_write("CREATE NODE TABLE SafeWrite(id STRING PRIMARY KEY)")
+    engine.plan_cache_disabled = False  # simulate a pre-0.20.2 runtime
     conn = engine._write_conn
     original = getattr(conn, attribute)
     setattr(conn, attribute, None)
@@ -261,3 +264,31 @@ def test_version_tuple_parsing():
     assert _version_tuple("1.0.0rc1") == (1, 0, 0)
     assert _version_tuple("weird") == ()
     assert _version_tuple("99.0.0") > _version_tuple("0.3.7")
+
+
+# --- plan-cache kill switch (LadybugDB >= 0.20.2) ----------------------------------
+
+
+def test_plan_cache_disabled_on_every_connection(engine: Engine):
+    """The engine turns the cached-plan fast path off (the upstream fix for the
+    #877 family) on the write connection and every pooled reader, so no
+    private-internals eviction is needed for correctness."""
+    assert engine.plan_cache_disabled is True
+    for conn in (engine._write_conn, engine._borrow_reader()):
+        res = engine._run(
+            conn, "CALL current_setting('enable_cached_prepared_statement') RETURN *", None
+        )
+        assert str(res.rows[0][0]).lower() == "none"
+
+
+def test_prepared_memo_stays_bounded(engine: Engine):
+    """Distinct query texts (user Cypher on a long-running server) must not
+    accumulate PreparedStatement objects without bound."""
+    engine.execute_write("CREATE NODE TABLE Memo(id STRING PRIMARY KEY, n INT64)")
+    limit = engine._PREPARED_MEMO_LIMIT
+    for i in range(limit + 40):
+        engine.execute_write(
+            f"CREATE (:Memo {{id: $id, n: {i}}})", {"id": f"m{i}"}
+        )
+    assert len(engine._write_conn._pybind_implicit_prepared_cache) <= limit + 1
+    assert engine.execute("MATCH (m:Memo) RETURN count(m)").rows == [[limit + 40]]

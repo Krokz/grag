@@ -92,8 +92,11 @@ pip install -e ".[embed-remote]"  # optional: OpenAI-compatible remote embedding
 
 Without an embedder, everything works FTS-only (BM25 is native to the engine).
 
-**LadybugDB compatibility.** This release pins LadybugDB 0.20.2 and guards its
-implicit prepared-write cache in grag's engine. Do not downgrade an existing
+**LadybugDB compatibility.** This release pins LadybugDB 0.20.2. grag disables the
+engine's cached-physical-plan fast path on every connection (`CALL
+enable_cached_prepared_statement='none'`, the upstream kill switch for the
+LadybugDB/ladybug#877 family of stale-re-execution bugs) and falls back to per-statement
+eviction of the private prepared-statement cache on older runtimes. Do not downgrade an existing
 database in place: a file opened by 0.20.x uses storage version 47 and cannot be
 opened by 0.19.1 (storage version 43). A rollback requires exporting with the
 newer compatible grag/Ladybug installation and importing into a fresh database.

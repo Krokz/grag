@@ -77,6 +77,9 @@ class Engine:
         self._readers: queue.Queue = queue.Queue()
         self._readers_created = 0
         self._readers_lock = threading.Lock()
+        # LadybugDB >= 0.20.2 exposes a plan-cache kill switch; older runtimes
+        # need the private-cache eviction workaround (see _clear_prepared_cache).
+        self.plan_cache_disabled = self._disable_plan_cache(self._write_conn)
         self._set_timeout(self._write_conn)
         self._preload_extensions()
         if self.wal_recovered:
@@ -271,13 +274,14 @@ class Engine:
     ) -> EngineResult:
         """Run a read query on a pooled connection.
 
-        Reads evict the borrowed connection's cached prepared statements first,
-        exactly like the write path: LadybugDB/ladybug#877 shows the same
-        stale-first-execution bug on reads (joins, ORDER BY, LIMIT/top-k — which
-        covers QUERY_FTS_INDEX and QUERY_VECTOR_INDEX, grag's seed shapes). The
-        FTS seed query text is identical for every search on a table, so a warm
-        reader pool would otherwise replay the first search's results for every
-        subsequent one. See tests/test_read_staleness.py.
+        LadybugDB/ladybug#877 showed re-executed parameterized reads (joins,
+        ORDER BY, LIMIT/top-k — which covers QUERY_FTS_INDEX and
+        QUERY_VECTOR_INDEX, grag's seed shapes) replaying the first execution's
+        rows: the FTS seed query text is identical for every search on a table,
+        so a warm reader pool would answer every search with the first one's
+        results. The engine disables the plan cache on every connection
+        (0.20.2+) and, on older runtimes, evicts the prepared statements before
+        each read. See tests/test_read_staleness.py.
         """
         conn = self._borrow_reader()
         try:
@@ -291,18 +295,17 @@ class Engine:
     ) -> EngineResult:
         """Run a write or DDL statement, serialized on the write connection.
 
-        Writes always evict their cached prepared statement first so ladybug
-        compiles a fresh plan every time.
-
         Ladybug keys its implicit prepared-statement cache on query text and
-        parameter type signature. On 0.20.x, repeated writes with same-typed
-        params have been observed to reuse stale first-execution state instead
-        of re-scanning with the new parameters. The result is silent corruption
-        across the write path: a second upsert of the same node raises
-        duplicate-PK instead of updating; a second ``define_schema`` fails the
-        same way; every edge after the first of its type collapses onto the
-        first edge's endpoints; and a         parameterized DELETE (edge pruning)
-        targets the first row's endpoints instead of its own. See
+        parameter type signature. On 0.20.0/0.20.1, repeated writes with
+        same-typed params reused stale first-execution state instead of
+        re-scanning with the new parameters — silent corruption across the
+        write path: a second upsert of the same node raised duplicate-PK
+        instead of updating; a second ``define_schema`` failed the same way;
+        every edge after the first of its type collapsed onto the first edge's
+        endpoints; a parameterized DELETE (edge pruning) targeted the first
+        row's endpoints. The plan cache is therefore disabled on every
+        connection (0.20.2+ kill switch), with per-statement eviction as the
+        fallback on older runtimes. See
         tests/test_mutate.py::test_upsert_edges_distinct_endpoints_*.
         """
         with self._write_lock:
@@ -313,24 +316,55 @@ class Engine:
                 # Ladybug creates the WAL lazily on the first write.
                 self._secure_database_files()
 
+    # Ladybug's Python layer memoises PreparedStatement objects per (query
+    # text, param types) without bound. With the plan cache disabled that memo
+    # is harmless for correctness but grows with every distinct user Cypher
+    # text on a long-running server, so it is trimmed past this size.
+    _PREPARED_MEMO_LIMIT = 256
+
+    def _disable_plan_cache(self, conn: lb.Connection) -> bool:
+        """Turn off LadybugDB's cached-physical-plan fast path on `conn`.
+
+        ``enable_cached_prepared_statement`` (0.20.2+) is the upstream kill
+        switch for the class of bugs behind LadybugDB/ladybug#841/#870/#877:
+        a re-executed parameterized statement replaying its first execution's
+        state. With it set to ``'none'`` every execution maps a fresh plan and
+        no private-internals eviction is needed. Returns False on runtimes
+        that do not know the setting (the fallback path handles them).
+        """
+        try:
+            self._run(conn, "CALL enable_cached_prepared_statement='none'", None)
+        except GragError:
+            return False
+        return True
+
     def _clear_prepared_write_cache(self) -> None:
         """Drop every cached prepared statement on the write connection."""
         self._clear_prepared_cache(self._write_conn)
 
     def _clear_prepared_cache(self, conn: lb.Connection) -> None:
-        """Drop every cached prepared statement on one connection.
+        """Keep a connection's prepared-statement memo from replaying stale plans.
 
-        Reaches into ladybug's implicit prepared-statement cache. A runtime
-        without these private internals cannot apply the stale-plan workaround,
-        so refuse the query rather than risk silent corruption.
+        With the plan cache disabled at the engine level (0.20.2+), cached
+        entries are safe to reuse — only their unbounded growth is a concern,
+        so the memo is trimmed best-effort once it passes _PREPARED_MEMO_LIMIT.
 
-        Clearing only the caller's query text is insufficient: Ladybug rewrites
-        some parameterized statements before caching them (notably ``to_json``
-        and BLOB parameters), so the cache key can differ from the input Cypher.
-        The cache is per connection; each pooled reader is cleared on borrow.
+        Fallback (older runtimes): drop every cached prepared statement before
+        each execution. This reaches into ladybug's private cache; a runtime
+        without those internals cannot apply the workaround, so the query is
+        refused rather than risking silent corruption. Clearing only the
+        caller's query text is insufficient: Ladybug rewrites some
+        parameterized statements before caching them (notably ``to_json`` and
+        BLOB parameters), so the cache key can differ from the input Cypher.
         """
         cache = getattr(conn, "_pybind_implicit_prepared_cache", None)
         lock = getattr(conn, "_prepared_cache_lock", None)
+        if self.plan_cache_disabled:
+            if cache is not None and lock is not None:
+                with suppress(Exception):
+                    if len(cache) > self._PREPARED_MEMO_LIMIT:
+                        self._evict_prepared(cache, lock)
+            return
         if cache is None or lock is None:
             raise ConfigurationError(
                 "LadybugDB query safety check failed: the runtime does not "
@@ -338,6 +372,10 @@ class Engine:
                 "refusing the query to prevent cached-plan data corruption.",
                 hint="Install the verified runtime with: pip install 'ladybug==0.20.2'.",
             )
+        self._evict_prepared(cache, lock)
+
+    @staticmethod
+    def _evict_prepared(cache: dict, lock: Any) -> None:
         with lock:
             prepared_statements = list(cache.values())
             cache.clear()
@@ -405,6 +443,8 @@ class Engine:
                 if self._readers_created < self.config.max_read_conns:
                     self._readers_created += 1
                     conn = lb.Connection(self._db)
+                    if self.plan_cache_disabled:
+                        self._disable_plan_cache(conn)
                     self._set_timeout(conn)
                     return conn
             return self._readers.get()  # all busy: wait for one to come back
