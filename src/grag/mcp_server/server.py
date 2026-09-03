@@ -225,12 +225,20 @@ def define_schema(
     node_tables: list[dict],
     rel_tables: list[dict],
     if_not_exists: bool = True,
+    allow_similar: bool = False,
 ) -> str:
     """Create node and relationship tables. Use before the first upsert of a
     new entity or relationship kind. Idempotent: with if_not_exists=true
     (default) tables that already exist are left unchanged; set false to fail
     loudly on redefinition. Returns the fresh schema text (same shape as
     describe_schema).
+
+    Reuse before you invent: call describe_schema first and write into the
+    label that already covers the concept. A new name that only differs from
+    an existing one by case, plural or punctuation ("Decisions" vs
+    "Decision", "todo_item" vs "TodoItem") is refused with a hint naming the
+    existing table; pass allow_similar=true only when it is genuinely a
+    different concept.
 
     Args:
         node_tables: e.g. [{"name": "Person", "primary_key": "name",
@@ -251,6 +259,7 @@ def define_schema(
         node_tables=[NodeTableSpec.model_validate(t) for t in node_tables],
         rel_tables=[RelTableSpec.model_validate(t) for t in rel_tables],
         if_not_exists=if_not_exists,
+        allow_similar=allow_similar,
     )
     return service.define_schema(req).text
 
@@ -605,10 +614,15 @@ def create_server(
         node_tables: list[dict],
         rel_tables: list[dict],
         if_not_exists: bool = True,
+        allow_similar: bool = False,
         ctx: Context | None = None,
     ) -> str:
         return define_schema(
-            _resolve_service(registry, ctx), node_tables, rel_tables, if_not_exists
+            _resolve_service(registry, ctx),
+            node_tables,
+            rel_tables,
+            if_not_exists,
+            allow_similar,
         )
 
     @server.tool(name="upsert_nodes", description=_doc(upsert_nodes))

@@ -235,6 +235,36 @@ def _merge_meta(
 # --- public: define_schema --------------------------------------------------------
 
 
+def _canonical_name(name: str) -> str:
+    """Case-, punctuation- and plural-insensitive form for duplicate checks."""
+    base = "".join(ch for ch in name.casefold() if ch.isalnum())
+    if base.endswith("ies") and len(base) > 4:
+        return base[:-3] + "y"
+    if base.endswith(("ses", "xes", "shes", "ches")) and len(base) > 4:
+        return base[:-2]
+    if base.endswith("s") and not base.endswith("ss") and len(base) > 3:
+        return base[:-1]
+    return base
+
+
+def similar_table(name: str, existing: list[str]) -> str | None:
+    """An existing table name that `name` is a near-duplicate of, if any."""
+    target = _canonical_name(name)
+    for other in existing:
+        if other != name and other != META_TABLE and _canonical_name(other) == target:
+            return other
+    return None
+
+
+def _similar_error(name: str, existing: str, kind: str) -> SchemaError:
+    return SchemaError(
+        f"{kind} table '{name}' looks like a duplicate of existing '{existing}'.",
+        hint=f"Reuse '{existing}' (call describe_schema to see its properties) so the "
+        "graph does not fragment across near-identical labels. If it really is a "
+        "different concept, retry with allow_similar=true.",
+    )
+
+
 def define_schema(
     engine: Engine, config: GragConfig, req: DefineSchemaRequest
 ) -> SchemaDocument:
@@ -256,6 +286,10 @@ def define_schema(
                     hint="Choose a different node table name.",
                 )
             continue
+        if not req.allow_similar:
+            twin = similar_table(spec.name, [n for n, k in tables.items() if k == "NODE"])
+            if twin is not None:
+                raise _similar_error(spec.name, twin, "Node")
         engine.execute_write(_node_ddl(spec))
         tables[spec.name] = "NODE"
 
@@ -270,6 +304,10 @@ def define_schema(
                     hint="Choose a different rel table name.",
                 )
             continue
+        if not req.allow_similar:
+            twin = similar_table(rspec.name, [n for n, k in tables.items() if k == "REL"])
+            if twin is not None:
+                raise _similar_error(rspec.name, twin, "Rel")
         for endpoint in (rspec.from_label, rspec.to_label):
             if tables.get(endpoint) != "NODE":
                 node_tables = sorted(

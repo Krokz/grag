@@ -161,6 +161,11 @@ class DefineSchemaRequest(BaseModel):
     node_tables: list[NodeTableSpec] = Field(default_factory=list)
     rel_tables: list[RelTableSpec] = Field(default_factory=list)
     if_not_exists: bool = True
+    # A new table whose name is a near-duplicate of an existing one (case,
+    # plural, punctuation: "Decisions" vs "Decision") is refused with a hint
+    # to reuse it — the main way agent-built graphs fragment. Set True to
+    # create it anyway.
+    allow_similar: bool = False
 
 
 class PropertyDoc(BaseModel):
