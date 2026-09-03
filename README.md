@@ -112,6 +112,10 @@ pre-0.6 inline behaviour (embed-on-search, ingest embeds its own writes). One-sh
 commands such as `grag ingest` still embed synchronously. Steady state is ~300ms/query
 on CPU.
 
+**The code graph refreshes itself.** A serving process fingerprints every indexed checkout (HEAD plus dirty and untracked files) at most every `GRAG_AUTO_REFRESH_INTERVAL_S` seconds on retrieval calls and, when something moved, queues an incremental `ingest_code` on its job thread. The current search is answered from the graph as it was and reports `index_status: "refreshing"` (MCP footer `"index":"refreshing"`); the next one sees the update. `GRAG_AUTO_REFRESH_CODE=0` turns it off; `/api/health` shows the counters under `code_index`.
+
+**Labels converge instead of fragmenting.** `define_schema` refuses a new table whose name only differs from an existing one by case, plural or punctuation (`Decisions` vs `Decision`, `todo_item` vs `TodoItem`) and names the existing table in the hint; `allow_similar=true` creates it anyway. The packaged skill adds a suggested session-memory vocabulary (`Task`, `Decision`, `Insight`, `Question`) and the reuse-before-invent rule, without shipping a fixed schema.
+
 **What gets embedded, and how.** A node's embedding text is its STRING properties minus
 side-cars that only dilute the vector (`meta`, `path`, `heading_path`, `language`, git
 fields — `GRAG_EMBED_EXCLUDE_PROPS` overrides the list; `EmbedderConfig.text_props`
@@ -396,6 +400,8 @@ unless you call `GragConfig.from_env()`.
 | `GRAG_ALLOW_INSECURE_HTTP` | `1`/`0` | `0` | Permit a plain-`http://` `GRAG_SERVER_URL` to a non-loopback host (the bearer token then travels unencrypted). |
 | `GRAG_WAL_AUTO_RECOVER` | `1`/`0` | `0` | Supervised servers (systemd, containers) have no TTY to approve WAL recovery; with `1` a corrupt WAL is recovered on open (writes since the last checkpoint are lost, vector indexes rebuilt) instead of crash-looping. |
 | `GRAG_EMBED_PROVIDER` | `fastembed` or `remote` | unset | Enables vector search. Unset means BM25/FTS-only retrieval. `fastembed` is local; `remote` sends embedding input to the configured OpenAI-compatible service. |
+| `GRAG_AUTO_REFRESH_CODE` | `1`/`0` | `1` | Serving processes re-ingest an indexed checkout automatically when its git state moved (incremental, on the job thread). |
+| `GRAG_AUTO_REFRESH_INTERVAL_S` | Seconds | `30` | Minimum time between drift checks. |
 | `GRAG_EMBED_QUERY_PREFIX` / `GRAG_EMBED_DOC_PREFIX` | String | by model family | Retrieval prefixes prepended to queries / node texts before embedding. Unset picks the family default (bge, nomic, e5, arctic, mxbai); empty string disables. Reindex after changing. |
 | `GRAG_EMBED_EXCLUDE_PROPS` | Comma list | `meta,path,heading_path,language,git_commit,git_branch,ingested_at` | STRING properties left out of the embedding text (they stay in the FTS index). Reindex after changing. |
 | `GRAG_EMBED_MODEL` | Provider model name | `BAAI/bge-small-en-v1.5` | Embedding model identifier, used only when `GRAG_EMBED_PROVIDER` is set. Changing it invalidates/rebuilds affected embeddings lazily. |

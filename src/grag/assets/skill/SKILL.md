@@ -49,9 +49,23 @@ hallucination.
     exists yet.
   When you touch an unfamiliar repo, `ingest_code` it first. Prefer writing the
   fact immediately over batching it for "later" — later is where this gets skipped.
+- **Reuse labels before inventing them.** `describe_schema` first, then write into
+  the table that already covers the concept. `define_schema` refuses a name that
+  only differs from an existing one by case, plural or punctuation (`Decisions` vs
+  `Decision`) — that refusal means "use the existing table", not "pick a third name".
+- **Always pass `source`.** Every upsert takes a `source` (recorded as `_source`,
+  with `_created_at` added automatically): the file, ticket, PR or session the fact
+  came from. That is what lets a later session tell a decision from a guess.
 - **Connect words to code.** Link knowledge nodes to the code they describe (e.g. a
   `Decision`/`Concept` `-[:DOCUMENTS|MENTIONS]->` a `Function`/`Module`), so retrieval
   returns docs *and* the implementation in one cited subgraph.
+
+**The code graph stays fresh on its own.** A serving grag fingerprints every indexed
+checkout (HEAD plus dirty/untracked files) and re-ingests it incrementally in the
+background when something moved, so you do **not** re-run `ingest_code` after each
+edit or commit. When a `search_knowledge` footer says `"index":"refreshing"`, the
+answer reflects the graph from before the latest change — ask again in a moment for
+anything that depends on it. `ingest_code` is for repos that were never indexed.
 
 If grag is genuinely unavailable (no server, no DB), say so and proceed without it —
 don't stall.
@@ -63,8 +77,8 @@ don't stall.
 > GRAG_EMBED_PROVIDER=fastembed grag --db <file> serve --with-mcp
 > ```
 > If the user hasn't enabled this, suggest it. When `search_knowledge` returns
-> `pending_embeddings > 0`, nodes are still being embedded — recall improves as
-> subsequent searches drain the backlog. A footer with no `pending_embeddings`
+> `pending_embeddings > 0`, nodes are still being embedded — the server's background
+> worker drains the backlog on its own within seconds. A footer with no `pending_embeddings`
 > field does **not** mean "fully embedded" — check the `vector` field instead:
 > absent/missing means vector search ran fine, `"vector":"off"` means no
 > embedder is configured on this server process (FTS-only is expected, and
@@ -123,7 +137,7 @@ using the same `--db` path that `grag init` wrote into the MCP config:
 | tool | use |
 |---|---|
 | `describe_schema` | **Call first**, before writing any Cypher. Returns tables, properties, row counts, sample keys as prompt-shaped text. Prevents hallucinated labels. |
-| `define_schema` | Create node/rel tables. Design the graph for the domain. |
+| `define_schema` | Create node/rel tables. Design the graph for the domain — but reuse first: near-duplicate names (case/plural/punctuation of an existing table) are refused with the existing name in the hint; `allow_similar=true` only for a genuinely different concept. |
 | `upsert_nodes` / `upsert_edges` | Idempotent MERGE writes; `_source`/`_created_at` added automatically. |
 | `cypher_query` | Read-only Cypher. Write keywords (CREATE/MERGE/SET/DELETE/...) are rejected — use the upsert tools for writes. |
 | `search_knowledge` | Hybrid BM25 + vector seeds, RRF fusion, **per-label diversity cap**, k-hop expansion, token-budgeted cited context. The main RAG entry point. |
@@ -132,13 +146,38 @@ using the same `--db` path that `grag init` wrote into the MCP config:
 | `ingest_docs` | Index Markdown/text files on the server as a graph: `Document -> Section` from the heading hierarchy (`SUBSECTION_OF`, `NEXT_SECTION`), body chunks `IN_SECTION`, and `MENTIONS_FUNCTION/CLASS/MODULE` edges for backtick-mentioned code symbols. Run `ingest_code` first so those resolve. Use for specs and design docs. |
 | `job_status` | Poll a background ingest (`ingest_code` / `ingest_docs` with `background=true`) by id — use background mode for large trees so the call returns immediately. |
 
+## Session memory: what to record, and how to pick it up next time
+
+grag ships no fixed schema — the graph is yours to design — but session knowledge
+converges when every session speaks the same vocabulary. Unless the project already
+uses other names (check `describe_schema`), use these labels, each with `title`,
+`text`/`body`, `status` where it applies, and always a `source`:
+
+| label | what goes in it | typical links |
+|---|---|---|
+| `Task` | work the user asked for or you took on; `status` open/done/blocked; the acceptance criterion | `CONCERNS_MODULE`/`CONCERNS_FUNCTION` → code it touches |
+| `Decision` | a choice made and **why**, incl. the rejected alternative | `DOCUMENTS` → the code that embodies it; `SUPERSEDES` → an older Decision |
+| `Insight` | a non-obvious fact you established from code or the user (a gotcha, an invariant, a perf number) | `ABOUT_FUNCTION`/`ABOUT_MODULE` |
+| `Question` | something unresolved that needs the user or more digging; `status` open/answered | `ANSWERED_BY` → Decision/Insight |
+| `Concept` / `Integration` | domain terms, patterns, external services (see above) | `MENTIONS_*` → code |
+
+One rel table per (from, to) pair — `CONCERNS_FUNCTION` and `CONCERNS_MODULE` are
+two tables, not one with two targets.
+
+**Session start:** `describe_schema`, then `search_knowledge` for open work
+(`labels=["Task","Question"]`, query like "open") and for the area you are about to
+touch — you inherit what earlier sessions learned instead of rediscovering it.
+**During the session:** write Tasks when work starts, Decisions/Insights as they
+happen, Questions when you are blocked; update `status` rather than adding
+duplicates. **Session end:** mark finished Tasks done, leave open Questions open.
+
 ## Working with an unfamiliar codebase (code graph)
 
 `ingest_code` is the token-frugal way to explore a repo. The loop:
 
 1. **Index first**: call `ingest_code` on the repo path(s) BEFORE reading files.
-   Re-running synchronizes by stable ids and prunes removed files/symbols/edges,
-   so re-index after big changes.
+   Re-running is incremental (only changed files are rewritten) and prunes removed
+   files/symbols/edges; a serving grag does this by itself when the checkout moves.
 2. **Ask structural questions with `cypher_query`** over the code tables:
    - what imports X: `MATCH (m:Module)-[:IMPORTS]->(x:Module) WHERE x.path = '<path>' RETURN m.id`
    - what calls Y: `MATCH (f:Function)-[:CALLS]->(y:Function) WHERE y.path = '<path>' AND y.name = '<name>' RETURN f.id`
@@ -182,6 +221,8 @@ states verbatim, `ingest_code` the repo and `cypher_query` it instead.
   first, then define rels that reference them. (Note: `Chunk` is created by `ingest`,
   not by `define_schema`.)
 - **`cypher_query` is read-only.** Use `upsert_nodes`/`upsert_edges` for writes.
+- **Near-duplicate labels are refused.** `define_schema` with `Decisions` when
+  `Decision` exists returns an ERROR naming the existing table — reuse it.
 - **Properties starting with `_` are grag-internal** (provenance, vector codes). The
   mutation layer rejects caller writes to them.
 - **Node ids are `Label:key`** (e.g. `Module:core.engine`). Use `split_node_id` /
@@ -205,8 +246,8 @@ states verbatim, `ingest_code` the repo and `cypher_query` it instead.
   LOADs FTS + VECTOR once (tolerant when offline), so no path needs per-call handling.
   Extensions are scoped to the Database, so the write conn's LOAD covers pooled readers.
 - **Buffer pool:** creating FTS indexes needs headroom; tests use a 128MB pool.
-- **Vectors:** default codec `int8` (4x smaller, ~0.998 recall). `polar` is experimental
-  (opt-in via `GRAG_VECTOR_CODEC`). Without an embedder, everything works FTS-only.
+- **Vectors:** default codec `fp32` (native HNSW); `int8`/`binary`/`polar` are opt-in via
+  `GRAG_VECTOR_CODEC`. Without an embedder, everything works FTS-only.
 - **Search is diversity-capped per label** (`GRAG_SEARCH_LABEL_CAP`, default 2). A big
   code table can't flood out knowledge tables on a general "why/what" question — a
   `Decision`/`Concept` still surfaces even when hundreds of `Function` nodes match the
@@ -244,10 +285,12 @@ GRAG_EMBED_PROVIDER=fastembed grag --db knowledge.lbdb serve
 
 - Model defaults to `BAAI/bge-small-en-v1.5` (384-dim); override with
   `GRAG_EMBED_MODEL` / `GRAG_EMBED_DIM`. Downloads once to a cache (~50MB), then offline.
-- First search downloads the model and embeds all pending nodes (one-time, seconds);
-  steady state is ~300ms/query on CPU. Server RSS rises from ~120MB to ~530MB.
-- Nodes are (re)embedded lazily whenever their embedding is NULL; text = the node's
-  STRING properties joined. New/updated nodes get embedded on the next search.
+- Steady state is ~300ms/query on CPU. Server RSS rises from ~120MB to ~530MB.
+- A serving grag embeds new/updated nodes on a background worker (ingests return at
+  once; `pending_embeddings` in the search footer shrinks on its own). The embedding
+  text is the node's prose STRING props — `meta`, `path`, `heading_path`, `language`
+  and git fields are left out — and queries/documents get the model family's retrieval
+  prefixes automatically. After changing model or text policy: `grag reindex`.
 - Alternative: `GRAG_EMBED_PROVIDER=remote` + `GRAG_EMBED_BASE_URL` (+`GRAG_EMBED_API_KEY_ENV`)
   for any OpenAI-compatible endpoint — but that sends data off-box. Not the default.
 - Do **not** reach for PyTorch/sentence-transformers (2.5GB, against the lightness
