@@ -300,6 +300,8 @@ def create_app(config: GragConfig) -> FastAPI:
             # None when no embedder is configured; otherwise the background
             # worker's counters (running / idle / embedded_total / last_error).
             "embedding": service.embedding_status() if service is not None else None,
+            # None when auto-refresh is off; otherwise drift-refresh counters.
+            "code_index": service.refresh_status() if service is not None else None,
         }
 
     @app.post(_SHUTDOWN_PATH, include_in_schema=False, status_code=202)

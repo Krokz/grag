@@ -138,6 +138,13 @@ class GragConfig(BaseModel):
     # open (writes since the last checkpoint are lost, HNSW indexes rebuilt)
     # instead of crash-looping under the supervisor. Off by default.
     wal_auto_recover: bool = False
+    # Serving processes re-ingest an indexed checkout automatically when its
+    # git state (HEAD, dirty/untracked files) moved since the last index —
+    # checked at most every auto_refresh_interval_s seconds on retrieval
+    # calls, run incrementally on the job thread. Off means "ingest_code when
+    # you remember to".
+    auto_refresh_code: bool = True
+    auto_refresh_interval_s: float = 30.0
 
     @classmethod
     def from_env(cls) -> GragConfig:
@@ -170,6 +177,10 @@ class GragConfig(BaseModel):
             cfg.allow_insecure_http = _truthy(insecure)
         if recover := os.environ.get("GRAG_WAL_AUTO_RECOVER"):
             cfg.wal_auto_recover = _truthy(recover)
+        if refresh := os.environ.get("GRAG_AUTO_REFRESH_CODE"):
+            cfg.auto_refresh_code = _truthy(refresh)
+        if interval := os.environ.get("GRAG_AUTO_REFRESH_INTERVAL_S"):
+            cfg.auto_refresh_interval_s = float(interval)
         if provider := os.environ.get("GRAG_EMBED_PROVIDER"):
             cfg.embedder = EmbedderConfig(
                 provider=provider,  # type: ignore[arg-type]

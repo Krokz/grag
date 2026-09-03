@@ -103,6 +103,7 @@ def test_health(client):
         "mcp_enabled": False,
         "mcp_path": None,
         "embedding": None,
+        "code_index": {"refreshes": 0, "tracked": 0, "running": False, "last_error": None},
     }
 
 

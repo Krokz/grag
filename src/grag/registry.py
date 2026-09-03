@@ -65,6 +65,8 @@ class ServiceRegistry:
                 # thread ever embeds under the write lock.
                 if self.config.embed_in_background:
                     svc.start_background_embedding()
+                if self.config.auto_refresh_code:
+                    svc.enable_auto_refresh()
                 self._services[key] = svc
         return svc
 

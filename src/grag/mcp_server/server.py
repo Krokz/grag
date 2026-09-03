@@ -367,6 +367,10 @@ def search_knowledge(
     expansion. When the footer includes "pending_embeddings": n, n nodes are
     still awaiting vector embedding — vector recall improves as later
     searches drain that backlog (ingest embeds its own writes in full). When
+    the footer includes "index": "refreshing", the server noticed the indexed
+    checkout changed (new commit or edited files) and is re-indexing it in the
+    background: this answer reflects the graph before the change; ask again in
+    a moment for anything that depends on the latest edits. When
     the footer includes "vector": "off", no embedder is configured for this
     server process — every seed is FTS-only and pending_embeddings will
     never appear (it's always 0), so don't read "no pending_embeddings" as
@@ -393,6 +397,8 @@ def search_knowledge(
         payload["pending_embeddings"] = resp.pending_embeddings
     if resp.vector_status:
         payload["vector"] = resp.vector_status
+    if resp.index_status:
+        payload["index"] = resp.index_status
     footer = json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
     if resp.context:
         return f"{resp.context}\n\n---\n{footer}"

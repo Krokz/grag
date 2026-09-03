@@ -47,6 +47,7 @@ from grag.core.types import (
 if TYPE_CHECKING:
     from grag.embedworker import EmbedWorker
     from grag.jobs import JobManager
+    from grag.refresh import CodeIndexRefresher
 
 # Write keywords rejected on the read-only cypher_query path. Guardrail, not a
 # security boundary — the LLM contract steers writes to the upsert tools.
@@ -111,6 +112,8 @@ class GragService:
         self.embed_worker: EmbedWorker | None = None
         # Background ingest jobs (POST /api/jobs/...), created lazily.
         self._jobs: JobManager | None = None
+        # Drift detector for indexed checkouts (serving processes only).
+        self.refresher: CodeIndexRefresher | None = None
 
     def close(self) -> None:
         if self.embed_worker is not None:
@@ -141,6 +144,23 @@ class GragService:
 
     def embedding_status(self) -> dict | None:
         return None if self.embed_worker is None else self.embed_worker.status()
+
+    # -- code-index auto refresh ---------------------------------------------------
+
+    def enable_auto_refresh(self) -> None:
+        """Re-ingest indexed checkouts when their git state moves (see grag.refresh)."""
+        if self.refresher is None:
+            from grag.refresh import CodeIndexRefresher
+
+            self.refresher = CodeIndexRefresher(
+                self, interval=self.config.auto_refresh_interval_s
+            )
+
+    def _refresh_status(self) -> str | None:
+        return None if self.refresher is None else self.refresher.maybe_refresh()
+
+    def refresh_status(self) -> dict | None:
+        return None if self.refresher is None else self.refresher.status()
 
     # -- background jobs -----------------------------------------------------------
 
@@ -191,6 +211,7 @@ class GragService:
 
     def cypher_query(self, req: QueryRequest) -> QueryResponse:
         _assert_read_only(req.cypher)
+        self._refresh_status()
         limit = req.limit or self.config.default_query_limit
         limit = max(1, min(limit, self.config.max_query_limit))
         # Hide internal tables (_grag_tables & friends): a generic MATCH (n)
@@ -227,7 +248,10 @@ class GragService:
         except ImportError:
             raise _not_implemented("grag.retrieval.search") from None
         req.hops = max(0, min(req.hops, self.config.max_hops))
-        return search_knowledge(self.engine, self.config, req)
+        index_status = self._refresh_status()
+        resp = search_knowledge(self.engine, self.config, req)
+        resp.index_status = index_status  # type: ignore[assignment]
+        return resp
 
     def get_context(self, req: ContextRequest) -> ContextResponse:
         try:
@@ -235,6 +259,7 @@ class GragService:
         except ImportError:
             raise _not_implemented("grag.retrieval.context") from None
         req.hops = max(0, min(req.hops, self.config.max_hops))
+        self._refresh_status()
         return get_context(self.engine, self.config, req)
 
     # -- ingestion --------------------------------------------------------------------

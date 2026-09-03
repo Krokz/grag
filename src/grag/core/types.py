@@ -276,6 +276,10 @@ class SearchResponse(BaseModel):
     # but the vector path raised (bad install, bad config) and silently
     # degraded to FTS-only for this call.
     vector_status: Literal["off", "error"] | None = None
+    # "refreshing" when the serving process detected that an indexed checkout
+    # changed (new commit, edited files) and queued an incremental re-ingest;
+    # this answer came from the graph as it was, the next one sees the update.
+    index_status: Literal["refreshing"] | None = None
 
 
 class ContextRequest(BaseModel):
