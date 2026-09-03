@@ -22,7 +22,8 @@ PROPS = {
 
 def _cfg(**kw) -> EmbedderConfig:
     kw.setdefault("model", "fake")
-    return EmbedderConfig(provider="fastembed", dim=FAKE_DIM, **kw)
+    kw.setdefault("dim", FAKE_DIM)
+    return EmbedderConfig(provider="fastembed", **kw)
 
 
 def test_default_exclusions_drop_side_car_props():
@@ -109,3 +110,49 @@ def test_prefixes_and_exclusions_reach_the_embedder(tmp_path, monkeypatch):
         assert seen == ["search_query: relationships"]
     finally:
         svc.close()
+
+
+def test_fastembed_embedder_sorts_by_length_and_restores_order(monkeypatch):
+    """Length-sorted, small batches for padding efficiency; output order = input order."""
+    import types
+
+    calls: list[tuple[list[str], int]] = []
+
+    class FakeTextEmbedding:
+        def __init__(self, model_name, threads, enable_cpu_mem_arena):
+            self.threads = threads
+
+        def embed(self, texts, batch_size):
+            calls.append((list(texts), batch_size))
+            for t in texts:
+                yield [float(len(t))]
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "fastembed", types.SimpleNamespace(TextEmbedding=FakeTextEmbedding)
+    )
+    emb = vectors.FastembedEmbedder(_cfg(model="BAAI/bge-small-en-v1.5", dim=1, threads=3))
+    out = emb.embed(["a" * 30, "b" * 5, "c" * 300, "d" * 12])
+    assert [v[0] for v in out] == [30.0, 5.0, 300.0, 12.0]  # input order preserved
+    sent, batch = calls[0]
+    assert [len(t) for t in sent] == [5, 12, 30, 300]  # sorted by length
+    assert batch == vectors.FastembedEmbedder._BATCH
+    assert emb._model.threads == 3
+
+
+def test_fastembed_default_threads_is_modest(monkeypatch):
+    import types
+
+    seen = {}
+
+    class FakeTextEmbedding:
+        def __init__(self, model_name, threads, enable_cpu_mem_arena):
+            seen["threads"] = threads
+
+        def embed(self, texts, batch_size):
+            return iter([])
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "fastembed", types.SimpleNamespace(TextEmbedding=FakeTextEmbedding)
+    )
+    vectors.FastembedEmbedder(_cfg(model="BAAI/bge-small-en-v1.5", dim=1))
+    assert 1 <= seen["threads"] <= 4

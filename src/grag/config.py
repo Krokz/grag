@@ -75,6 +75,10 @@ class EmbedderConfig(BaseModel):
     # vectors — run `grag reindex` afterwards.
     query_prefix: str | None = None
     document_prefix: str | None = None
+    # ONNX intra-op threads for the local embedder. None = min(4, CPU count).
+    # (grag < 0.6.1 forced 1 to dodge a SIGSEGV on macOS arm64 with
+    # onnxruntime 1.28; 1.29+ is clean at 4-8 threads.)
+    threads: int | None = None
 
 
 class GragConfig(BaseModel):
@@ -190,6 +194,11 @@ class GragConfig(BaseModel):
                 api_key_env=os.environ.get("GRAG_EMBED_API_KEY_ENV"),
                 query_prefix=os.environ.get("GRAG_EMBED_QUERY_PREFIX"),
                 document_prefix=os.environ.get("GRAG_EMBED_DOC_PREFIX"),
+                threads=(
+                    int(os.environ["GRAG_EMBED_THREADS"])
+                    if os.environ.get("GRAG_EMBED_THREADS")
+                    else None
+                ),
             )
             if excluded := os.environ.get("GRAG_EMBED_EXCLUDE_PROPS"):
                 cfg.embedder.exclude_props = [

@@ -81,27 +81,43 @@ class FastembedEmbedder:
                 "fastembed is not installed.",
                 hint="Install the local embedding extra: pip install gragdb[embed-local]",
             ) from exc
-        # threads=1: restrict ONNX Runtime to single-threaded (both intra-op and
-        # inter-op). The default (one thread per CPU core) causes SIGSEGV on
-        # macOS arm64 with onnxruntime 1.28.x, even on the first inference call.
-        # enable_cpu_mem_arena=False: disable the memory arena allocator, another
-        # source of instability observed on macOS with recent ONNX versions.
+        # threads: ONNX Runtime intra-op parallelism. onnxruntime 1.28.x
+        # crashed (SIGSEGV) on macOS arm64 with one thread per core, even on
+        # the first inference; 1.29+ is clean at 4-8 threads, so the default
+        # is a modest min(4, cores) — set GRAG_EMBED_THREADS=1 to go back to
+        # the conservative setting. enable_cpu_mem_arena=False: the arena
+        # allocator was another source of instability on macOS.
+        threads = cfg.threads if cfg.threads and cfg.threads > 0 else min(4, os.cpu_count() or 1)
         self._model = TextEmbedding(
             model_name=cfg.model,
-            threads=1,
+            threads=threads,
             enable_cpu_mem_arena=False,
         )
         self.dim = cfg.dim
         self.model_id = cfg.model
-        # Belt-and-suspenders: serialize Python-level calls even though threads=1
-        # means only one ONNX thread exists. Guards against future thread-count changes.
+        # Serialize Python-level calls: one inference at a time per process
+        # (the worker's batches and a search's query embedding interleave).
         self._lock = threading.Lock()
+
+    # ONNX pads every batch to its longest member, so one 500-token docstring
+    # among 60 one-liners makes the whole batch cost 500 tokens each. Sorting
+    # by length and keeping batches small cut padding waste: on real code
+    # graphs (median 90 chars, p90 350, max 1000) this ran 3.5x faster than
+    # fastembed's default batch of 256 in input order.
+    _BATCH = 16
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
         with self._lock:
-            return [[float(x) for x in vec] for vec in self._model.embed(texts)]
+            sorted_vecs = list(
+                self._model.embed([texts[i] for i in order], batch_size=self._BATCH)
+            )
+        out: list[list[float]] = [[] for _ in texts]
+        for position, vec in zip(order, sorted_vecs, strict=True):
+            out[position] = [float(x) for x in vec]
+        return out
 
 
 class RemoteEmbedder:

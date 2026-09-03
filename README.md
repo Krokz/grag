@@ -402,6 +402,7 @@ unless you call `GragConfig.from_env()`.
 | `GRAG_EMBED_PROVIDER` | `fastembed` or `remote` | unset | Enables vector search. Unset means BM25/FTS-only retrieval. `fastembed` is local; `remote` sends embedding input to the configured OpenAI-compatible service. |
 | `GRAG_AUTO_REFRESH_CODE` | `1`/`0` | `1` | Serving processes re-ingest an indexed checkout automatically when its git state moved (incremental, on the job thread). |
 | `GRAG_AUTO_REFRESH_INTERVAL_S` | Seconds | `30` | Minimum time between drift checks. |
+| `GRAG_EMBED_THREADS` | Integer | `min(4, cores)` | ONNX Runtime threads for the local embedder. `1` restores the conservative setting from before onnxruntime 1.29. |
 | `GRAG_EMBED_QUERY_PREFIX` / `GRAG_EMBED_DOC_PREFIX` | String | by model family | Retrieval prefixes prepended to queries / node texts before embedding. Unset picks the family default (bge, nomic, e5, arctic, mxbai); empty string disables. Reindex after changing. |
 | `GRAG_EMBED_EXCLUDE_PROPS` | Comma list | `meta,path,heading_path,language,git_commit,git_branch,ingested_at` | STRING properties left out of the embedding text (they stay in the FTS index). Reindex after changing. |
 | `GRAG_EMBED_MODEL` | Provider model name | `BAAI/bge-small-en-v1.5` | Embedding model identifier, used only when `GRAG_EMBED_PROVIDER` is set. Changing it invalidates/rebuilds affected embeddings lazily. |
