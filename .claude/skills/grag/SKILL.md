@@ -142,7 +142,7 @@ using the same `--db` path that `grag init` wrote into the MCP config:
 | `cypher_query` | Read-only Cypher. Write keywords (CREATE/MERGE/SET/DELETE/...) are rejected — use the upsert tools for writes. |
 | `search_knowledge` | Hybrid BM25 + vector seeds, RRF fusion, **per-label diversity cap**, k-hop expansion, token-budgeted cited context. The main RAG entry point. |
 | `get_context` | Re-pack chosen node ids (from a prior search) into a fresh token budget. |
-| `ingest_code` | Index a repo's code STRUCTURE (Python/TS/JS/C#/Terraform/Go): Repo/Module/Class/Function/TerraformModuleCall nodes + CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Structure only — never source bodies. |
+| `ingest_code` | Index a repo's code STRUCTURE (Python, TS/JS/Vue, C#, Terraform, Go, Bash, Java, Kotlin, Rust, C/C++, Ruby, PHP, Swift, Lua, Scala, SQL): Repo/Module/Class/Function/TerraformModuleCall nodes + CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Structure only — never source bodies. |
 | `ingest_docs` | Index Markdown/text files on the server as a graph: `Document -> Section` from the heading hierarchy (`SUBSECTION_OF`, `NEXT_SECTION`), body chunks `IN_SECTION`, and `MENTIONS_FUNCTION/CLASS/MODULE` edges for backtick-mentioned code symbols. Run `ingest_code` first so those resolve. Use for specs and design docs. |
 | `job_status` | Poll a background ingest (`ingest_code` / `ingest_docs` with `background=true`) by id — use background mode for large trees so the call returns immediately. |
 
@@ -189,10 +189,14 @@ duplicates. **Session end:** mark finished Tasks done, leave open Questions open
 3. **Only fetch source bodies when truly needed** — read the file at the node's
    `path`/`line_start`/`line_end` instead of bulk-reading the repo.
 
-Python parses in every install (stdlib ast); TypeScript/JavaScript/C#/Terraform/Go
-need `pip install "gragdb[code]"` (tree-sitter) — without it those files raise
-an ERROR with that install HINT. CALLS/INHERITS edges are Python-only for now;
-IMPORTS for the tree-sitter languages is best-effort (path/namespace-based).
+Python parses in every install (stdlib ast); every other language needs
+`pip install "gragdb[code]"` (tree-sitter + tree-sitter-language-pack) — without it
+those files raise an ERROR with that install HINT. Supported: TypeScript/JavaScript
+(and the `<script>` of `.vue`), C#, Terraform, Go, Bash, Java, Kotlin, Rust, C, C++,
+Ruby, PHP, Swift, Lua, Scala, SQL (tables → `Class`, views/functions/procedures →
+`Function`). CALLS/INHERITS edges are Python-only for now; IMPORTS elsewhere is
+best-effort (path/package-based). Rust `impl` and Swift `extension` methods attach
+to the type when it is declared in the same file, else stand as `Type.method`.
 Go has no lexical class nesting — methods are top-level funcs with a receiver,
 attached to their struct/interface's Class node by receiver type name, and
 interface method sets become Function nodes too. Go IMPORTS resolution is

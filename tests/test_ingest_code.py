@@ -316,7 +316,7 @@ def test_walk_skips_and_warns(engine, tmp_path):
     (pkg / "__pycache__").mkdir()
     (pkg / "__pycache__" / "cached.py").write_text("x = 1\n", encoding="utf-8")
     (pkg / "big.py").write_text("x = 1\n" * 500, encoding="utf-8")  # ~3KB
-    (pkg / "tool.rs").write_text("fn main() {}\n", encoding="utf-8")
+    (pkg / "tool.pl").write_text("sub main { }\n", encoding="utf-8")
     (pkg / "notes.md").write_text("# not code\n", encoding="utf-8")
 
     resp = ingest_code(
@@ -325,7 +325,7 @@ def test_walk_skips_and_warns(engine, tmp_path):
 
     assert resp.modules == 2  # only core.py and main.py
     assert any("big.py" in w and "max_file_kb=1" in w for w in resp.warnings)
-    assert any("'.rs'" in w and "no parser registered" in w for w in resp.warnings)
+    assert any("'.pl'" in w and "no parser registered" in w for w in resp.warnings)
     assert not any("notes.md" in w for w in resp.warnings)  # non-code: silent
     assert not any("ignored.py" in w or "cached.py" in w for w in resp.warnings)
 

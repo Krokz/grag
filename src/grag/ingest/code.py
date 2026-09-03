@@ -212,30 +212,7 @@ def _repo_id(root: Path) -> str:
 # extensions collect one grouped warning instead of being silently ignored
 # (truly unknown extensions — docs, images, lockfiles — are skipped as
 # non-code). Parsed suffixes (.py + the tree-sitter set) are not listed here.
-_UNSUPPORTED_CODE_SUFFIXES = frozenset(
-    {
-        ".c",
-        ".cc",
-        ".cpp",
-        ".cxx",
-        ".h",
-        ".hpp",
-        ".java",
-        ".kt",
-        ".kts",
-        ".lua",
-        ".m",
-        ".php",
-        ".pl",
-        ".rb",
-        ".rs",
-        ".scala",
-        ".sh",
-        ".sql",
-        ".swift",
-        ".vue",
-    }
-)
+_UNSUPPORTED_CODE_SUFFIXES = frozenset({".m", ".mm", ".pl", ".pm", ".ex", ".exs", ".erl", ".hs", ".dart", ".zig", ".r"})
 
 
 # --- walk -----------------------------------------------------------------------
@@ -534,10 +511,18 @@ def _tree_sitter_parser(suffix: str) -> Callable[..., _ParsedModule]:
 # Suffix -> parser dispatch. Python uses stdlib ast; ts/js/cs/tf/go use the
 # tree-sitter wrappers above (Wave B) — neither touches the walk or upsert
 # pipeline.
+_TREE_SITTER_SUFFIXES = (
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".tf", ".go", ".vue",
+    # spec-driven walkers over tree-sitter-language-pack (grag.ingest.code_langs)
+    ".sh", ".bash", ".java", ".kt", ".kts", ".rs", ".c", ".h", ".cc", ".cpp",
+    ".cxx", ".hpp", ".hh", ".hxx", ".rb", ".php", ".swift", ".lua", ".scala",
+    ".sc", ".sql",
+)
 _PARSERS: dict[str, Callable[..., _ParsedModule]] = {".py": _parse_python}
-for _suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".tf", ".go"):
+for _suffix in _TREE_SITTER_SUFFIXES:
     _PARSERS[_suffix] = _tree_sitter_parser(_suffix)
 del _suffix
+SUPPORTED_SUFFIXES = tuple(_PARSERS)
 
 
 # --- resolution (IMPORTS / INHERITS / CALLS over the whole scanned set) ------------
@@ -910,8 +895,7 @@ def ingest_code(
     for suffix in sorted(unsupported):
         warnings.append(
             f"skipped {unsupported[suffix]} file(s) with extension '{suffix}': "
-            "no parser registered (supported: .py, .ts, .tsx, .js, .jsx, "
-            ".mjs, .cjs, .cs, .tf, .go)"
+            f"no parser registered (supported: {', '.join(SUPPORTED_SUFFIXES)})"
         )
 
     # Cross-module resolution: IMPORTS, INHERITS and CALLS need the whole

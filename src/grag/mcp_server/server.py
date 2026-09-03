@@ -456,10 +456,11 @@ def ingest_code(
     import" with cheap cypher_query instead of reading files. Re-running on
     the same tree preserves stable nodes and prunes removed files, symbols,
     and generated edges. Repo ids include a canonical-path hash, so same-named
-    checkouts cannot collide. Parses Python via stdlib ast plus TypeScript/
-    JavaScript/C#/Terraform/Go via tree-sitter (needs the
-    optional extra: pip install "gragdb[code]"; CALLS/INHERITS edges are
-    Python-only for now). Other code files are skipped with a warning.
+    checkouts cannot collide. Parses Python via stdlib ast; TypeScript/
+    JavaScript/Vue, C#, Terraform, Go, Bash, Java, Kotlin, Rust, C, C++, Ruby,
+    PHP, Swift, Lua, Scala and SQL via tree-sitter (needs the optional extra:
+    pip install "gragdb[code]"; CALLS/INHERITS edges are Python-only for
+    now). Other code files are skipped with a warning.
 
     Terraform (.tf) `module` blocks also become TerraformModuleCall nodes
     (name, source, version), one per block, local or registry/git source

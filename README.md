@@ -272,7 +272,7 @@ MATCH (r1:Repo)-[:CONTAINS_REPO_MODULE]->(a:Module)-[:IMPORTS]->(b:Module)<-[:CO
 WHERE r1.id <> r2.id RETURN a.id, b.id
 ```
 
-Python parses via stdlib `ast` in every install. TypeScript/JavaScript/C#/Terraform (`.ts/.tsx/.js/.jsx/.mjs/.cjs/.cs/.tf`) parse via tree-sitter and need `pip install "gragdb[code]"`; without it those files raise a hint-carrying error. CALLS/INHERITS edges are Python-only for now; IMPORTS is best-effort (path/namespace-based) for the tree-sitter languages.
+Python parses via stdlib `ast` in every install. Everything else parses via tree-sitter and needs `pip install "gragdb[code]"`: TypeScript/JavaScript (`.ts .tsx .js .jsx .mjs .cjs`, plus the `<script>` block of `.vue`), C#, Terraform, Go, and — through `tree-sitter-language-pack` — Bash, Java, Kotlin, Rust, C, C++, Ruby, PHP, Swift, Lua, Scala and SQL (tables as `Class`, views/functions/procedures as `Function`). Without the extra those files raise a hint-carrying error. Every language yields Module/Class/Function nodes with signature, doc comment and line range; CALLS/INHERITS edges are Python-only for now; IMPORTS is best-effort (path/package-based) elsewhere. For the language-pack languages a construct the grammar does not know costs one symbol, not the file.
 
 ## Cloud / team deployment (one writer, many clients)
 

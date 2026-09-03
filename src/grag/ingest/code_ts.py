@@ -56,10 +56,39 @@ _SUFFIX_LANGUAGES = {
     ".tf": ("tree_sitter_hcl", "language", "hcl"),
     ".go": ("tree_sitter_go", "language", "go"),
 }
+# The long tail comes from tree-sitter-language-pack and the spec-driven
+# walker in grag.ingest.code_langs (imported lazily in parse_file — it
+# imports helpers from here); "pack" marks the grammar source.
+_PACK_SUFFIXES: dict[str, str] = {
+    ".sh": "bash", ".bash": "bash",
+    ".java": "java",
+    ".kt": "kotlin", ".kts": "kotlin",
+    ".rs": "rust",
+    ".c": "c", ".h": "c",
+    ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".swift": "swift",
+    ".lua": "lua",
+    ".scala": "scala", ".sc": "scala",
+    ".sql": "sql",
+}
+for _suffix, _language in _PACK_SUFFIXES.items():
+    _SUFFIX_LANGUAGES[_suffix] = ("pack", _language, _language)
+# Vue single-file components: the <script> block parses as TS or JS.
+_SUFFIX_LANGUAGES[".vue"] = ("vue", "", "vue")
 
 # Import specifiers may carry an explicit extension; strip it to match the
 # extension-less dotted keys modules are indexed under.
-_CODE_EXTS = (".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".tf", ".json")
+_CODE_EXTS = (
+    ".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".tf", ".json", ".vue",
+    ".sh", ".bash", ".hpp", ".hh", ".hxx", ".h", ".cpp", ".cc", ".cxx", ".c",
+    ".rb", ".php", ".rs", ".lua",
+)
+
+_VUE_SCRIPT = re.compile(
+    r"<script(?P<attrs>[^>]*)>(?P<body>.*?)</script>", re.DOTALL | re.IGNORECASE
+)
 
 
 def _build_parser(suffix: str) -> Any:
@@ -67,6 +96,15 @@ def _build_parser(suffix: str) -> Any:
     grammar wheel lazily. Without the `code` extra, raise ConfigurationError
     with the install hint (surfaces as ERROR+HINT through the tools)."""
     mod_name, factory, _ = _SUFFIX_LANGUAGES[suffix]
+    if mod_name == "pack":
+        try:
+            from tree_sitter_language_pack import get_parser
+        except ImportError as exc:
+            raise ConfigurationError(
+                f"cannot parse '{suffix}' files: the tree-sitter code extra is not installed",
+                hint=_INSTALL_HINT,
+            ) from exc
+        return get_parser(factory)  # type: ignore[arg-type]
     try:
         from tree_sitter import Language, Parser
 
@@ -98,11 +136,18 @@ def parse_file(
     errors — the caller collects it as a warning and skips the file, exactly
     like SyntaxError for .py.
     """
+    from grag.ingest import code_langs
+
     language = _SUFFIX_LANGUAGES[suffix][2]
-    root = _build_parser(suffix).parse(source.encode("utf-8")).root_node
-    if root.has_error:
+    grammar_suffix = suffix
+    if suffix == ".vue":
+        source, grammar_suffix = _vue_script(source)
+        language = _SUFFIX_LANGUAGES[grammar_suffix][2]
+    spec = code_langs.SPECS.get(language)
+    root = _build_parser(grammar_suffix).parse(source.encode("utf-8")).root_node
+    if root.has_error and spec is None:
         raise ValueError("tree-sitter reported syntax errors")
-    dotted = rel_path[: -len(suffix)].replace("/", ".")
+    dotted = code_langs.dotted_module_name(rel_path, suffix, language)
     # TypeScript declaration file: foo.d.ts -> foo
     dotted = dotted.removesuffix(".d")
     parsed = _ParsedModule(
@@ -114,7 +159,9 @@ def parse_file(
         ),
         dotted=dotted,
     )
-    if language == "csharp":
+    if spec is not None:
+        code_langs.walk(spec, root, source.encode("utf-8"), parsed, path, rel_path)
+    elif language == "csharp":
         _walk_csharp(root, source.encode("utf-8"), parsed, path, rel_path)
     elif language == "hcl":
         _walk_hcl(root, source.encode("utf-8"), parsed, rel_path)
@@ -123,6 +170,19 @@ def parse_file(
     else:
         _walk_tsjs(root, source.encode("utf-8"), parsed, path, rel_path)
     return parsed
+
+
+def _vue_script(source: str) -> tuple[str, str]:
+    """The <script> block of a Vue SFC, padded with newlines so line numbers
+    stay those of the .vue file; parsed as .tsx/.ts/.js by its lang attr."""
+    match = _VUE_SCRIPT.search(source)
+    if match is None:
+        return "", ".js"
+    attrs = match.group("attrs")
+    lang = re.search(r"""lang\s*=\s*["']?(\w+)""", attrs)
+    suffix = {"ts": ".ts", "tsx": ".tsx", "jsx": ".jsx"}.get(lang.group(1).lower() if lang else "", ".js")
+    padding = "\n" * source[: match.start("body")].count("\n")
+    return padding + match.group("body"), suffix
 
 
 # --- shared node helpers ---------------------------------------------------------
@@ -149,6 +209,7 @@ def _signature(node: Any, src: bytes) -> str:
 
 
 _XML_TAG = re.compile(r"</?[a-zA-Z][^>]*>")  # C# xmldoc <summary> etc.
+_COMMENT_TYPES = frozenset({"comment", "block_comment", "line_comment"})
 
 
 def _clean_comment(raw: str) -> str:
@@ -156,7 +217,7 @@ def _clean_comment(raw: str) -> str:
     lines = []
     for raw_line in raw.split("\n"):
         cleaned = raw_line.strip()
-        cleaned = re.sub(r"^/{2,}", "", cleaned)
+        cleaned = re.sub(r"^/{2,}|^#+|^--+", "", cleaned)
         cleaned = re.sub(r"^/\*+", "", cleaned)
         cleaned = re.sub(r"\*/$", "", cleaned)
         cleaned = re.sub(r"^\*( |$)", "", cleaned)
@@ -173,9 +234,12 @@ def _docstring(anchor: Any, src: bytes) -> str:
     comments = []
     sib = anchor.prev_named_sibling
     next_start = anchor.start_point[0]
-    while (
-        sib is not None and sib.type == "comment" and sib.end_point[0] == next_start - 1
-    ):
+    while sib is not None and sib.type in _COMMENT_TYPES:
+        # Some grammars (Rust line comments) include the trailing newline, so
+        # the comment "ends" at column 0 of the next row.
+        end_row = sib.end_point[0] - (1 if sib.end_point[1] == 0 else 0)
+        if end_row != next_start - 1:
+            break
         comments.append(_clean_comment(_text(sib, src)))
         next_start = sib.start_point[0]
         sib = sib.prev_named_sibling
