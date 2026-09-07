@@ -219,17 +219,26 @@ def test_new_scope_registered_during_check_must_also_be_verified(indexed, monkey
         return result
 
     monkeypatch.setattr(refresh, "scan_sources", scan)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(_fresh, svc, 250)
-        try:
-            assert entered.wait(1)
-            other = root.with_name("new_scope")
-            _write(other, "invalid").write_text("def invalid(:\n")
-            svc.ingest_code(CodeIngestRequest(paths=[str(other)]))
-        finally:
-            release.set()
-        with pytest.raises(FreshnessError):
-            future.result(timeout=3)
+    svc.read_freshness(ReadPolicy(freshness="wait", freshness_timeout_ms=0))
+    try:
+        assert entered.wait(5)
+        other = root.with_name("new_scope")
+        _write(other, "invalid").write_text("def invalid(:\n")
+        svc.ingest_code(CodeIngestRequest(paths=[str(other)]))
+    finally:
+        release.set()
+    with svc.refresher._condition:
+        assert svc.refresher._condition.wait_for(
+            lambda: not svc.refresher._checking, timeout=5
+        )
+        # A completed check of the old catalog cannot certify the new scope.
+        assert svc.refresher._report().status != "fresh"
+    with pytest.raises(FreshnessError):
+        _fresh(svc, timeout=0)
+    with svc.refresher._condition:
+        assert svc.refresher._condition.wait_for(
+            lambda: not svc.refresher._checking, timeout=5
+        )
     assert svc.refresh_status(detail=True)["tracked"] == 2
 
 
