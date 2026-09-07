@@ -6,15 +6,23 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from grag.project import (
     _BLOCK_END,
     _BLOCK_START,
+    ProjectConfigError,
     SkipOp,
     WriteOp,
     detect_clients,
     plan_claude_md_op,
     plan_mcp_ops,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
 
 # ---------------------------------------------------------------------------
 # detect_clients
@@ -128,7 +136,7 @@ def test_cursor_op_path(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_zed_op_skips_jsonc(tmp_path, monkeypatch):
+def test_zed_op_preserves_jsonc(tmp_path, monkeypatch):
     zed_dir = tmp_path / ".config" / "zed"
     zed_dir.mkdir(parents=True)
     settings = zed_dir / "settings.json"
@@ -138,9 +146,9 @@ def test_zed_op_skips_jsonc(tmp_path, monkeypatch):
     db = tmp_path / "test.lbdb"
     ops = plan_mcp_ops(["zed"], tmp_path, db)
     assert len(ops) == 1
-    assert isinstance(ops[0], SkipOp)
-    assert "JSONC" in ops[0].reason or "comments" in ops[0].reason.lower()
-    assert "context_servers" in ops[0].snippet
+    assert isinstance(ops[0], WriteOp)
+    assert ops[0].content.startswith("// zed settings\n")
+    assert "context_servers" in ops[0].content
 
 
 def test_zed_op_writes_when_plain_json(tmp_path, monkeypatch):
@@ -316,13 +324,12 @@ def test_remove_ops_strip_claude_md_block(tmp_path):
     assert "# Project" in content and "# Rest" in content
 
 
-def test_remove_ops_skip_jsonc_config(tmp_path):
+def test_remove_ops_refuse_invalid_claude_json(tmp_path):
     from grag.project import plan_remove_ops
 
     (tmp_path / ".mcp.json").write_text('// comment\n{"mcpServers": {"grag": {}}}')
-    ops = plan_remove_ops(["claude"], tmp_path)
-    assert len(ops) == 1
-    assert isinstance(ops[0], SkipOp)
+    with pytest.raises(ProjectConfigError, match="left intact"):
+        plan_remove_ops(["claude"], tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +441,7 @@ def test_remove_ops_delete_unmodified_skill(tmp_path, monkeypatch):
     skill = tmp_path / ".claude" / "skills" / "grag" / "SKILL.md"
     assert skill.exists()
     ops = plan_remove_ops(["claude"], tmp_path)
-    assert DeleteOp(skill) in ops
+    assert any(isinstance(op, DeleteOp) and op.path == skill for op in ops)
     apply_ops(ops)
     assert not skill.exists()
 

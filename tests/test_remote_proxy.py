@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -301,6 +302,7 @@ def test_claude_md_block_documents_remote_server(tmp_path):
 
 def test_cli_init_server_url_writes_remote_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
     monkeypatch.setattr("grag.project.detect_clients", lambda root: ["claude"])
     assert (
         cli.main(

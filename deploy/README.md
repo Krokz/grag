@@ -85,6 +85,13 @@ copy — also keep it before upgrading `ladybug`.
 | what | behaviour |
 |---|---|
 | server crashes | supervisor restarts it; connected proxies wait up to 60 s, reconnect, replay the MCP handshake — the client sees at most one failed tool call |
-| corrupt WAL after a hard kill | `GRAG_WAL_AUTO_RECOVER=1` reopens in tolerant mode (writes since last checkpoint lost, vector indexes rebuilt by the worker) instead of crash-looping |
+| WAL/shadow replay failure | startup fails with recovery guidance; stop the supervisor and run `grag --db <file> recover` offline. Originals are preserved and recovery produces a separate verified copy. Partial replay requires `--allow-data-loss`; committed writes may be lost. Review the copy before repointing the server. |
 | long ingest | runs on the jobs thread; reads interleave between its short write-lock holds |
 | server repointed to another database | proxies pin `database_id` on first contact and refuse to bridge silently onto a different graph |
+
+`GRAG_WAL_AUTO_RECOVER` is deprecated and no longer permits in-place lossy recovery.
+Do not remove WAL/shadow files by hand. Keep the recovery bundle (raw snapshots,
+checksums, manifest, and failed attempts) until the recovered data has been reviewed.
+`grag reindex` rebuilds embeddings in an already-openable database; it is not a
+replacement for recovery. Rebuildable code structure and agent-authored memories
+can share a database, so re-ingestion alone does not restore lost decisions.

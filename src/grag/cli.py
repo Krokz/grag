@@ -56,6 +56,14 @@ def _mounted_mcp_path(value: str) -> str:
 
 
 def _config(args: argparse.Namespace) -> GragConfig:
+    from grag.project_identity import (
+        explicit_database,
+        legacy_database,
+        project_root,
+        read_identity,
+        rebase,
+    )
+
     cfg = GragConfig.from_env()
     if getattr(args, "db", None):
         cfg.db_path = Path(args.db)
@@ -66,6 +74,30 @@ def _config(args: argparse.Namespace) -> GragConfig:
         # default db inside db_dir.
         cfg.db_path = GragConfig().db_path
         cfg.db_dir = Path(args.db_dir)
+    if getattr(args, "cmd", None) != "init" and not explicit_database(args):
+        moving = getattr(args, "cmd", None) == "relocate"
+        root = Path(args.new_root).expanduser().resolve() if moving else project_root()
+        identity = read_identity(root, allow_moved=moving)
+        legacy = legacy_database(root) if identity is None else None
+        if identity:
+            db = identity.db_path
+            if moving:
+                db = rebase(db, Path(args.old_root).expanduser().resolve(), root)
+            cfg.db_path = Path(db)
+            if args.cmd in ("serve", "mcp", "start") and args.port is None:
+                args.port = identity.port
+        elif legacy:
+            cfg.db_path = legacy[0]
+            if moving:
+                cfg.db_path = Path(rebase(
+                    str(legacy[0]), Path(args.old_root).expanduser().resolve(), root,
+                ))
+            if args.cmd in ("serve", "mcp", "start") and args.port is None:
+                args.port = legacy[1] or derive_port(legacy[0])
+        else:
+            cfg.db_path = root / "knowledge.lbdb"
+    if getattr(args, "cmd", None) in ("serve", "mcp") and args.port is None:
+        args.port = 8471
     return cfg
 
 
@@ -91,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
 
     serve = sub.add_parser("serve", help="run the REST API + UI server")
     serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=_port_number, default=8471)
+    serve.add_argument("--port", type=_port_number, default=None)
     serve.add_argument(
         "--with-mcp",
         action="store_true",
@@ -122,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     mcp.add_argument(
         "--port",
         type=_port_number,
-        default=8471,
+        default=None,
         help="port for streamable-http transport or the --auto-serve target port (default 8471)",
     )
     mcp.add_argument(
@@ -293,6 +325,22 @@ def main(argv: list[str] | None = None) -> int:
         "--batch-size", type=int, default=128, help="embedding batch size (default 128)"
     )
 
+    recover = sub.add_parser(
+        "recover", help="preserve offline database files and recover a separate copy",
+    )
+    recover.add_argument(
+        "--out-dir", type=Path, default=None,
+        help="new recovery bundle directory (default: unique directory beside the database)",
+    )
+    recover.add_argument(
+        "--allow-data-loss", action="store_true",
+        help="if strict WAL replay fails, permit partial replay on a fresh copy; committed writes may be lost",
+    )
+    recover.add_argument(
+        "--timeout", type=float, default=300,
+        help="maximum seconds per snapshot/replay worker (default: 300)",
+    )
+
     init = sub.add_parser(
         "init",
         help="register grag with your LLM client (MCP config), update CLAUDE.md, "
@@ -364,11 +412,22 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument(
         "--dry-run",
         action="store_true",
-        help="show what would be written without writing anything",
+        help="show proposed file diffs without creating files or backups",
     )
 
+    relocate = sub.add_parser("relocate", help="reconcile an indexed checkout after moving its folder")
+    relocate.add_argument("old_root", help="previous absolute checkout path")
+    relocate.add_argument("new_root", help="current checkout directory")
+    relocate.add_argument("--dry-run", action="store_true", help="preview graph and local config changes without writing")
+
     args = parser.parse_args(argv)
-    cfg = _config(args)
+    from grag.project_files import ProjectConfigError
+
+    try:
+        cfg = _config(args)
+    except (ProjectConfigError, OSError) as exc:
+        print(f"grag {args.cmd}: {exc}", file=sys.stderr)
+        return 1
 
     if args.cmd == "serve":
         import os
@@ -418,6 +477,8 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        app = None
+        shutdown_pending = False
         try:
             app = create_app(cfg)
             server = uvicorn.Server(
@@ -432,9 +493,23 @@ def main(argv: list[str] | None = None) -> int:
                 print(exc.hint, file=sys.stderr)
             return 1
         finally:
-            remove_pidfile(
-                target, owner_pid=os.getpid(), shutdown_token=shutdown_token
-            )
+            if app is not None:
+                outcomes = getattr(app.state, "shutdown_results", None)
+                if outcomes is None:
+                    outcomes = app.state.registry.close()
+                shutdown_pending = any(not result["engine_closed"] for result in outcomes.values())
+            if shutdown_pending:
+                print(
+                    "Database shutdown is still pending or failed; keeping the server "
+                    "registration for diagnosis. Check the daemon log. The process may "
+                    "remain alive until active work finishes.", file=sys.stderr,
+                )
+            else:
+                remove_pidfile(
+                    target, owner_pid=os.getpid(), shutdown_token=shutdown_token
+                )
+        if shutdown_pending:
+            return 1
     elif args.cmd == "mcp":
         server_url = args.server_url or cfg.server_url
         if server_url:
@@ -603,6 +678,34 @@ def main(argv: list[str] | None = None) -> int:
         from grag.retrieval.bench import run_bench
 
         print(run_bench(cfg, codec=args.codec))
+    elif args.cmd == "recover":
+        from grag.core.errors import GragError
+        from grag.recovery import recover_database
+
+        if args.db is None:
+            print("Recovery requires an explicit --db <file> selector.", file=sys.stderr)
+            return 1
+        if args.allow_data_loss:
+            print(
+                "Partial WAL replay is allowed on the recovery copy. Committed writes may be lost; "
+                "the amount cannot be determined automatically.", file=sys.stderr,
+            )
+        try:
+            report = recover_database(
+                cfg, out_dir=args.out_dir, allow_data_loss=args.allow_data_loss, timeout=args.timeout,
+            )
+        except (GragError, OSError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        print(f"Preserved originals and manifest: {report['bundle']}")
+        print(f"Verified recovered copy: {report['recovered_db']}")
+        if report["data_loss_possible"]:
+            print("WARNING: Partial replay was used. Committed writes may be missing.")
+        else:
+            print("Strict replay succeeded; no lossy fallback was used.")
+        print("Original database remains in place. Review the copy before adopting its path.")
+        print("Verification checked reopen, checkpoint, table counts, and sample properties; "
+              "compare important memories with your source records or backup.")
     elif args.cmd == "reindex":
         from grag.core.engine import Engine
         from grag.retrieval.vectors import node_tables, reindex_embeddings
@@ -620,147 +723,199 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nDone. {total} node(s) re-embedded across {len(tables)} table(s).")
         finally:
             engine.close()
+    elif args.cmd == "relocate":
+        from grag.core.errors import GragError
+        from grag.relocation import relocate_checkout
+
+        try:
+            relocate_checkout(cfg, Path(args.old_root), Path(args.new_root), dry_run=args.dry_run)
+        except (ProjectConfigError, GragError, OSError, RuntimeError) as exc:
+            print(f"grag relocate: {exc}", file=sys.stderr)
+            return 1
     elif args.cmd == "init":
-        from grag.project import (
-            DeleteOp,
-            SkipOp,
-            WriteOp,
-            apply_ops,
-            detect_clients,
-            plan_claude_md_op,
-            plan_mcp_ops,
-            plan_remove_ops,
-            plan_skill_ops,
-        )
+        from grag.project_files import ProjectConfigError
 
-        project_root = Path.cwd()
-        # Explicit --db wins; otherwise default to ~/.grag/<project-name>.lbdb
-        if getattr(args, "db", None):
-            db_path = Path(args.db).resolve()
-        else:
-            db_path = Path.home() / ".grag" / f"{project_root.name}.lbdb"
-        # Per-project default port: two initialised projects must not both
-        # claim one port and collide at auto-serve time.
-        port = args.port if args.port is not None else derive_port(db_path)
+        try:
+            return _init_command(args, cfg)
+        except (ProjectConfigError, OSError) as exc:
+            print(f"grag init: {exc}", file=sys.stderr)
+            return 1
+    return 0
 
-        clients = (
-            detect_clients(project_root) if args.client == "auto" else [args.client]
-        )
 
-        if args.remove:
-            remove_ops = plan_remove_ops(clients, project_root)
-            if not remove_ops:
-                print("Nothing to remove — no grag entries found.")
-                return 0
-            if args.dry_run:
-                print("Would write (dry run):")
-                for op in remove_ops:
-                    if isinstance(op, SkipOp):
-                        print(f"  skip:   {op.path}  ({op.reason})")
-                    elif isinstance(op, DeleteOp):
-                        print(f"  delete: {op.path}")
-                    else:
-                        print(f"  update: {op.path}")
-            else:
-                print("Removing grag configuration:")
-                apply_ops(remove_ops)
+
+def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
+    from dataclasses import replace
+
+    from grag.project import (
+        DeleteOp,
+        SkipOp,
+        WriteOp,
+        apply_ops,
+        detect_clients,
+        plan_claude_md_op,
+        plan_mcp_ops,
+        plan_remove_ops,
+        plan_skill_ops,
+        preview_ops,
+    )
+    from grag.project_files import ProjectConfigError
+    from grag.project_identity import (
+        explicit_database,
+        identity_ops,
+        legacy_database,
+        new_identity,
+        read_identity,
+    )
+    from grag.project_identity import (
+        project_root as find_root,
+    )
+
+    project_root = find_root()
+    clients = (
+        detect_clients(project_root) if args.client == "auto" else [args.client]
+    )
+    if args.remove:
+        remove_ops = plan_remove_ops(clients, project_root)
+        if not remove_ops:
+            print("Nothing to remove — no grag entries found.")
             return 0
-
-        server_url = args.server_url
-        if server_url:
-            from grag.proxy import validate_server_url
-
-            try:
-                server_url = validate_server_url(server_url, allow_insecure=True)
-            except SystemExit as exc:
-                print(str(exc), file=sys.stderr)
-                return 2
-            if args.ingest:
-                print(
-                    "--ingest is ignored with --server-url: ingest on the server "
-                    "host (or POST /api/jobs/ingest/code) instead.",
-                    file=sys.stderr,
-                )
-                args.ingest = False
-
-        ops: list[WriteOp | SkipOp | DeleteOp] = []
-        if not args.no_mcp:
-            ops.extend(
-                plan_mcp_ops(
-                    clients,
-                    project_root,
-                    db_path,
-                    stdio=not args.url,
-                    port=port,
-                    server_url=server_url,
-                    server_db=args.server_db,
-                )
-            )
-        if not args.no_claude_md:
-            ops.append(
-                plan_claude_md_op(
-                    project_root,
-                    db_path,
-                    port=port,
-                    server_url=server_url,
-                    server_db=args.server_db,
-                )
-            )
-        if not args.no_skill:
-            ops.extend(plan_skill_ops(clients, project_root))
-
-        if not ops:
-            print("Nothing to do (--no-mcp, --no-claude-md and --no-skill all given).")
-            return 0
-
         if args.dry_run:
-            print("Would write (dry run):")
-            for op in ops:
-                if isinstance(op, SkipOp):
-                    print(f"  skip:   {op.path}  ({op.reason})")
-                elif isinstance(op, DeleteOp):
-                    print(f"  delete: {op.path}")
-                else:
-                    verb = "create" if op.created else "update"
-                    print(f"  {verb}: {op.path}")
-            return 0
+            preview_ops(remove_ops)
+        else:
+            print("Removing grag configuration:")
+            apply_ops(remove_ops)
+        return 0
 
-        print("Writing:")
-        apply_ops(ops)
-
-        if args.ingest:
-            from grag.ingest.code import ingest_code_paths
-
-            cfg.db_path = db_path
-            print(f"\nIngesting code from {project_root} ...")
-            summary = ingest_code_paths(cfg, [project_root])
-            print(summary)
-
-        if server_url:
-            print(
-                "\nDone. Next steps:\n"
-                "  1. Export GRAG_API_TOKEN in the environment your MCP client "
-                "runs in (the config references it, never stores it).\n"
-                "  2. Restart your MCP client (Claude Code / Cursor / ...) so it "
-                "picks up the config.\n"
-                f"  3. Browse the shared graph: {server_url}/"
+    identity = read_identity(project_root, allow_moved=True)
+    copied = identity is not None and Path(identity.root) != project_root
+    if copied and identity and not Path(identity.root).exists():
+        raise ProjectConfigError(
+            "Checkout moved; run grag relocate <old-root> <new-root> before init"
+        )
+    if copied:
+        identity = None
+    if cfg.db_dir is not None:
+        raise ProjectConfigError("init selects one database; use --db <file>, not --db-dir")
+    explicit = explicit_database(args)
+    legacy = (
+        legacy_database(project_root)
+        if not identity and not copied and not explicit and not args.server_url else None
+    )
+    db_path: Path | None
+    if explicit:
+        db_path = cfg.db_path.expanduser().resolve()
+    elif identity:
+        db_path = Path(identity.db_path)
+    else:
+        db_path = legacy[0] if legacy else None
+    if db_path is None and not copied and (project_root / "knowledge.lbdb").exists():
+        db_path = project_root / "knowledge.lbdb"
+    if db_path is None and not copied and not args.server_url:
+        old_default = Path.home() / ".grag" / f"{project_root.name}.lbdb"
+        if old_default.exists():
+            raise ProjectConfigError(
+                f"Legacy database {old_default} exists, but ownership is unknown. "
+                "Use --db <file> init to adopt it or choose a different database explicitly."
             )
-            return 0
+    port = args.port
+    if port is None:
+        if identity and db_path == Path(identity.db_path):
+            port = identity.port
+        elif legacy:
+            port = legacy[1]
+    identity = (
+        replace(identity, db_path=str(db_path), port=port or derive_port(db_path))
+        if identity and db_path else new_identity(project_root, db_path, port)
+    )
+    db_path, port = Path(identity.db_path), identity.port
+
+    server_url = args.server_url
+    if server_url:
+        from grag.proxy import validate_server_url
+
+        try:
+            server_url = validate_server_url(server_url, allow_insecure=True)
+        except SystemExit as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if args.ingest:
+            print(
+                "--ingest is ignored with --server-url: ingest on the server "
+                "host (or POST /api/jobs/ingest/code) instead.",
+                file=sys.stderr,
+            )
+            args.ingest = False
+
+    ops: list[WriteOp | SkipOp | DeleteOp] = []
+    if not args.no_mcp:
+        ops.extend(
+            plan_mcp_ops(
+                clients,
+                project_root,
+                db_path,
+                stdio=not args.url,
+                port=port,
+                server_url=server_url,
+                server_db=args.server_db,
+            )
+        )
+    if not args.no_claude_md:
+        ops.append(
+            plan_claude_md_op(
+                project_root,
+                db_path,
+                port=port,
+                server_url=server_url,
+                server_db=args.server_db,
+            )
+        )
+    if not args.no_skill:
+        ops.extend(plan_skill_ops(clients, project_root))
+
+    if not server_url:
+        ops.extend(identity_ops(project_root, identity))
+
+    if args.dry_run:
+        preview_ops(ops)
+        return 0
+
+    print("Writing:")
+    apply_ops(ops)
+
+    if args.ingest:
+        from grag.ingest.code import ingest_code_paths
+
+        cfg.db_path = db_path
+        print(f"\nIngesting code from {project_root} ...")
+        summary = ingest_code_paths(cfg, [project_root])
+        print(summary)
+
+    if server_url:
         print(
             "\nDone. Next steps:\n"
-            "  1. Restart your MCP client (Claude Code / Cursor / ...) so it "
-            "picks up the config;\n"
-            "     grag then starts automatically when the agent first uses it.\n"
-            + (
-                ""
-                if args.ingest
-                else "  2. Index this repo (ask your agent to run ingest_code, "
-                f"or run:\n       grag --db {db_path} ingest-code {project_root})\n"
-            )
-            + f"  {'2' if args.ingest else '3'}. Browse the graph once the server "
-            f"is up: http://127.0.0.1:{port}/\n"
-            f"     (check with: grag --db {db_path} status)"
+            "  1. Export GRAG_API_TOKEN in the environment your MCP client "
+            "runs in (the config references it, never stores it).\n"
+            "  2. Restart your MCP client (Claude Code / Cursor / ...) so it "
+            "picks up the config.\n"
+            f"  3. Browse the shared graph: {server_url}/"
         )
+        return 0
+    print(
+        "\nDone. Next steps:\n"
+        "  1. Restart your MCP client (Claude Code / Cursor / ...) so it "
+        "picks up the config;\n"
+        "     grag then starts automatically when the agent first uses it.\n"
+        + (
+            ""
+            if args.ingest
+            else "  2. Index this repo (ask your agent to run ingest_code, "
+            f"or run:\n       grag --db {db_path} ingest-code {project_root})\n"
+        )
+        + f"  {'2' if args.ingest else '3'}. Browse the graph once the server "
+        f"is up: http://127.0.0.1:{port}/\n"
+        f"     (check with: grag --db {db_path} status)"
+    )
     return 0
 
 

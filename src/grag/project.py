@@ -4,7 +4,7 @@ Supported clients and their MCP config locations:
     claude   — project-root/.mcp.json        (Claude Code, project-scoped)
     cursor   — project-root/.cursor/mcp.json
     windsurf — ~/.codeium/windsurf/mcp_config.json
-    zed      — ~/.config/zed/settings.json   (JSONC — only if file is absent)
+    zed      — ~/.config/zed/settings.json   (JSONC; comments preserved)
 
 Skill-capable harnesses also get the packaged grag SKILL.md (the operating
 guidance that makes the MCP tools effective):
@@ -19,7 +19,17 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import NamedTuple
+
+from grag.config_document import edit_server
+from grag.project_files import (
+    DeleteOp,
+    ProjectConfigError,
+    SkipOp,
+    WriteOp,
+    snapshot,
+)
+from grag.project_files import apply_ops as apply_ops
+from grag.project_files import preview_ops as preview_ops
 
 # Idempotency markers so we can detect and replace an existing block.
 _BLOCK_START = "<!-- grag:start -->"
@@ -62,17 +72,40 @@ def _fastembed_available() -> bool:
         return False
 
 
-def _load_json(path: Path) -> dict:
-    if path.exists():
+def _config_op(path: Path, section: str, entry: dict | None) -> WriteOp | None:
+    before = snapshot(path)
+    if before.data is None:
+        if entry is None:
+            return None
+        content = (
+            json.dumps({section: {"grag": entry}}, indent=2, ensure_ascii=False) + "\n"
+        )
+    else:
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-    return {}
+            content = edit_server(
+                before.text, section, entry, jsonc=section == "context_servers"
+            )
+        except (ValueError, RecursionError) as exc:
+            detail = (
+                f"line {exc.lineno}, column {exc.colno}: {exc.msg}"
+                if isinstance(exc, json.JSONDecodeError)
+                else "configuration is nested too deeply"
+                if isinstance(exc, RecursionError)
+                else str(exc)
+            )
+            raise ProjectConfigError(
+                f"{path}: {detail}; left intact. Fix the file and retry init"
+            ) from exc
+        if entry is None and content == before.text:
+            return None
+    return WriteOp(path, content, before)
 
 
-def _dump_json(data: dict) -> str:
-    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+def _set_config(path: Path, section: str, entry: dict) -> WriteOp:
+    op = _config_op(path, section, entry)
+    if op is None:
+        raise ProjectConfigError(f"{path}: could not plan registration")
+    return op
 
 
 def _stdio_entry(db_path: Path, port: int = 8471) -> dict:
@@ -150,31 +183,6 @@ def _mcp_entry(
 
 
 # ---------------------------------------------------------------------------
-# write-op plan
-# ---------------------------------------------------------------------------
-
-
-class WriteOp(NamedTuple):
-    path: Path
-    content: str
-    created: bool
-
-
-class SkipOp(NamedTuple):
-    """A file we decided not to write, with a reason and an optional snippet."""
-
-    path: Path
-    reason: str
-    snippet: str = ""
-
-
-class DeleteOp(NamedTuple):
-    """A file init created that --remove should delete outright."""
-
-    path: Path
-
-
-# ---------------------------------------------------------------------------
 # per-client MCP config
 # ---------------------------------------------------------------------------
 
@@ -188,11 +196,9 @@ def _op_claude(
     server_db: str | None = None,
 ) -> WriteOp:
     path = project_root / ".mcp.json"
-    data = _load_json(path)
-    data.setdefault("mcpServers", {})["grag"] = _mcp_entry(
-        db_path, stdio, port, server_url, server_db
+    return _set_config(
+        path, "mcpServers", _mcp_entry(db_path, stdio, port, server_url, server_db)
     )
-    return WriteOp(path, _dump_json(data), not path.exists())
 
 
 def _op_cursor(
@@ -204,11 +210,9 @@ def _op_cursor(
     server_db: str | None = None,
 ) -> WriteOp:
     path = project_root / ".cursor" / "mcp.json"
-    data = _load_json(path)
-    data.setdefault("mcpServers", {})["grag"] = _mcp_entry(
-        db_path, stdio, port, server_url, server_db
+    return _set_config(
+        path, "mcpServers", _mcp_entry(db_path, stdio, port, server_url, server_db)
     )
-    return WriteOp(path, _dump_json(data), not path.exists())
 
 
 def _op_windsurf(
@@ -219,11 +223,9 @@ def _op_windsurf(
     server_db: str | None = None,
 ) -> WriteOp:
     path = Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
-    data = _load_json(path)
-    data.setdefault("mcpServers", {})["grag"] = _mcp_entry(
-        db_path, stdio, port, server_url, server_db
+    return _set_config(
+        path, "mcpServers", _mcp_entry(db_path, stdio, port, server_url, server_db)
     )
-    return WriteOp(path, _dump_json(data), not path.exists())
 
 
 def _op_zed(
@@ -231,30 +233,11 @@ def _op_zed(
     port: int = 8471,
     server_url: str | None = None,
     server_db: str | None = None,
-) -> WriteOp | SkipOp:
-    """Zed context_servers only support stdio; always writes stdio regardless of transport mode.
-
-    Also skips when settings.json contains JSONC comments — merge would lose them.
-    """
+) -> WriteOp:
+    """Zed registrations use stdio; preserve existing JSONC comments/settings."""
     path = Path.home() / ".config" / "zed" / "settings.json"
     entry = _mcp_entry(db_path, True, port, server_url, server_db)
-    if path.exists():
-        raw = path.read_text(encoding="utf-8")
-        if "//" in raw or "/*" in raw:
-            snippet = json.dumps(
-                {"context_servers": {"grag": _zed_command(entry)}},
-                indent=2,
-            )
-            return SkipOp(
-                path,
-                "settings.json contains comments (JSONC) — merge would lose them",
-                snippet,
-            )
-        data = _load_json(path)
-    else:
-        data = {}
-    data.setdefault("context_servers", {})["grag"] = _zed_command(entry)
-    return WriteOp(path, _dump_json(data), not path.exists())
+    return _set_config(path, "context_servers", _zed_command(entry))
 
 
 def _zed_command(entry: dict) -> dict:
@@ -364,8 +347,7 @@ def _skill_paths(clients: list[str], project_root: Path) -> list[Path]:
     if (project_root / ".agents").is_dir() or (Path.home() / ".codex").is_dir():
         dirs.append(".agents")
     return [
-        project_root / d / "skills" / "grag" / "SKILL.md"
-        for d in dict.fromkeys(dirs)
+        project_root / d / "skills" / "grag" / "SKILL.md" for d in dict.fromkeys(dirs)
     ]
 
 
@@ -391,21 +373,17 @@ def plan_skill_ops(clients: list[str], project_root: Path) -> list[WriteOp]:
     template = _skill_template()
     ops: list[WriteOp] = []
     for path in _skill_paths(clients, project_root):
-        if not path.exists():
-            ops.append(WriteOp(path, template, True))
+        before = snapshot(path)
+        if before.data is None:
+            ops.append(WriteOp(path, template, before))
             continue
-        try:
-            current = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if current == template:
+        current = before.text
+        if current == template or current.endswith("\n\n" + template):
             continue  # already current — nothing to do
         if _is_grag_skill(current):
-            ops.append(WriteOp(path, template, False))
+            ops.append(WriteOp(path, template, before))
         else:
-            ops.append(
-                WriteOp(path, current.rstrip("\n") + "\n\n" + template, False)
-            )
+            ops.append(WriteOp(path, current.rstrip("\n") + "\n\n" + template, before))
     return ops
 
 
@@ -421,17 +399,15 @@ def plan_skill_removal_ops(
     template = _skill_template()
     ops: list[DeleteOp | SkipOp | WriteOp] = []
     for path in _skill_paths(clients, project_root):
-        if not path.is_file():
+        before = snapshot(path)
+        if before.data is None:
             continue
-        try:
-            current = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
+        current = before.text
         if current == template:
-            ops.append(DeleteOp(path))
+            ops.append(DeleteOp(path, before))
         elif current.endswith(template):
             prefix = current[: -len(template)].rstrip("\n")
-            ops.append(WriteOp(path, prefix + "\n", False))
+            ops.append(WriteOp(path, prefix + "\n", before))
         else:
             ops.append(
                 SkipOp(path, "SKILL.md was modified after init — remove it manually")
@@ -485,43 +461,33 @@ def plan_claude_md_op(
 ) -> WriteOp:
     """Build a write-op that inserts or replaces the grag block in CLAUDE.md."""
     path = project_root / "CLAUDE.md"
+    before = snapshot(path)
     block = _claude_md_block(db_path, port, server_url, server_db)
-    if path.exists():
-        text = path.read_text(encoding="utf-8")
-        start = text.find(_BLOCK_START)
-        end = text.find(_BLOCK_END)
-        if start != -1 and end != -1:
-            new_text = text[:start] + block + text[end + len(_BLOCK_END) :]
+    if before.data is not None:
+        text = before.text
+        span = _block_span(path, text)
+        newline = "\r\n" if "\r\n" in text else "\n"
+        block = block.replace("\n", newline)
+        if span is not None:
+            start, end = span
+            new_text = text[:start] + block + text[end:]
         else:
-            sep = "\n" if text.endswith("\n") else "\n\n"
-            new_text = text + sep + block + "\n"
-        return WriteOp(path, new_text, False)
-    return WriteOp(path, block + "\n", True)
+            sep = newline if text.endswith("\n") else newline * 2
+            new_text = text + sep + block + newline
+        return WriteOp(path, new_text, before)
+    return WriteOp(path, block + "\n", before)
 
 
-# ---------------------------------------------------------------------------
-# apply
-# ---------------------------------------------------------------------------
-
-
-def apply_ops(ops: list[WriteOp | SkipOp | DeleteOp]) -> None:
-    """Write files and report; print manual instructions for SkipOps."""
-    for op in ops:
-        if isinstance(op, SkipOp):
-            print(f"  skip:   {op.path}  ({op.reason})")
-            if op.snippet:
-                print(f"          Add this to {op.path} manually:\n")
-                for line in op.snippet.splitlines():
-                    print(f"          {line}")
-                print()
-        elif isinstance(op, DeleteOp):
-            print(f"  delete: {op.path}")
-            op.path.unlink(missing_ok=True)
-        else:
-            verb = "create" if op.created else "update"
-            print(f"  {verb}: {op.path}")
-            op.path.parent.mkdir(parents=True, exist_ok=True)
-            op.path.write_text(op.content, encoding="utf-8")
+def _block_span(path: Path, text: str) -> tuple[int, int] | None:
+    starts, ends = text.count(_BLOCK_START), text.count(_BLOCK_END)
+    if starts == ends == 0:
+        return None
+    start, end = text.find(_BLOCK_START), text.find(_BLOCK_END)
+    if starts != 1 or ends != 1 or start >= end:
+        raise ProjectConfigError(
+            f"{path}: ambiguous grag block markers; repair the markers and retry init"
+        )
+    return start, end + len(_BLOCK_END)
 
 
 # ---------------------------------------------------------------------------
@@ -529,27 +495,12 @@ def apply_ops(ops: list[WriteOp | SkipOp | DeleteOp]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _remove_json_entry(path: Path, section: str) -> WriteOp | SkipOp | None:
+def _remove_json_entry(path: Path, section: str) -> WriteOp | None:
     """Drop the 'grag' entry from `section` of a JSON config file.
 
     Returns None when the file doesn't exist or holds no grag entry.
     """
-    if not path.exists():
-        return None
-    raw = path.read_text(encoding="utf-8")
-    if "//" in raw or "/*" in raw:
-        return SkipOp(
-            path, "file contains comments (JSONC) — remove the grag entry manually"
-        )
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return SkipOp(path, "file is not valid JSON — remove the grag entry manually")
-    servers = data.get(section)
-    if not isinstance(servers, dict) or "grag" not in servers:
-        return None
-    del servers["grag"]
-    return WriteOp(path, _dump_json(data), False)
+    return _config_op(path, section, None)
 
 
 def plan_remove_ops(
@@ -585,14 +536,12 @@ def plan_remove_ops(
 def plan_claude_md_removal(project_root: Path) -> WriteOp | None:
     """Strip the grag block from CLAUDE.md; None when there is nothing to strip."""
     path = project_root / "CLAUDE.md"
-    if not path.exists():
+    before = snapshot(path)
+    if before.data is None:
         return None
-    text = path.read_text(encoding="utf-8")
-    start = text.find(_BLOCK_START)
-    end = text.find(_BLOCK_END)
-    if start == -1 or end == -1:
+    text = before.text
+    span = _block_span(path, text)
+    if span is None:
         return None
-    new_text = text[:start] + text[end + len(_BLOCK_END) :]
-    new_text = new_text.strip("\n")
-    new_text = new_text + "\n" if new_text else ""
-    return WriteOp(path, new_text, False)
+    start, end = span
+    return WriteOp(path, text[:start] + text[end:], before)
