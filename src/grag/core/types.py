@@ -21,6 +21,7 @@ Tool / endpoint contract (MCP tool = REST endpoint, same payloads):
     (backup)                          GET  /api/export         -> JSONL stream (grag export)
     (ui)                              GET  /api/graph/sample   -> GraphSample
     (ui)                              GET  /api/graph/full     -> GraphSample
+    (freshness)                       GET  /api/index/status   -> per-root generations/errors
     (ui)                              GET  /api/health         -> {"status": "ok", "version": str}
 
 Internal module contract (implemented by later waves, called via grag.service):
@@ -60,20 +61,24 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # --- reserved property conventions ---------------------------------------------
 
 RESERVED_PREFIX = "_"
 PROVENANCE_SOURCE = "_source"  # STRING: origin of a fact (file, url, doc id)
 PROVENANCE_CREATED_AT = "_created_at"  # TIMESTAMP: write time
+DOCUMENT_OWNER_PROP = "_document_owner"  # STRING: loader-owned edge's document id
 
 EMBEDDING_PROP = "embedding"  # FLOAT[dim]: exact vector, rescore source of truth
 EMB_MAGNITUDE_PROP = "_emb_r"  # DOUBLE: ||v|| at write time (polar split)
 EMB_CODE_PROP = "_emb_code"  # UINT8[]: quantized direction codes
 EMB_MODEL_PROP = "_emb_model"  # STRING: embedder model id
+EMB_FINGERPRINT_PROP = "_emb_fingerprint"  # STRING: embedding configuration identity
 
-VECTOR_PROPS = {EMBEDDING_PROP, EMB_MAGNITUDE_PROP, EMB_CODE_PROP, EMB_MODEL_PROP}
+VECTOR_PROPS = {
+    EMBEDDING_PROP, EMB_MAGNITUDE_PROP, EMB_CODE_PROP, EMB_MODEL_PROP, EMB_FINGERPRINT_PROP,
+}
 
 # Registry of grag-managed tables:
 # (name STRING, kind STRING['node'|'rel'], pk STRING, searchable BOOL,
@@ -190,6 +195,23 @@ class RelTableDoc(BaseModel):
     row_count: int = 0
 
 
+FreshnessMode = Literal["allow_stale", "wait", "require"]
+FreshnessState = Literal["fresh", "checking", "refreshing", "stale", "error", "unknown", "disabled"]
+
+
+class ReadPolicy(BaseModel):
+    freshness: FreshnessMode = "allow_stale"
+    freshness_timeout_ms: int = Field(default=5000, ge=0, le=60_000)
+
+
+class FreshnessReport(BaseModel):
+    """Code-index verification, as of checked_at; not a filesystem snapshot."""
+
+    status: FreshnessState = "disabled"
+    checked_at: str | None = None
+    timed_out: bool = False
+
+
 class SchemaDocument(BaseModel):
     """Full schema introspection. `text` is the prompt-shaped rendering an LLM
     anchors on before writing Cypher — keep it compact."""
@@ -197,19 +219,23 @@ class SchemaDocument(BaseModel):
     node_tables: list[NodeTableDoc] = Field(default_factory=list)
     rel_tables: list[RelTableDoc] = Field(default_factory=list)
     text: str = ""
+    freshness: FreshnessReport = Field(default_factory=FreshnessReport)
 
 
 # --- mutation -------------------------------------------------------------------
 
 
 class UpsertNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     label: str
     key: Any  # primary key value
     properties: dict[str, Any] = Field(default_factory=dict)
     source: str | None = None  # provenance -> _source
+    expected_revision: str | None = Field(default=None, pattern=r"^(absent|[0-9a-f]{64})$")
 
 
 class UpsertEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     type: str
     from_label: str
     from_key: Any
@@ -217,26 +243,35 @@ class UpsertEdge(BaseModel):
     to_key: Any
     properties: dict[str, Any] = Field(default_factory=dict)
     source: str | None = None
+    expected_revision: str | None = Field(default=None, pattern=r"^(absent|[0-9a-f]{64})$")
 
 
 class UpsertNodesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     nodes: list[UpsertNode]
+    edges: list[UpsertEdge] = Field(default_factory=list)
+    operation_id: str | None = Field(default=None, min_length=1, max_length=128, strict=True)
 
 
 class UpsertEdgesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     edges: list[UpsertEdge]
+    operation_id: str | None = Field(default=None, min_length=1, max_length=128, strict=True)
 
 
 class MutationSummary(BaseModel):
     nodes: int = 0
     edges: int = 0
     warnings: list[str] = Field(default_factory=list)
+    operation_id: str | None = None
+    replayed: bool = False
+    revisions: dict[str, str] = Field(default_factory=dict)
 
 
 # --- query ----------------------------------------------------------------------
 
 
-class QueryRequest(BaseModel):
+class QueryRequest(ReadPolicy):
     cypher: str
     limit: int | None = None  # clamped to [1, config.max_query_limit]
 
@@ -247,17 +282,21 @@ class QueryResponse(BaseModel):
     row_count: int
     truncated: bool
     subgraph: Subgraph = Field(default_factory=Subgraph)
+    freshness: FreshnessReport = Field(default_factory=FreshnessReport)
 
 
 # --- retrieval ------------------------------------------------------------------
 
+# A successful response needs room for its graph and completeness metadata.
+MIN_RETRIEVAL_BUDGET = 256
 
-class SearchRequest(BaseModel):
+
+class SearchRequest(ReadPolicy):
     query: str
     top_k: int = 8
     hops: int = 1  # clamped to config.max_hops
     labels: list[str] | None = None  # restrict seed node tables
-    token_budget: int | None = None  # for the included serialized context
+    token_budget: int | None = Field(default=None, ge=MIN_RETRIEVAL_BUDGET)
 
 
 class ScoredNode(BaseModel):
@@ -266,9 +305,21 @@ class ScoredNode(BaseModel):
     match: Literal["fts", "vector", "graph"]
 
 
-class SearchResponse(BaseModel):
+class RetrievalMetadata(BaseModel):
+    token_estimate: int = 0  # context text only, ceil(UTF-8 bytes / 4)
+    response_token_estimate: int = 0  # larger of compact JSON and MCP text
+    included_node_ids: list[str] = Field(default_factory=list)
+    truncated: bool = False
+    omitted_nodes: int = 0
+    omitted_edges: int = 0
+    omitted_properties: int = 0  # on included records; values are never clipped
+    expansion_limited: bool = False  # path enumeration reached its cap
+    freshness: FreshnessReport = Field(default_factory=FreshnessReport)
+
+
+class SearchResponse(RetrievalMetadata):
     seeds: list[ScoredNode] = Field(default_factory=list)
-    subgraph: Subgraph = Field(default_factory=Subgraph)  # seeds + expansion
+    subgraph: Subgraph = Field(default_factory=Subgraph)  # budgeted seeds + expansion
     context: str = ""  # token-budgeted serialization, ready for prompt injection
     # Nodes still awaiting an embedding after this search (the query path
     # embeds at most config.max_embed_per_search synchronously). > 0 means
@@ -287,18 +338,39 @@ class SearchResponse(BaseModel):
     index_status: Literal["refreshing"] | None = None
 
 
-class ContextRequest(BaseModel):
+class ContextRequest(ReadPolicy):
     node_ids: list[str]
     hops: int = 1
-    token_budget: int | None = None
+    token_budget: int | None = Field(default=None, ge=MIN_RETRIEVAL_BUDGET)
+    text_property: str | None = None  # page one STRING property on one node
+    text_offset: int = Field(default=0, ge=0)  # Unicode character offset
+    text_sha256: str | None = None  # refuse continuation if the text changed
+
+    @model_validator(mode="after")
+    def validate_text_page(self) -> ContextRequest:
+        if self.text_property is not None:
+            if not self.text_property or len(self.node_ids) != 1:
+                raise ValueError(
+                    "text_property requires exactly one node id and a property name"
+                )
+        elif self.text_offset or self.text_sha256 is not None:
+            raise ValueError("text_offset/text_sha256 require text_property")
+        return self
 
 
-class ContextResponse(BaseModel):
+class TextPage(BaseModel):
+    node_id: str
+    property: str
+    offset: int
+    next_offset: int | None  # None at end; otherwise pass to text_offset
+    total_chars: int
+    sha256: str  # pass to text_sha256 when continuing
+
+
+class ContextResponse(RetrievalMetadata):
     context: str
-    token_estimate: int
-    included_node_ids: list[str] = Field(default_factory=list)
-    truncated: bool = False
     subgraph: Subgraph = Field(default_factory=Subgraph)
+    text_page: TextPage | None = None
 
 
 class PackedContext(BaseModel):
@@ -308,6 +380,10 @@ class PackedContext(BaseModel):
     token_estimate: int
     included_node_ids: list[str] = Field(default_factory=list)
     truncated: bool = False
+    omitted_nodes: int = 0
+    omitted_edges: int = 0
+    omitted_properties: int = 0
+    subgraph: Subgraph = Field(default_factory=Subgraph)
 
 
 # --- ingestion ------------------------------------------------------------------
@@ -339,6 +415,7 @@ class IngestResponse(BaseModel):
     documents: int = 0  # sections mode: Document nodes written
     sections: int = 0  # sections mode: Section nodes written
     code_links: int = 0  # sections mode: MENTIONS_* edges to code symbols
+    warnings: list[str] = Field(default_factory=list)
 
 
 class CodeIngestRequest(BaseModel):
@@ -370,7 +447,7 @@ class CodeIngestResponse(BaseModel):
 
 # --- background jobs ----------------------------------------------------------------
 
-JobStatus = Literal["queued", "running", "done", "failed"]
+JobStatus = Literal["queued", "running", "done", "failed", "cancelled"]
 
 
 class JobRecord(BaseModel):
@@ -400,3 +477,4 @@ class GraphStats(BaseModel):
 class GraphSample(BaseModel):
     subgraph: Subgraph = Field(default_factory=Subgraph)
     stats: GraphStats = Field(default_factory=GraphStats)
+    freshness: FreshnessReport = Field(default_factory=FreshnessReport)

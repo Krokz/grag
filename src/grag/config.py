@@ -72,7 +72,7 @@ class EmbedderConfig(BaseModel):
     # Asymmetric-retrieval prefixes. None = pick by model family (bge/arctic:
     # query instruction only; nomic: search_query/search_document; e5:
     # query:/passage:); "" = none. Changing either invalidates stored
-    # vectors — run `grag reindex` afterwards.
+    # vectors for automatic rebuilding; `grag reindex` forces an immediate rebuild.
     query_prefix: str | None = None
     document_prefix: str | None = None
     # ONNX intra-op threads for the local embedder. None = min(4, CPU count).
@@ -137,16 +137,14 @@ class GragConfig(BaseModel):
     # Allow a plain-http (non-TLS) remote server_url on a non-loopback host.
     # The bearer token travels in clear text then — for trusted networks only.
     allow_insecure_http: bool = False
-    # Supervised servers (systemd / containers) have no TTY to approve WAL
-    # recovery on; with this set a corrupt WAL is recovered automatically on
-    # open (writes since the last checkpoint are lost, HNSW indexes rebuilt)
-    # instead of crash-looping under the supervisor. Off by default.
+    # Deprecated: retained for configuration compatibility. Normal opens
+    # always use strict WAL replay; `grag recover` preserves inputs and
+    # confines explicitly allowed lossy recovery to a separate copy.
     wal_auto_recover: bool = False
-    # Serving processes re-ingest an indexed checkout automatically when its
-    # git state (HEAD, dirty/untracked files) moved since the last index —
-    # checked at most every auto_refresh_interval_s seconds on retrieval
-    # calls, run incrementally on the job thread. Off means "ingest_code when
-    # you remember to".
+    # Serving reads trigger background source-content/HEAD verification and
+    # refresh using each root's saved scope/options. Normal checks are throttled
+    # by this interval; wait/require request verification sooner, while failures
+    # respect retry backoff. Off reports disabled and rejects require reads.
     auto_refresh_code: bool = True
     auto_refresh_interval_s: float = 30.0
 

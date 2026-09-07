@@ -2,7 +2,9 @@
 
 Threading model: embedded LadybugDB is single-writer. Writes go through
 execute_write() (serialized on one connection); reads borrow pooled
-connections. All values returned to callers are plain python objects; raw
+connections. write_transaction() holds that writer across a complete DML
+operation and routes same-thread reads through it; other readers keep seeing
+committed data. All values returned to callers are plain python objects; raw
 node/rel/path values are converted to contract models by the helpers below.
 
 Verified LadybugDB value formats (see tests/test_engine_smoke.py):
@@ -16,9 +18,9 @@ from __future__ import annotations
 import logging
 import os
 import queue
-import sys
 import threading
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,8 +29,10 @@ import ladybug as lb
 
 from grag.config import GragConfig
 from grag.core.errors import ConfigurationError, CypherError, GragError
+from grag.core.ident import validate_identifier
 from grag.core.types import (
     EMB_CODE_PROP,
+    EMB_FINGERPRINT_PROP,
     EMBEDDING_PROP,
     RESERVED_PREFIX,
     EdgeRecord,
@@ -41,8 +45,11 @@ logger = logging.getLogger("grag")
 
 # Never exposed inside NodeRecord.properties: internal identifiers and bulky
 # vector payloads (retrieval reads vectors via explicit Cypher projections).
-_HIDDEN_NODE_PROPS = {"_ID", "_LABEL", EMBEDDING_PROP, EMB_CODE_PROP}
-_HIDDEN_REL_PROPS = {"_ID", "_LABEL", "_SRC", "_DST"}
+_HIDDEN_NODE_PROPS = {
+    "_ID", "_LABEL", EMBEDDING_PROP, EMB_CODE_PROP, EMB_FINGERPRINT_PROP,
+    "_index_options", "_index_generation", "_index_error",
+}
+_HIDDEN_REL_PROPS = {"_ID", "_LABEL", "_SRC", "_DST", "_document_owner"}
 
 
 @dataclass
@@ -58,9 +65,14 @@ class EngineResult:
 
 
 class Engine:
-    def __init__(self, config: GragConfig):
+    def __init__(self, config: GragConfig, *, _recover_wal: bool = False, read_only: bool = False):
         self.config = config
-        self.wal_recovered: bool = False
+        self.read_only = read_only
+        if read_only and (_recover_wal or not Path(config.db_path).is_file()):
+            raise ConfigurationError("Read-only inspection requires an existing database file")
+        # Private recovery-worker option: only used on a disposable copy whose
+        # original DB/WAL/shadow files have already been preserved.
+        self.wal_recovered = _recover_wal
         db_path = str(config.db_path)
         self._db_path: Path | None = None
         if db_path != ":memory:":
@@ -71,9 +83,15 @@ class Engine:
             if not parent_existed and os.name != "nt":
                 parent.chmod(0o700)
         self._db = self._open_db(db_path, config)
-        self._secure_database_files()
+        if not read_only:
+            self._secure_database_files()
         self._write_conn = lb.Connection(self._db)
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()
+        self._transaction_owner: int | None = None
+        self._transaction_failed = False
+        # Serialize code-ingest planning as well as publishing. Parsing stays
+        # outside the write transaction, so ordinary writes can still proceed.
+        self.code_ingest_lock = threading.RLock()
         self._readers: queue.Queue = queue.Queue()
         self._readers_created = 0
         self._readers_lock = threading.Lock()
@@ -81,71 +99,45 @@ class Engine:
         # need the private-cache eviction workaround (see _clear_prepared_cache).
         self.plan_cache_disabled = self._disable_plan_cache(self._write_conn)
         self._set_timeout(self._write_conn)
-        self._preload_extensions()
-        if self.wal_recovered:
-            self._drop_stale_vector_indexes()
-        self._stamp_version()
+        try:
+            self._preload_extensions()
+            if self.wal_recovered:
+                self._drop_stale_vector_indexes()
+            if not read_only:
+                self._stamp_version()
+        except BaseException:
+            self.close()
+            raise
 
     def _open_db(self, db_path: str, config: GragConfig) -> lb.Database:
-        """Open the database, offering WAL auto-recovery when a TTY is attached.
+        """Strict replay on normal opens; lossy replay is confined to recovery copies."""
+        from grag.recovery import is_replay_error
 
-        A corrupted WAL causes lb.Database() to raise. On an interactive terminal
-        we explain the consequences and ask before proceeding; non-interactive
-        callers (the API server, CI) get a log message and the original exception
-        so the operator can run 'grag reindex' deliberately.
-        """
+        kwargs: dict[str, Any] = {"buffer_pool_size": config.buffer_pool_size}
+        if self.read_only:
+            kwargs["read_only"] = True
+        if self.wal_recovered:
+            kwargs["throw_on_wal_replay_failure"] = False
         try:
             try:
-                return lb.Database(db_path, buffer_pool_size=config.buffer_pool_size)
+                return lb.Database(db_path, **kwargs)
             except TypeError:
-                return lb.Database(db_path)
+                kwargs.pop("buffer_pool_size")
+                return lb.Database(db_path, **kwargs)
         except Exception as exc:
-            if db_path == ":memory:" or "wal" not in str(exc).lower():
+            if db_path == ":memory:" or not is_replay_error(str(exc)):
                 raise
-            if not sys.stdin.isatty():
-                if not config.wal_auto_recover:
-                    logger.warning(
-                        "WAL replay failed (%s). Run 'grag reindex' to repair the "
-                        "database, or set GRAG_WAL_AUTO_RECOVER=1 for supervised "
-                        "servers.",
-                        exc,
-                    )
-                    raise
-                logger.warning(
-                    "WAL replay failed (%s); GRAG_WAL_AUTO_RECOVER is set — "
-                    "reopening in failure-tolerant mode. Writes since the last "
-                    "checkpoint are lost and vector indexes will be rebuilt.",
-                    exc,
-                )
-                self.wal_recovered = True
-                try:
-                    return lb.Database(
-                        db_path,
-                        throw_on_wal_replay_failure=False,
-                        buffer_pool_size=config.buffer_pool_size,
-                    )
-                except TypeError:
-                    return lb.Database(db_path, throw_on_wal_replay_failure=False)
-            print(
-                f"\nWARNING: WAL replay failed:\n  {exc}\n\n"
-                "Auto-recovery will reopen the database in failure-tolerant mode.\n"
-                "Writes since the last checkpoint are lost, and all HNSW vector\n"
-                "indexes will be dropped so they can be rebuilt from clean data.\n"
-                "Run 'grag reindex' afterwards to restore full search performance.\n",
-                file=sys.stderr,
+            legacy = (
+                " GRAG_WAL_AUTO_RECOVER no longer enables destructive in-place recovery."
+                if config.wal_auto_recover else ""
             )
-            if input("Attempt auto-recovery? [y/N]: ").strip().lower() != "y":
-                raise
-            logger.warning("WAL auto-recovery approved by user for %s", db_path)
-            self.wal_recovered = True
-            try:
-                return lb.Database(
-                    db_path,
-                    throw_on_wal_replay_failure=False,
-                    buffer_pool_size=config.buffer_pool_size,
-                )
-            except TypeError:
-                return lb.Database(db_path, throw_on_wal_replay_failure=False)
+            raise ConfigurationError(
+                f"Database replay failed: {exc}",
+                hint="Stop processes using this database, then run grag --db <file> recover "
+                "to preserve its files and recover a separate copy. Do not delete the WAL "
+                "or shadow file: committed writes may depend on them. Reindex only works "
+                "after a database can open." + legacy,
+            ) from exc
 
     def _drop_stale_vector_indexes(self) -> None:
         """After WAL recovery, drop all grag HNSW indexes (potentially stale).
@@ -159,17 +151,21 @@ class Engine:
         try:
             res = self._run(self._write_conn, "CALL SHOW_TABLES() RETURN *", None)
         except GragError as exc:
-            logger.warning(
-                "WAL recovery: could not list tables to drop HNSW indexes: %s", exc
-            )
-            return
+            raise ConfigurationError(
+                f"Cannot inspect vector indexes after recovery: {exc}",
+                hint="Keep the recovery snapshot; do not serve this unverified copy.",
+            ) from exc
         for row in res.rows:
             table_name = str(row[1])
             table_type = str(row[2]).upper()
             if table_type != "NODE":
                 continue
             idx = f"grag_vec__{table_name}"
-            with suppress(GragError):
+            validate_identifier(table_name)
+            props = self._run(self._write_conn, f"CALL TABLE_INFO('{table_name}') RETURN *", None)
+            if not any(prop[1] == EMBEDDING_PROP for prop in props.rows):
+                continue
+            try:
                 self._run(
                     self._write_conn,
                     f"CALL DROP_VECTOR_INDEX('{table_name}', '{idx}')",
@@ -178,8 +174,14 @@ class Engine:
                 logger.warning(
                     "WAL recovery: dropped stale HNSW index on %s", table_name
                 )
-        with suppress(GragError):
-            self._run(self._write_conn, "CHECKPOINT", None)
+            except GragError as exc:
+                message = str(exc).lower()
+                if "doesn't have an index" not in message and "does not exist" not in message:
+                    raise ConfigurationError(
+                        f"Cannot remove potentially stale vector index {idx}: {exc}",
+                        hint="Keep the recovery snapshot; restore extension availability before retrying.",
+                    ) from exc
+        self._run(self._write_conn, "CHECKPOINT", None)
 
     def _preload_extensions(self) -> None:
         """LOAD FTS and VECTOR once at startup so no operation path has to.
@@ -283,6 +285,10 @@ class Engine:
         (0.20.2+) and, on older runtimes, evicts the prepared statements before
         each read. See tests/test_read_staleness.py.
         """
+        if self._transaction_owner == threading.get_ident():
+            # Introspection and endpoint checks in a mutation must see the
+            # transaction's own writes on the same connection.
+            return self.execute_write(cypher, params)
         conn = self._borrow_reader()
         try:
             self._clear_prepared_cache(conn)
@@ -309,11 +315,88 @@ class Engine:
         tests/test_mutate.py::test_upsert_edges_distinct_endpoints_*.
         """
         with self._write_lock:
+            if self._transaction_failed:
+                raise CypherError(
+                    "The write transaction has failed; further statements are refused.",
+                    hint="Exit the transaction and retry the complete operation.",
+                )
             try:
                 self._clear_prepared_cache(self._write_conn)
                 return self._run(self._write_conn, cypher, params)
+            except BaseException:
+                if self._transaction_owner == threading.get_ident():
+                    # Some engine errors abort the native transaction. Never
+                    # let a caught error turn later statements into autocommits.
+                    self._transaction_failed = True
+                raise
             finally:
                 # Ladybug creates the WAL lazily on the first write.
+                self._secure_database_files()
+
+    @contextmanager
+    def serialized_writes(self) -> Iterator[None]:
+        """Exclude competing writers across a short read/check/write sequence.
+
+        Reentrant, including inside write_transaction. This is a lock, not
+        a transaction: statements still autocommit unless one is active.
+        Use execute_write for reads that need the writer's catalog.
+        """
+        with self._write_lock:
+            yield
+
+    @property
+    def in_write_transaction(self) -> bool:
+        return self._transaction_owner == threading.get_ident()
+
+    @contextmanager
+    def atomic_writes(self) -> Iterator[None]:
+        """Join an enclosing ingest transaction or own this mutation's commit.
+
+        Joining does not imply a savepoint. Even a caught Python validation
+        failure poisons the outer transaction so partial writes cannot commit.
+        """
+        with self._write_lock:
+            if self.in_write_transaction:
+                try:
+                    yield
+                except BaseException:
+                    self._transaction_failed = True
+                    raise
+            else:
+                with self.write_transaction():
+                    yield
+
+    @contextmanager
+    def write_transaction(self) -> Iterator[None]:
+        """Commit one DML operation atomically on the serialized writer.
+
+        Reads on this thread share the writer and see their own changes;
+        other threads keep reading committed state through the reader pool.
+        Prepare schema and expensive input parsing before entering. Nested
+        transactions are rejected rather than implying savepoint semantics.
+        """
+        with self._write_lock:
+            if self._transaction_owner is not None:
+                raise CypherError(
+                    "Nested write transactions are not supported.",
+                    hint="Use the existing transaction for the complete operation.",
+                )
+            self.execute_write("BEGIN TRANSACTION")
+            self._transaction_owner = threading.get_ident()
+            try:
+                yield
+                self.execute_write("COMMIT")
+            except BaseException:
+                # A native statement failure may already have rolled back;
+                # preserve the original error if ROLLBACK says so. Bypass
+                # execute_write's failed-transaction guard for cleanup only.
+                with suppress(GragError):
+                    self._clear_prepared_cache(self._write_conn)
+                    self._run(self._write_conn, "ROLLBACK", None)
+                raise
+            finally:
+                self._transaction_owner = None
+                self._transaction_failed = False
                 self._secure_database_files()
 
     # Ladybug's Python layer memoises PreparedStatement objects per (query
@@ -460,8 +543,9 @@ class Engine:
         # restarted immediately there is no WAL to replay (and no replay failure
         # risk). Suppress failures: the write connection may already be closed or
         # the DB may be read-only.
-        with suppress(Exception):
-            self._run(self._write_conn, "CHECKPOINT", None)
+        if not self.read_only:
+            with suppress(Exception):
+                self._run(self._write_conn, "CHECKPOINT", None)
         conns = [self._write_conn]
         while True:
             try:

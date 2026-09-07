@@ -37,3 +37,29 @@ class ReadOnlyViolation(GragError):
 
 class ConfigurationError(GragError):
     """Missing or invalid configuration (e.g. embedder not installed)."""
+
+
+class ShutdownError(GragError):
+    """New work was refused after shutdown began."""
+
+    def __init__(self):
+        super().__init__(
+            "The server is shutting down; new work is not accepted.",
+            hint="Wait for shutdown to finish, then reconnect to the restarted server.",
+        )
+
+
+class ConflictError(GragError):
+    """A mutation precondition or operation-ID payload disagrees with stored state."""
+
+    def __init__(self, message: str, *, code: str, hint: str):
+        super().__init__(message, hint=hint)
+        self.code = code
+
+
+class FreshnessError(GragError):
+    """A require-fresh read could not verify the code index before its deadline."""
+
+    def __init__(self, message: str, *, freshness: dict, hint: str):
+        super().__init__(message, hint=hint)
+        self.freshness = freshness
