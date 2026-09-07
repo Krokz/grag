@@ -1,0 +1,77 @@
+site_name: grag
+site_description: Local graph memory for AI agents — code, documents and decisions.
+site_url: https://krokz.github.io/grag/
+repo_url: https://github.com/Krokz/grag
+repo_name: Krokz/grag
+edit_uri: edit/main/docs/
+strict: true
+
+theme:
+  name: material
+  font: false
+  palette:
+    - scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to dark mode
+    - scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+
+validation:
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Overview: index.md
+  - Start here:
+      - First session: getting-started.md
+      - Installation and Windows: installation.md
+  - Use grag:
+      - Index code: guides/code.md
+      - Index documents: guides/documents.md
+      - Save and revise memory: guides/memory.md
+      - Retrieve context: guides/retrieval.md
+      - Code freshness: guides/freshness.md
+      - Optional embeddings: guides/embeddings.md
+      - Projects and relocation: guides/projects.md
+  - Operate:
+      - Servers and multiple clients: operations/server.md
+      - Troubleshooting: operations/troubleshooting.md
+      - Backup and recovery: operations/recovery.md
+  - Reference:
+      - MCP tools: reference/mcp.md
+      - Python and REST: reference/python-rest.md
+      - Configuration and CLI: reference/configuration.md
+      - Resource limits: reference/limits.md
+  - Development: development.md

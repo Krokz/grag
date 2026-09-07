@@ -1,0 +1,124 @@
+# Development and evaluation
+
+**From source** (for development). Build the UI **first** — `pip install` needs the
+built bundle at `src/grag/api/static` (the wheel's force-include; see `pyproject.toml`):
+
+```bash
+cd ui && npm ci && npm run build && cd ..   # builds the UI into src/grag/api/static/
+pip install -e .            # core: engine, REST, MCP, FTS — no torch, no GPU stack
+pip install -e ".[dev]"     # tests
+pip install -e ".[code]"          # optional: tree-sitter code parsing (ts/js/cs/tf)
+pip install -e ".[embed-local]"   # optional: local embeddings (fastembed/ONNX, still no torch)
+pip install -e ".[embed-remote]"  # optional: OpenAI-compatible remote embeddings
+```
+
+To have the normal CLI and MCP launcher use this checkout, install it in editable
+mode with pipx after building the UI:
+
+```bash
+pipx install --force --editable '.[code,embed-local]'
+command -v grag
+```
+
+This replaces pipx's `gragdb` installation with a link to the checkout. New
+processes load your Python edits directly; stop the server for the selected
+database (`grag --db <file> stop`) and reconnect MCP after editing running code.
+UI changes still need `npm run build` in `ui`. Keep the checkout at this path.
+Check that `command -v grag` and the MCP registration select the intended launcher;
+another installation earlier on `PATH` can still run different code. The database
+selection is independent of the installation.
+
+From a Python environment with the development dependencies, exercise the
+installed command's MCP memory loop without a `PYTHONPATH` override:
+
+```bash
+GRAG_TEST_COMMAND="$(command -v grag)" python -m pytest -o addopts= -q tests/test_agent_workflow.py
+```
+
+The test launches that command outside the checkout, uses temporary source and
+database files, and verifies ingestion, recall, corrections, fresh citations,
+retry handling, and memory after restarting MCP. It uses full-text search; local
+embeddings and language grammars may need an initial download before offline use.
+
+
+## Checks and evaluation
+
+```bash
+python -m pytest tests/            # unit, recovery and agent-workflow checks
+ruff check src tests && mypy src/grag   # CI gates on both
+grag bench                        # codec recall/latency/RSS table
+cd ui && npm run build            # rebuilds the UI into src/grag/api/static/
+```
+
+For evidence-level retrieval evaluation, run
+`python tests/workflow_eval.py --scenarios --output /tmp/grag-workflows.json`.
+The checked-in questions compare keyword search, optional real local embeddings,
+graph expansion and explicit relationship queries. Reports measure required text,
+nodes, edges and citations after packing, plus latency and token costs against file
+reading. See the [workflow evaluation guide](https://github.com/Krokz/grag/blob/main/tests/fixtures/workflows/README.md)
+for the real MCP drill, optional tokenizer calibration, and measurement limits.
+Vector-neighbor recall from `grag bench` is a separate metric.
+
+See **[CONTRIBUTING.md](https://github.com/Krokz/grag/blob/main/CONTRIBUTING.md)** for the branching model (Gitflow-lite:
+`main` + `dev` + `feature`/`release`/`hotfix`), PR rules, and how releases are
+cut and published to PyPI.
+
+The embedded engine allows one writer process. Its buffer pool is only part of
+total resident memory: Python, native query work and optional models also allocate.
+Close services and engines you create. Compressed-codec encoding adds write-time
+work; measure it on your data.
+
+## Build this documentation
+
+Use a separate environment; these tools are not grag runtime dependencies:
+
+```bash
+python -m venv /tmp/grag-docs
+/tmp/grag-docs/bin/python -m pip install -r requirements-docs.txt
+/tmp/grag-docs/bin/python -m mkdocs serve
+```
+
+Use the equivalent virtual-environment path on Windows. `mkdocs build --strict`
+checks the navigation, internal links and anchors and writes `site/` (Git-ignored).
+The documentation workflow validates changes on PRs and `dev`; it deploys `main`
+through GitHub Pages. Repository Settings → Pages must use **GitHub Actions** as
+the publishing source. There is no runtime or database dependency for the site.
+
+When changing behavior, update its guide/reference alongside the code. Keep the
+README to installation, the first memory loop and links. Update the version on
+the overview page when the documented release changes. Review deployment changes
+through the same dev/main flow; documentation publication does not require a
+PyPI version bump or tag.
+
+## Demo
+
+```bash
+# build the demo knowledgebase (fictional company handbook, entities + relations)
+python examples/build_example.py
+
+# serve REST + the graph UI at http://127.0.0.1:8471
+# (note: start it from a normal terminal — servers launched inside an agent
+# sandbox get torn down and can't be reached from your browser)
+grag --db examples/knowledge.lbdb serve
+
+# single-process mode: UI + REST + MCP on one live .lbdb (recommended for
+# dogfooding — the UI sees MCP writes the moment they land)
+grag --db examples/knowledge.lbdb serve --with-mcp
+#   UI  → http://127.0.0.1:8471/
+#   MCP → http://127.0.0.1:8471/mcp   (streamable-http; point MCP clients here)
+
+# or answer 3 demo questions end-to-end in the terminal
+python examples/demo_e2e.py
+```
+
+The UI has a graph explorer (click to inspect, double-click to expand neighbors),
+Cypher console, schema sidebar and search. Click a label in the legend to view
+that label and its one-hop relationships. **Export SVG view** saves the currently
+loaded, filtered view; **Export full SVG** requests the full graph and lays it out
+in the browser, subject to server response limits and available browser resources.
+
+**One process, one live file.** LadybugDB is single-writer, so `serve` and `mcp` can't share a `.lbdb` as separate processes. `serve --with-mcp` mounts the MCP endpoint *inside* the REST/UI server, so UI + REST + MCP share one registry and one write connection — the UI watches the AI's writes land live instead of reading a stale copy. Use `--mcp-path` to change the MCP mount path (default `/mcp`).
+
+## Performance measurements
+
+Measured — `tests/test_perf.py` guards cold start (< 2s), search latency, and RSS; `grag bench` reports recall + p50/p95 + RSS per codec. Design rules: no heavy deps in the default install, one process for API+UI, lazy embedder loading, default `LIMIT`s, hop caps, statement timeouts, token budgets everywhere.

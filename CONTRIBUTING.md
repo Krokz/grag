@@ -62,6 +62,16 @@ mypy src/grag               # type-check
 grag targets **Python 3.10+** (CI tests 3.10–3.14). LadybugDB downloads its FTS
 and VECTOR extensions on first use, so the first test run needs network access.
 
+## Documentation
+
+Documentation is maintained in `docs/` with MkDocs. Install
+`requirements-docs.txt` in a separate environment, preview with `mkdocs serve`, and
+check with `mkdocs build --strict`. The Documentation workflow validates PR/dev
+changes and publishes `main` to [GitHub Pages](https://krokz.github.io/grag/).
+Update the relevant guide alongside behavior changes; keep the README concise.
+Docs-only publication needs no package version bump. See the
+[development guide](https://krokz.github.io/grag/development/) for details.
+
 ## Cutting a release
 
 1. Make sure `dev` is green and cut `release/<x.y.z>`:
