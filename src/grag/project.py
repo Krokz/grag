@@ -353,7 +353,7 @@ def _skill_paths(clients: list[str], project_root: Path) -> list[Path]:
 
 def _is_grag_skill(text: str) -> bool:
     """Whether an existing SKILL.md is grag's own (frontmatter ``name: grag``)."""
-    m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+    m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n", text, re.DOTALL)
     if not m:
         return False
     for line in m.group(1).splitlines():
@@ -378,12 +378,18 @@ def plan_skill_ops(clients: list[str], project_root: Path) -> list[WriteOp]:
             ops.append(WriteOp(path, template, before))
             continue
         current = before.text
-        if current == template or current.endswith("\n\n" + template):
+        newline = "\r\n" if "\r\n" in current else "\n"
+        replacement = template.replace("\n", newline)
+        if (
+            current in (template, replacement)
+            or current.endswith("\n\n" + template)
+            or current.endswith("\r\n\r\n" + template.replace("\n", "\r\n"))
+        ):
             continue  # already current — nothing to do
         if _is_grag_skill(current):
-            ops.append(WriteOp(path, template, before))
+            ops.append(WriteOp(path, replacement, before))
         else:
-            ops.append(WriteOp(path, current.rstrip("\n") + "\n\n" + template, before))
+            ops.append(WriteOp(path, current.rstrip("\r\n") + newline * 2 + replacement, before))
     return ops
 
 
@@ -403,11 +409,14 @@ def plan_skill_removal_ops(
         if before.data is None:
             continue
         current = before.text
-        if current == template:
+        candidates = (template, template.replace("\n", "\r\n"))
+        matched = next((value for value in candidates if current.endswith(value)), None)
+        if current in candidates:
             ops.append(DeleteOp(path, before))
-        elif current.endswith(template):
-            prefix = current[: -len(template)].rstrip("\n")
-            ops.append(WriteOp(path, prefix + "\n", before))
+        elif matched is not None:
+            prefix = current[: -len(matched)].rstrip("\r\n")
+            newline = "\r\n" if "\r\n" in prefix else "\n"
+            ops.append(WriteOp(path, prefix + newline, before))
         else:
             ops.append(
                 SkipOp(path, "SKILL.md was modified after init — remove it manually")

@@ -65,12 +65,15 @@ def snapshot(path: Path) -> Snapshot:
             data = stream.read()
             after = os.fstat(stream.fileno())
 
-        def version(value: os.stat_result) -> tuple:
+        def version(value: os.stat_result, *, cross_api: bool = False) -> tuple:
             return (
                 value.st_dev,
                 value.st_ino,
                 value.st_mtime_ns,
-                value.st_ctime_ns,
+                # CPython's Windows lstat reports creation time here, while
+                # fstat can report metadata-change time. Compare each API's
+                # timestamp before/after, but not against the other API.
+                None if cross_api and sys.platform == "win32" else value.st_ctime_ns,
                 value.st_size,
                 value.st_mode,
                 value.st_nlink,
@@ -78,8 +81,9 @@ def snapshot(path: Path) -> Snapshot:
             )
 
         if (
-            len({version(info), version(opened), version(after), version(path.lstat())})
-            != 1
+            version(info) != version(path.lstat())
+            or version(opened) != version(after)
+            or version(info, cross_api=True) != version(opened, cross_api=True)
         ):
             raise ProjectConfigError(f"{path}: changed while reading; retry init")
         if os.name != "nt" and info.st_uid != os.getuid():

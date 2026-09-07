@@ -18,6 +18,7 @@ def isolated(monkeypatch, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("GRAG_DB_PATH", raising=False)
     monkeypatch.delenv("GRAG_DB_DIR", raising=False)
     monkeypatch.chdir(tmp_path)

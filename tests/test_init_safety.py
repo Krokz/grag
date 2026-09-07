@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,7 @@ def isolated_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setattr("grag.project._fastembed_available", lambda: False)
     monkeypatch.chdir(tmp_path)
 
@@ -234,6 +236,54 @@ def test_stale_plan_aborts_before_writing_any_file(tmp_path, action):
     assert not _bundles()
 
 
+@pytest.mark.parametrize(
+    "changed", [None, "st_ctime_ns", "st_mtime_ns", "st_size", "st_ino", "st_mode", "st_nlink"]
+)
+def test_snapshot_handles_windows_ctime_without_losing_change_checks(
+    tmp_path, monkeypatch, changed
+):
+    path = tmp_path / "config"
+    path.write_bytes(b"configuration")
+    fstat = os.fstat
+    calls = 0
+
+    def windows_fstat(fd):
+        nonlocal calls
+        info = fstat(fd)
+        values = {name: getattr(info, name) for name in (
+            "st_dev", "st_ino", "st_mtime_ns", "st_ctime_ns", "st_size",
+            "st_mode", "st_nlink", "st_uid",
+        )}
+        # Windows fstat can report change time where lstat reports birth time.
+        values["st_ctime_ns"] += 1_000_000
+        calls += 1
+        if changed and calls == 2:
+            values[changed] += 1
+        return SimpleNamespace(**values)
+
+    monkeypatch.setattr(project_files.sys, "platform", "win32")
+    monkeypatch.setattr(os, "fstat", windows_fstat)
+    if changed:
+        with pytest.raises(ProjectConfigError, match="changed while reading"):
+            snapshot(path)
+    else:
+        assert snapshot(path).data == b"configuration"
+
+
+def test_snapshot_rejects_different_file_opened_after_path_check(tmp_path, monkeypatch):
+    path, other = tmp_path / "config", tmp_path / "other"
+    path.write_bytes(b"same content")
+    other.write_bytes(b"same content")
+    original_open = os.open
+
+    def switched(file, *args, **kwargs):
+        return original_open(other if Path(file) == path else file, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", switched)
+    with pytest.raises(ProjectConfigError, match="changed while reading"):
+        snapshot(path)
+
+
 def test_backup_exact_bytes_permissions_and_restore(tmp_path):
     path = tmp_path / ".mcp.json"
     original = (
@@ -432,7 +482,7 @@ def test_dry_run_shows_diff_and_has_no_filesystem_effect(tmp_path, capsys, mode)
     if mode != "create":
         path.write_text('{"mcpServers": {"grag": {"url": "https://old"}}}\n')
     if mode == "unchanged":
-        op = _write_plan(path, path.read_text())
+        op = _write_plan(path, snapshot(path).text)
     elif mode == "delete":
         op = DeleteOp(path, snapshot(path))
     else:

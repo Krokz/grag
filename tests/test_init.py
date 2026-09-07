@@ -136,18 +136,19 @@ def test_cursor_op_path(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_zed_op_preserves_jsonc(tmp_path, monkeypatch):
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_zed_op_preserves_jsonc(tmp_path, monkeypatch, newline):
     zed_dir = tmp_path / ".config" / "zed"
     zed_dir.mkdir(parents=True)
     settings = zed_dir / "settings.json"
-    settings.write_text("// zed settings\n{}\n")
+    settings.write_bytes(f"// zed settings{newline}{{}}{newline}".encode())
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     db = tmp_path / "test.lbdb"
     ops = plan_mcp_ops(["zed"], tmp_path, db)
     assert len(ops) == 1
     assert isinstance(ops[0], WriteOp)
-    assert ops[0].content.startswith("// zed settings\n")
+    assert ops[0].content.startswith("// zed settings" + newline)
     assert "context_servers" in ops[0].content
 
 
@@ -395,34 +396,43 @@ def test_skill_ops_cover_home_detected_harnesses(tmp_path, monkeypatch):
     }
 
 
-def test_skill_ops_replace_existing_grag_skill(tmp_path, monkeypatch):
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_skill_ops_replace_existing_grag_skill(tmp_path, monkeypatch, newline):
     """An existing grag skill (frontmatter name: grag) is upgraded in place."""
     from grag.project import _skill_template, plan_skill_ops
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
     existing = tmp_path / ".claude" / "skills" / "grag" / "SKILL.md"
     existing.parent.mkdir(parents=True)
-    existing.write_text("---\nname: grag\ndescription: old\n---\n\nold version\n")
+    existing.write_bytes("---\nname: grag\ndescription: old\n---\n\nold version\n".replace("\n", newline).encode())
     ops = plan_skill_ops(["claude"], tmp_path)
     assert len(ops) == 1
     assert not ops[0].created
-    assert ops[0].content == _skill_template()
+    assert ops[0].content == _skill_template().replace("\n", newline)
 
 
-def test_skill_ops_append_to_foreign_skill(tmp_path, monkeypatch):
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_skill_ops_append_to_foreign_skill(tmp_path, monkeypatch, newline):
     """A non-grag SKILL.md is user content: append, never clobber."""
     from grag.project import _skill_template, plan_skill_ops
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
     existing = tmp_path / ".claude" / "skills" / "grag" / "SKILL.md"
     existing.parent.mkdir(parents=True)
-    existing.write_text("---\nname: mine\ndescription: mine\n---\n\nuser content\n")
+    original = "---\nname: mine\ndescription: mine\n---\n\nuser content\n".replace("\n", newline)
+    existing.write_bytes(original.encode())
     ops = plan_skill_ops(["claude"], tmp_path)
     assert len(ops) == 1
     assert not ops[0].created
-    assert ops[0].content.startswith("---\nname: mine\n")
+    assert ops[0].content.startswith(original)
     assert "user content" in ops[0].content
-    assert ops[0].content.endswith(_skill_template())
+    assert ops[0].content.endswith(_skill_template().replace("\n", newline))
+    from grag.project import apply_ops, plan_skill_removal_ops
+
+    apply_ops(ops)
+    assert plan_skill_ops(["claude"], tmp_path) == []
+    apply_ops(plan_skill_removal_ops(["claude"], tmp_path))
+    assert existing.read_bytes() == original.encode()
 
 
 def test_skill_ops_noop_when_already_current(tmp_path, monkeypatch):

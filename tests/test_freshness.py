@@ -303,7 +303,7 @@ def test_content_fingerprint_detects_non_newest_and_restored_mtimes(tmp_path):
     os.utime(older, ns=(1_000_000, 1_000_000))
     assert fingerprint(root) != before
     before = fingerprint(root)
-    older.rename(root / 'renamed -> "name".py')
+    older.rename(root / "renamed 'name'.py")
     assert fingerprint(root) != before
 
 
