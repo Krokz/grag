@@ -8,11 +8,13 @@ per .lbdb file, so exactly one service per path is ever built and reused.
 
 from __future__ import annotations
 
+import math
 import threading
+import time
 from pathlib import Path
 
 from grag.config import GragConfig
-from grag.core.errors import ConfigurationError, NotFoundError
+from grag.core.errors import ConfigurationError, NotFoundError, ShutdownError
 from grag.service import GragService
 
 
@@ -21,6 +23,7 @@ class ServiceRegistry:
         self.config = config
         self._services: dict[str, GragService] = {}
         self._lock = threading.Lock()
+        self._closed = False
 
     def get(self, db: str | None = None) -> GragService:
         if self.config.db_dir is None:
@@ -42,12 +45,23 @@ class ServiceRegistry:
             return []
         return sorted(f.stem for f in root.glob("*.lbdb"))
 
-    def close(self) -> None:
+    @property
+    def closing(self) -> bool:
         with self._lock:
-            services = list(self._services.values())
-            self._services.clear()
-        for svc in services:
-            svc.close()
+            return self._closed
+
+    def close(self, timeout: float = 10.0) -> dict[str, dict]:
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("Shutdown timeout must be finite and non-negative.")
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            self._closed = True
+            services = dict(self._services)
+        # Start all drains before waiting, with one grace period for the registry.
+        for svc in services.values():
+            svc.begin_shutdown()
+        return {key: svc.close(timeout=max(0.0, deadline - time.monotonic()))
+                for key, svc in services.items()}
 
     # -- internals --------------------------------------------------------------
 
@@ -57,6 +71,8 @@ class ServiceRegistry:
         resolved = path if str(path) == ":memory:" else path.resolve()
         key = str(resolved)
         with self._lock:
+            if self._closed:
+                raise ShutdownError()
             svc = self._services.get(key)
             if svc is None:
                 svc = GragService(self.config.model_copy(update={"db_path": resolved}))

@@ -103,7 +103,15 @@ def test_health(client):
         "mcp_enabled": False,
         "mcp_path": None,
         "embedding": None,
-        "code_index": {"refreshes": 0, "tracked": 0, "running": False, "last_error": None},
+        "shutdown": {
+            "state": "open", "engine_closed": False, "active_operations": 0,
+            "jobs": {"active": [], "cancelled": [], "failed": []},
+            "embedding_running": False, "error": None,
+        },
+        "code_index": {
+            "refreshes": 0, "tracked": 0, "running": False, "job_id": None,
+            "freshness": {"status": "unknown", "checked_at": None, "timed_out": False},
+        },
     }
 
 

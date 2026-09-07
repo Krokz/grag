@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from grag.config import GragConfig
-from grag.core.types import CodeIngestRequest, SearchRequest
+from grag.core.types import CodeIngestRequest, ReadPolicy, SearchRequest
 from grag.refresh import CodeIndexRefresher, fingerprint
 from grag.service import GragService
 
@@ -38,7 +39,9 @@ def repo(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def service(tmp_path: Path) -> GragService:
-    svc = GragService(GragConfig(db_path=tmp_path / "refresh.lbdb", auto_refresh_interval_s=1.0))
+    svc = GragService(
+        GragConfig(db_path=tmp_path / "refresh.lbdb", auto_refresh_interval_s=1.0)
+    )
     svc.enable_auto_refresh()
     yield svc
     svc.close()
@@ -49,13 +52,15 @@ def _functions(svc: GragService) -> set[str]:
 
 
 def _wait_fresh(svc: GragService, timeout: float = 20.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        svc.refresher.interval = 0.0  # type: ignore[union-attr]
-        if svc.refresher.maybe_refresh() is None:  # type: ignore[union-attr]
-            return
-        time.sleep(0.05)
-    raise AssertionError("refresh never completed")
+    assert (
+        svc.read_freshness(
+            ReadPolicy(
+                freshness="require",
+                freshness_timeout_ms=int(timeout * 1000),
+            )
+        ).status
+        == "fresh"
+    )
 
 
 def test_fingerprint_tracks_head_and_dirty_files(repo: Path):
@@ -67,21 +72,27 @@ def test_fingerprint_tracks_head_and_dirty_files(repo: Path):
     _git(repo, "commit", "-qam", "edit")
     committed = fingerprint(repo)
     assert committed.head != clean.head
-    assert fingerprint(repo.parent) is None  # not a checkout
+    assert fingerprint(repo.parent).head == ""  # plain directories are tracked too
+    assert fingerprint(repo / "missing") is None
 
 
 def test_search_triggers_reingest_after_commit(service: GragService, repo: Path):
     service.ingest_code(CodeIngestRequest(paths=[str(repo)]))
+    service.refresher.interval = 0.0  # type: ignore[union-attr]
     assert _functions(service) == {"alpha"}
-    assert service.search_knowledge(SearchRequest(query="alpha", hops=0)).index_status is None
+    assert (
+        service.search_knowledge(
+            SearchRequest(query="alpha", hops=0, freshness="require")
+        ).freshness.status
+        == "fresh"
+    )
 
     (repo / "core.py").write_text(
         "def alpha():\n    return 1\n\n\ndef beta():\n    return 2\n", encoding="utf-8"
     )
     _git(repo, "commit", "-qam", "add beta")
-    service.refresher.interval = 0.0  # type: ignore[union-attr]
     resp = service.search_knowledge(SearchRequest(query="beta", hops=0))
-    assert resp.index_status == "refreshing"
+    assert resp.freshness.status in {"checking", "refreshing", "stale"}
     _wait_fresh(service)
     assert _functions(service) == {"alpha", "beta"}
     assert service.refresher.refreshes == 1  # type: ignore[union-attr]
@@ -90,24 +101,34 @@ def test_search_triggers_reingest_after_commit(service: GragService, repo: Path)
 def test_uncommitted_edits_also_refresh(service: GragService, repo: Path):
     service.ingest_code(CodeIngestRequest(paths=[str(repo)]))
     service.refresher.interval = 0.0  # type: ignore[union-attr]
-    assert service.refresher.maybe_refresh() is None  # type: ignore[union-attr]
+    _wait_fresh(service)
     time.sleep(0.02)
     (repo / "extra.py").write_text("def gamma():\n    return 3\n", encoding="utf-8")
-    assert service.refresher.maybe_refresh() == "refreshing"  # type: ignore[union-attr]
+    assert service.refresher.maybe_refresh() in {"checking", "refreshing", "stale"}  # type: ignore[union-attr]
     _wait_fresh(service)
     assert "gamma" in _functions(service)
 
 
-def test_check_is_throttled_and_idempotent(service: GragService, repo: Path, monkeypatch):
+def test_check_is_throttled_and_idempotent(
+    service: GragService, repo: Path, monkeypatch
+):
     service.ingest_code(CodeIngestRequest(paths=[str(repo)]))
     calls = []
+    checked = threading.Event()
     import grag.refresh as refresh_module
 
-    real = refresh_module.fingerprint
-    monkeypatch.setattr(refresh_module, "fingerprint", lambda root: calls.append(root) or real(root))
+    real = refresh_module.scan_sources
+
+    def scan(root, req):
+        calls.append(root)
+        checked.set()
+        return real(root, req)
+
+    monkeypatch.setattr(refresh_module, "scan_sources", scan)
     service.refresher.interval = 60.0  # type: ignore[union-attr]
     for _ in range(5):
         service.search_knowledge(SearchRequest(query="alpha", hops=0))
+    assert checked.wait(2)
     assert len(calls) == 1  # one fingerprint per interval, not per search
 
 
@@ -118,21 +139,23 @@ def test_stale_recorded_commit_refreshes_on_first_check(tmp_path: Path, repo: Pa
     first = GragService(cfg)
     first.ingest_code(CodeIngestRequest(paths=[str(repo)]))
     first.close()
-    (repo / "core.py").write_text("def alpha():\n    return 1\n\n\ndef delta():\n    return 4\n", encoding="utf-8")
+    (repo / "core.py").write_text(
+        "def alpha():\n    return 1\n\n\ndef delta():\n    return 4\n", encoding="utf-8"
+    )
     _git(repo, "commit", "-qam", "delta")
 
     svc = GragService(cfg)
     try:
         svc.enable_auto_refresh()
         svc.refresher.interval = 0.0  # type: ignore[union-attr]
-        assert svc.refresher.maybe_refresh() == "refreshing"  # type: ignore[union-attr]
+        assert svc.refresher.maybe_refresh() in {"checking", "refreshing", "stale"}  # type: ignore[union-attr]
         _wait_fresh(svc)
         assert "delta" in _functions(svc)
     finally:
         svc.close()
 
 
-def test_non_git_checkout_is_left_alone(tmp_path: Path):
+def test_non_git_checkout_is_verified(tmp_path: Path):
     plain = tmp_path / "plain"
     plain.mkdir()
     (plain / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
@@ -141,7 +164,8 @@ def test_non_git_checkout_is_left_alone(tmp_path: Path):
         svc.ingest_code(CodeIngestRequest(paths=[str(plain)]))
         r = CodeIndexRefresher(svc, interval=1.0)
         r.interval = 0.0
-        assert r.maybe_refresh() is None
-        assert r.status()["tracked"] == 0
+        assert r.read(ReadPolicy(freshness="require")).status == "fresh"
+        assert r.status()["tracked"] == 1
+        r.close()
     finally:
         svc.close()

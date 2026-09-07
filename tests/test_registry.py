@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from grag.config import GragConfig
-from grag.core.errors import ConfigurationError, NotFoundError
+from grag.core.errors import ConfigurationError, NotFoundError, ShutdownError
 from grag.core.types import DefineSchemaRequest, NodeTableSpec
 from grag.registry import ServiceRegistry
 from grag.service import GragService
@@ -74,9 +74,11 @@ def test_close_is_idempotent_and_closes_all(registry):
     b = registry.get("project-b")
     registry.close()
     registry.close()
-    # Cache was cleared: a fresh get() rebuilds instead of returning closed instances.
-    assert registry.get("project-a") is not a
-    assert registry.get("project-b") is not b
+    # A late request must not resurrect engines while the server is tearing down.
+    assert a.shutdown_status()["engine_closed"]
+    assert b.shutdown_status()["engine_closed"]
+    with pytest.raises(ShutdownError):
+        registry.get("project-a")
 
 
 def test_single_db_mode_serves_db_path(tmp_path):

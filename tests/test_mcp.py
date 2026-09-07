@@ -320,7 +320,10 @@ def test_search_knowledge_empty_db_returns_empty_seeds(service: GragService):
     # No embedder configured on the test service: "vector":"off" disambiguates
     # this from "embedder configured, backlog fully drained" (both would
     # otherwise look identical — no pending_embeddings, no vector seeds).
-    assert payload == {"seeds": [], "vector": "off"}
+    assert payload["seeds"] == []
+    assert payload["vector"] == "off"
+    assert payload["truncated"] is False
+    assert payload["token_estimate"] == 0
 
 
 # --- ingest_code ---------------------------------------------------------------------
