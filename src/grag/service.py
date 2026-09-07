@@ -17,6 +17,8 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
 
+from pydantic import BaseModel
+
 from grag.config import GragConfig
 from grag.core.engine import (
     Engine,
@@ -30,10 +32,19 @@ from grag.core.errors import (
     GragError,
     NotFoundError,
     ReadOnlyViolation,
+    ResourceLimitError,
     SchemaError,
     ShutdownError,
 )
 from grag.core.ident import validate_identifier
+from grag.core.limits import (
+    MAX_ACTIVE_OPERATIONS,
+    MAX_RESPONSE_BYTES,
+    check_size,
+    json_bytes,
+    validate_request,
+    work_budget,
+)
 from grag.core.types import (
     CodeIngestRequest,
     CodeIngestResponse,
@@ -51,6 +62,7 @@ from grag.core.types import (
     QueryRequest,
     QueryResponse,
     ReadPolicy,
+    SchemaDetail,
     SchemaDocument,
     SearchRequest,
     SearchResponse,
@@ -73,8 +85,18 @@ _R = TypeVar("_R")
 def _operation(fn: Callable[Concatenate[GragService, _P], _R]) -> Callable[Concatenate[GragService, _P], _R]:
     @functools.wraps(fn)
     def wrapped(self: GragService, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        for value in (*args, *kwargs.values()):
+            if isinstance(value, BaseModel):
+                validate_request(value)
         with self.operation():
-            return fn(self, *args, **kwargs)
+            if fn.__name__ in {"cypher_query", "search_knowledge", "get_context", "describe_schema", "graph_sample", "graph_full"}:
+                with work_budget():
+                    result = fn(self, *args, **kwargs)
+                    json_bytes(result, MAX_RESPONSE_BYTES, "response_bytes")
+                    return result
+            result = fn(self, *args, **kwargs)
+            json_bytes(result, MAX_RESPONSE_BYTES, "response_bytes")
+            return result
     return wrapped
 
 # Write keywords rejected on the read-only cypher_query path. Guardrail, not a
@@ -159,6 +181,7 @@ class GragService:
             if self._closing and not depth:
                 raise ShutdownError()
             if not depth:
+                check_size("active_operations", self._active_operations + 1, MAX_ACTIVE_OPERATIONS)
                 self._active_operations += 1
             self._operation_local.depth = depth + 1
         try:
@@ -310,23 +333,24 @@ class GragService:
     @_operation
     def describe_schema(
         self, *, freshness: FreshnessMode = "allow_stale", freshness_timeout_ms: int = 5000,
+        detail: SchemaDetail = "full", if_revision: str | None = None,
     ) -> SchemaDocument:
         try:
             from grag.core.schema import build_schema_document
         except ImportError:
             raise _not_implemented("grag.core.schema") from None
         report = self.read_freshness(ReadPolicy(freshness=freshness, freshness_timeout_ms=freshness_timeout_ms))
-        doc = build_schema_document(self.engine, self.config)
+        doc = build_schema_document(self.engine, self.config, detail=detail, if_revision=if_revision)
         doc.freshness = report
         return doc
 
     @_operation
-    def define_schema(self, req: DefineSchemaRequest) -> SchemaDocument:
+    def define_schema(self, req: DefineSchemaRequest, *, detail: SchemaDetail = "full") -> SchemaDocument:
         try:
             from grag.core.mutate import define_schema
         except ImportError:
             raise _not_implemented("grag.core.mutate") from None
-        doc = define_schema(self.engine, self.config, req)
+        doc = define_schema(self.engine, self.config, req, detail=detail)
         doc.freshness = self.read_freshness()
         return doc
 
@@ -356,6 +380,8 @@ class GragService:
     @_operation
     def cypher_query(self, req: QueryRequest) -> QueryResponse:
         _assert_read_only(req.cypher)
+        if ";" in _LITERALS.sub(" ", req.cypher).strip().removesuffix(";"):
+            raise SchemaError("cypher_query accepts one statement per call.")
         freshness = self.read_freshness(req)
         limit = req.limit or self.config.default_query_limit
         limit = max(1, min(limit, self.config.max_query_limit))
@@ -365,7 +391,7 @@ class GragService:
         # few internal rows can consume result budget — truncated stays the
         # signal that more rows exist.
         result = drop_internal_rows(
-            self.engine.execute(_with_limit(req.cypher, limit + 1))
+            self.engine.execute(_with_limit(req.cypher, limit + 1), max_rows=limit + 1)
         )
         truncated = len(result.rows) > limit
         rows = result.rows[:limit]
@@ -439,11 +465,15 @@ class GragService:
 
     def submit_ingest_code(self, req: CodeIngestRequest) -> JobRecord:
         """Queue ingest_code on the service's job thread; poll with get_job."""
+        validate_request(req)
+        req = req.model_copy(deep=True)
         return self.jobs.submit(
             "ingest_code", lambda: self.ingest_code(req), req.model_dump()
         )
 
     def submit_ingest(self, req: IngestRequest) -> JobRecord:
+        validate_request(req)
+        req = req.model_copy(deep=True)
         params = req.model_dump(exclude={"documents"})
         params["documents"] = len(req.documents)
         return self.jobs.submit("ingest", lambda: self.ingest(req), params)
@@ -461,7 +491,9 @@ class GragService:
 
     def list_jobs(self, limit: int = 50) -> list[JobRecord]:
         with self._lifecycle:
-            return self._jobs.list(limit) if self._jobs else []
+            jobs = self._jobs.list(min(200, max(1, limit))) if self._jobs else []
+            json_bytes({"jobs": [j.model_dump(mode="json") for j in jobs]}, MAX_RESPONSE_BYTES, "response_bytes")
+            return jobs
 
     # -- ui -----------------------------------------------------------------------------
 
@@ -499,6 +531,8 @@ class GragService:
                     f"MATCH (a)-[r]->(b) RETURN a, r, b LIMIT {limit}"
                 )
             sub = merge_subgraphs(sub, extract_subgraph(rels, pk_map))
+        except ResourceLimitError:
+            raise
         except GragError:
             pass  # no rel tables yet
         nodes = [n for n in sub.nodes if not is_internal_label(n.label)]
@@ -531,6 +565,8 @@ class GragService:
         try:
             rels = self.engine.execute("MATCH (a)-[r]->(b) RETURN a, r, b")
             sub = merge_subgraphs(sub, extract_subgraph(rels, pk_map))
+        except ResourceLimitError:
+            raise
         except GragError:
             pass  # no rel tables yet
         nodes = [n for n in sub.nodes if not is_internal_label(n.label)]

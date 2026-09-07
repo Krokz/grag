@@ -24,6 +24,13 @@ from pydantic import ValidationError
 from grag.config import GragConfig
 from grag.core.engine import Engine
 from grag.core.errors import ConfigurationError
+from grag.core.limits import (
+    MAX_REQUEST_BYTES,
+    bounded_sources,
+    charge,
+    check_size,
+    read_source,
+)
 from grag.core.mutate import define_schema, upsert_nodes
 from grag.core.types import (
     DefineSchemaRequest,
@@ -88,6 +95,9 @@ def _ingest_chunks(
     )
 
     nodes: list[UpsertNode] = []
+    from grag.ingest.document_sync import mark_current, prepare_document_state
+
+    prepare_document_state(engine, [req.label])
     desired_by_source: dict[str, set[str]] = {}
     desired_by_identity: dict[str, set[str]] = {}
     source_occurrences: dict[str, int] = {}
@@ -125,6 +135,7 @@ def _ingest_chunks(
     with engine.write_transaction():
         if nodes:
             upsert_nodes(engine, config, UpsertNodesRequest(nodes=nodes))
+            mark_current(engine, req.label, [n.key for n in nodes])
         nodes_pruned = _prune_stale_chunks(
             engine,
             req.label,
@@ -206,6 +217,7 @@ def _embed_pending(engine: Engine, config: GragConfig, label: str) -> None:
 # --- public: ingest_paths (CLI) ---------------------------------------------------
 
 
+@bounded_sources
 def load_paths(paths: list[Path]) -> tuple[list[IngestDocument], list[str], int]:
     """Load .md/.txt/.json/.jsonl files (directories walked recursively).
 
@@ -215,16 +227,17 @@ def load_paths(paths: list[Path]) -> tuple[list[IngestDocument], list[str], int]
     documents: list[IngestDocument] = []
     warnings: list[str] = []
     files_read = 0
+    check_size("paths", len(paths), 64)
     expanded: list[Path] = []
     for path in paths:
         if path.is_dir():
-            expanded.extend(
-                sorted(
-                    p
-                    for p in path.rglob("*")
-                    if p.is_file() and p.suffix.lower() in _SUPPORTED_SUFFIXES
-                )
-            )
+            selected = []
+            for item in path.rglob("*"):
+                charge("source_entries")
+                if item.is_file() and item.suffix.lower() in _SUPPORTED_SUFFIXES:
+                    selected.append(item)
+                    check_size("document_files", len(selected) + len(expanded), 256)
+            expanded.extend(sorted(selected))
         else:
             expanded.append(path)
     for path in expanded:
@@ -243,6 +256,7 @@ def load_paths(paths: list[Path]) -> tuple[list[IngestDocument], list[str], int]
         except (OSError, UnicodeDecodeError, ValueError, ValidationError) as exc:
             warnings.append(f"skipped {path}: could not load ({exc})")
             continue
+        check_size("documents", len(documents) + len(loaded), 256)
         documents.extend(loaded)
         files_read += 1
     return documents, warnings, files_read
@@ -287,10 +301,13 @@ def ingest_paths(
 
 
 def _load_file(path: Path, suffix: str) -> list[IngestDocument]:
+    raw = read_source(path, MAX_REQUEST_BYTES)
+    charge("source_document_bytes", len(raw))
+    text = raw.decode("utf-8")
     if suffix in (".md", ".txt"):
-        return [IngestDocument(text=path.read_text(encoding="utf-8"), source=str(path))]
+        return [IngestDocument(text=text, source=str(path))]
     if suffix == ".json":
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(text)
         if isinstance(data, dict) and "documents" in data:
             data = data["documents"]
         if not isinstance(data, list):
@@ -300,7 +317,7 @@ def _load_file(path: Path, suffix: str) -> list[IngestDocument]:
             )
         return [IngestDocument.model_validate(item) for item in data]
     docs: list[IngestDocument] = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in text.splitlines():
         stripped = raw_line.strip()
         if stripped:
             docs.append(IngestDocument.model_validate(json.loads(stripped)))

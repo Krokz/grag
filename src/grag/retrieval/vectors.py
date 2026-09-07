@@ -2,8 +2,7 @@
 
 Codec ladder (``config.vector_codec``):
 
-    fp32   — exact vectors only; candidates come from the native HNSW index
-             (QUERY_VECTOR_INDEX) with an exact numpy scan as fallback.
+    fp32   — exact cosine scan over stored full-precision vectors.
     int8   — direction quantized to int8 with a float32 scale header;
              candidates scored by int dot against the query, top 4*top_k
              rescored exactly against the stored fp32 embedding.
@@ -14,21 +13,15 @@ Codec ladder (``config.vector_codec``):
              query, then rescored exactly. GRAG_POLAR_BITS_PER_DIM tunes the
              bit budget (default 1.0, comparable to binary).
 
-Verified LadybugDB 0.19.1 behaviors relied on here:
+Native binding constraints:
 
     * UINT8[] columns bind python list[int] params (bytes are rejected as
       BLOB); reads come back as list[int]. BLOB columns bind/return bytes.
-    * QUERY_VECTOR_INDEX with metric 'cosine' returns distance = 1 - cosine
-      similarity in [0, 2]; identical direction ~0, orthogonal 1, opposite 2.
-    * HNSW and FTS indexes pick up rows written after index creation.
     * numpy scalar/array types do not bind as params — convert via
       float()/int()/[float(x) ...] before binding.
-    * Index existence must NOT be probed with a try-query: a failed
-      QUERY_*_INDEX bind permanently poisons that connection's view of the
-      index (even if the same connection creates it afterwards). Create-first
-      with a tolerated "already exists" error is the safe existence check;
-      the write connection's catalog is authoritative, so a final retry goes
-      through execute_write.
+Native HNSW is not used: LadybugDB 0.20.2 can segfault after ordinary embedding
+invalidation. Writable engine startup retires legacy grag HNSW indexes while
+preserving vectors. Full precision candidates use the existing exact scan.
 """
 
 from __future__ import annotations
@@ -46,6 +39,7 @@ from grag.config import EmbedderConfig, GragConfig
 from grag.core.engine import Engine, node_record_from_value
 from grag.core.errors import ConfigurationError, GragError, SchemaError
 from grag.core.ident import validate_identifier
+from grag.core.limits import bounded_work, candidate_quota
 from grag.core.types import (
     EMB_CODE_PROP,
     EMB_FINGERPRINT_PROP,
@@ -511,31 +505,6 @@ def _ensure_extension(engine: Engine, name: str) -> None:
         loaded.add(name)
 
 
-def vector_index_name(table: str) -> str:
-    return f"grag_vec__{_ident(table)}"
-
-
-_VEC_INDEXES: weakref.WeakKeyDictionary[Engine, set[str]] = weakref.WeakKeyDictionary()
-
-
-def _ensure_vector_index(engine: Engine, table: str, index: str) -> None:
-    """Create the HNSW index once per engine. Create-first (duplicate error
-    tolerated) because a failed QUERY_VECTOR_INDEX probe poisons the
-    connection's catalog for that index name."""
-    ensured = _VEC_INDEXES.setdefault(engine, set())
-    if index in ensured:
-        return
-    try:
-        engine.execute_write(
-            f"CALL CREATE_VECTOR_INDEX('{_ident(table)}', '{index}', "
-            f"'{EMBEDDING_PROP}', metric := 'cosine')"
-        )
-    except GragError as exc:
-        if "already exists" not in str(exc):
-            raise
-    ensured.add(index)
-
-
 # Which physical column type holds direction codes per (db, table) — UINT8[]
 # preferred, BLOB fallback. Recorded for observability; writes/reads also
 # re-check TABLE_INFO so this never gates correctness.
@@ -643,7 +612,7 @@ def _prepare_embeddings(
         state = states.get(table)
         if state is None or state[0] != fingerprint:
             # Legacy vectors have no fingerprint and must be rebuilt too.
-            # Clear incompatible vectors before HNSW/codec candidate selection.
+            # Clear incompatible vectors before candidate selection.
             sets = ", ".join(f"n.{p} = NULL" for p in sorted(VECTOR_PROPS))
             engine.execute_write(
                 f"MATCH (n:{_ident(table)}) WHERE {_pending_predicate()} SET {sets}",
@@ -794,38 +763,17 @@ def reindex_embeddings(
     table: str,
     batch_size: int = 128,
 ) -> int:
-    """Drop the HNSW vector index, clear all embeddings, and re-embed all nodes.
+    """Invalidate and regenerate embeddings without native vector indexes.
 
-    Safe to call after WAL recovery when the HNSW index may reference nodes
-    whose embedding writes were rolled back. Dropping the index before any write
-    to the embedding column prevents LadybugDB's HNSW auto-maintenance from
-    dereferencing stale NULL embedding handles — the mechanism that causes
-    SIGSEGV in simsimd_cos_f32_neon.
-
-    Sequence: drop index → clear embeddings → embed all nodes (no HNSW fires
-    during writes) → recreate index from clean data.
+    Writable engine startup retires legacy grag HNSW indexes before any data
+    updates. Search and reindex never recreate them: even a freshly rebuilt
+    native index can crash on a subsequent ordinary text edit and refill.
 
     Returns the number of nodes re-embedded; 0 if no embedder is configured.
     """
     if config.embedder is None:
         return 0
     _ident(table)
-    _ensure_extension(engine, "VECTOR")
-    index = vector_index_name(table)
-    try:
-        engine.execute_write(f"CALL DROP_VECTOR_INDEX('{_ident(table)}', '{index}')")
-    except GragError as exc:
-        # Tolerate "doesn't have an index with name" (index never existed or
-        # was already dropped) — the goal is to ensure it's gone before writes.
-        if (
-            "doesn't have" not in str(exc).lower()
-            and "not exist" not in str(exc).lower()
-        ):
-            raise
-    # Invalidate the process-local set so _ensure_vector_index recreates the index.
-    ensured = _VEC_INDEXES.get(engine)
-    if ensured is not None:
-        ensured.discard(index)
     ensure_vector_storage(engine, config, table)
     props = table_properties(engine, table)
     to_clear = [
@@ -838,12 +786,9 @@ def reindex_embeddings(
         with engine.serialized_writes():
             _EMBED_CONFIGS.get(engine, {}).pop(table, None)
             engine.execute_write(f"MATCH (n:{_ident(table)}) SET {sets}")
-    n = embed_pending_nodes(
+    return embed_pending_nodes(
         engine, config, table, batch_size=batch_size, max_nodes=None
     )
-    if config.vector_codec == "fp32" and n > 0:
-        _ensure_vector_index(engine, table, index)
-    return n
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +796,7 @@ def reindex_embeddings(
 # ---------------------------------------------------------------------------
 
 
+@bounded_work
 def vector_candidates(
     engine: Engine,
     config: GragConfig,
@@ -859,6 +805,7 @@ def vector_candidates(
     top_k: int,
     *,
     per_table: bool = False,
+    evidence_now: Any = None,
 ) -> list[ScoredNode]:
     """Cosine-similarity candidates for query_text. Returns [] when no
     embedder is configured (FTS-only mode). Lazily provisions vector columns
@@ -881,19 +828,22 @@ def vector_candidates(
     tables = candidate_tables(engine, config, labels)
     if not tables:
         return []
+    top_k = candidate_quota(tables, top_k)
     from grag.embedworker import attached_worker
 
     worker = attached_worker(engine)
     polar_bits = _polar_bits_per_dim() if snapshot.vector_codec == "polar" else None
     fingerprints: dict[str, str] = {}
+    remaining_embeddings = max(0, config.max_embed_per_search)
     for table in tables:
         _, fingerprints[table], _ = _prepare_embeddings(
             engine, snapshot, table, polar_bits=polar_bits
         )
-        if worker is None:
-            embed_pending_nodes(
-                engine, config, table, max_nodes=config.max_embed_per_search
-            )
+        if worker is None and remaining_embeddings:
+            quota = max(1, config.max_embed_per_search // len(tables))
+            quota = min(quota, remaining_embeddings)
+            embed_pending_nodes(engine, config, table, max_nodes=quota)
+            remaining_embeddings -= quota
     if worker is not None:
         # Never embed on the request thread when a worker exists; just make
         # sure it is awake so the reported backlog shrinks.
@@ -920,13 +870,14 @@ def vector_candidates(
     for table in tables:
         fingerprint = fingerprints[table]
         if snapshot.vector_codec == "fp32":
-            results.extend(_fp32_candidates(engine, table, q, top_k, pk, fingerprint))
+            results.extend(_exact_scan(engine, table, q, top_k, pk, fingerprint, evidence_now=evidence_now))
         else:
             _check_codec(snapshot.vector_codec)
             results.extend(
                 _codec_candidates(
                     engine, table, snapshot.vector_codec, u_q, q, top_k, pk, fingerprint,
                     polar_bits=polar_bits,
+                    evidence_now=evidence_now,
                 )
             )
     if any(
@@ -947,49 +898,6 @@ def _cosine_scores(E: np.ndarray, q: np.ndarray) -> np.ndarray:
     return ((E @ q) / denom).astype(np.float32)
 
 
-def _query_vector_index(
-    engine: Engine, table: str, index: str, q: np.ndarray, k: int, write: bool = False
-):
-    cypher = (
-        f"CALL QUERY_VECTOR_INDEX('{_ident(table)}', '{index}', $q, $k) "
-        "RETURN node, distance"
-    )
-    params = {"q": [float(x) for x in q], "k": int(k)}
-    if write:
-        return engine.execute_write(cypher, params)
-    return engine.execute(cypher, params)
-
-
-def _fp32_candidates(
-    engine: Engine, table: str, q: np.ndarray, top_k: int, pk: dict[str, str], fingerprint: str
-) -> list[ScoredNode]:
-    try:
-        _ensure_extension(engine, "VECTOR")
-        index = vector_index_name(table)
-        _ensure_vector_index(engine, table, index)
-        try:
-            res = _query_vector_index(engine, table, index, q, top_k)
-        except GragError:
-            # reader may hold a stale catalog; the write connection is authoritative
-            res = _query_vector_index(engine, table, index, q, top_k, write=True)
-    except GragError:
-        return _exact_scan(engine, table, q, top_k, pk, fingerprint)
-    out = []
-    for node_val, dist in res.rows:
-        if node_val.get(EMB_FINGERPRINT_PROP) != fingerprint:
-            # Another configuration may have committed during query inference.
-            # Filter before ranking so incompatible HNSW hits cannot crowd out
-            # the still-current subset of a partially rebuilt table.
-            return _exact_scan(engine, table, q, top_k, pk, fingerprint)
-        score = max(-1.0, min(1.0, 1.0 - float(dist)))
-        out.append(
-            ScoredNode(
-                node=node_record_from_value(node_val, pk), score=score, match="vector"
-            )
-        )
-    return out
-
-
 def _fetch_nodes_by_keys(
     engine: Engine, table: str, pk_prop: str, keys: list[Any], fingerprint: str
 ) -> list[dict]:
@@ -1006,9 +914,10 @@ def _fetch_nodes_by_keys(
 
 
 def _exact_scan(
-    engine: Engine, table: str, q: np.ndarray, top_k: int, pk: dict[str, str], fingerprint: str
+    engine: Engine, table: str, q: np.ndarray, top_k: int, pk: dict[str, str], fingerprint: str,
+    *, evidence_now: Any = None,
 ) -> list[ScoredNode]:
-    """HNSW-unavailable fallback: exact cosine over the table, two-phase.
+    """Exact cosine over the table, two-phase; no native index maintenance.
 
     Phase 1 ships only (pk, fp32 vector) per row — full node records are
     fetched for the top_k winners only."""
@@ -1017,11 +926,14 @@ def _exact_scan(
         # Unreachable via embed_pending_nodes (it requires a pk to key
         # embedding writes); guards against externally-written columns.
         return []
+    from grag.core.evidence import current_predicate
+
+    predicate = current_predicate(engine, table, "n") if evidence_now is not None else "true"
     res = engine.execute(
         f"MATCH (n:{_ident(table)}) WHERE n.{EMBEDDING_PROP} IS NOT NULL "
-        f"AND n.{EMB_FINGERPRINT_PROP} = $fingerprint "
+        f"AND n.{EMB_FINGERPRINT_PROP} = $fingerprint AND ({predicate}) "
         f"RETURN n.{_ident(pk_prop)}, n.{EMBEDDING_PROP}",
-        {"fingerprint": fingerprint},
+        {"fingerprint": fingerprint, "evidence_now": evidence_now.isoformat() if evidence_now else ""},
     )
     keys, vecs = [], []
     for key, emb in res.rows:
@@ -1056,6 +968,7 @@ def _codec_candidates(
     fingerprint: str,
     *,
     polar_bits: float | None = None,
+    evidence_now: Any = None,
 ) -> list[ScoredNode]:
     """Approximate scoring over stored direction codes, then exact rescore of
     the top 4*top_k against the fp32 embeddings.
@@ -1067,11 +980,14 @@ def _codec_candidates(
     pk_prop = pk.get(table)
     if not pk_prop:
         return []  # see _exact_scan
+    from grag.core.evidence import current_predicate
+
+    predicate = current_predicate(engine, table, "n") if evidence_now is not None else "true"
     res = engine.execute(
         f"MATCH (n:{_ident(table)}) WHERE n.{EMB_CODE_PROP} IS NOT NULL "
-        f"AND n.{EMB_FINGERPRINT_PROP} = $fingerprint "
+        f"AND n.{EMB_FINGERPRINT_PROP} = $fingerprint AND ({predicate}) "
         f"RETURN n.{_ident(pk_prop)}, n.{EMB_CODE_PROP}",
-        {"fingerprint": fingerprint},
+        {"fingerprint": fingerprint, "evidence_now": evidence_now.isoformat() if evidence_now else ""},
     )
     keys, codes = [], []
     for key, raw_code in res.rows:

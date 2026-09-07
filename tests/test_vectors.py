@@ -13,7 +13,7 @@ import pytest
 
 from grag.config import EmbedderConfig, GragConfig
 from grag.core.engine import Engine
-from grag.core.errors import ConfigurationError, GragError
+from grag.core.errors import ConfigurationError
 from grag.core.types import (
     EMB_CODE_PROP,
     EMB_MAGNITUDE_PROP,
@@ -378,20 +378,20 @@ def test_vector_candidates_labels_filter(vengine, vconfig):
     )
 
 
-def test_vector_candidates_exact_scan_fallback(vengine, vconfig, monkeypatch):
+def test_fp32_search_does_not_require_native_vector_extension(vengine, vconfig, monkeypatch):
     vconfig.vector_codec = "fp32"
 
     def boom(*args, **kwargs):
-        raise GragError("vector index unavailable in this build")
+        raise AssertionError("fp32 search must not load or create native vector indexes")
 
-    monkeypatch.setattr(vectors, "_query_vector_index", boom)
+    monkeypatch.setattr(vectors, "_ensure_extension", boom)
     hits = vectors.vector_candidates(
         vengine, vconfig, "semantic vector retrieval", None, 2
     )
     assert hits and hits[0].node.id == "Doc:doc-1"
 
 
-def test_vector_candidates_second_call_reuses_index(vengine, vconfig):
+def test_vector_candidates_second_call_is_consistent(vengine, vconfig):
     vconfig.vector_codec = "fp32"
     first = vectors.vector_candidates(vengine, vconfig, "graph relationships", None, 2)
     second = vectors.vector_candidates(vengine, vconfig, "graph relationships", None, 2)

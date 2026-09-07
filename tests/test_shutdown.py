@@ -154,11 +154,11 @@ def test_active_read_keeps_engine_until_native_result_returns(svc, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     execute = svc.engine.execute
 
-    def paused(cypher, *args):
+    def paused(cypher, *args, **kwargs):
         if cypher.startswith("RETURN 42"):
             entered.set()
             assert release.wait(5)
-        return execute(cypher, *args)
+        return execute(cypher, *args, **kwargs)
 
     monkeypatch.setattr(svc.engine, "execute", paused)
     with ThreadPoolExecutor(max_workers=1) as pool:

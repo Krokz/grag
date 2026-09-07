@@ -9,6 +9,7 @@ search to FTS-only rather than failing the request.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import math
 import weakref
@@ -16,7 +17,9 @@ from typing import Any, Literal
 
 from grag.config import GragConfig
 from grag.core.engine import Engine, extract_subgraph, node_record_from_value
-from grag.core.errors import GragError
+from grag.core.errors import GragError, ResourceLimitError
+from grag.core.evidence import current_predicate, exclusion_reason
+from grag.core.limits import MAX_EXPANSION_PATHS, bounded_work, candidate_quota
 from grag.core.types import (
     FreshnessReport,
     ScoredNode,
@@ -44,6 +47,7 @@ _RRF_K = 60
 _MAX_EXPANSION_PATHS = 512  # per seed; bounds path enumeration on dense graphs
 
 
+@bounded_work
 def search_knowledge(
     engine: Engine,
     config: GragConfig,
@@ -53,13 +57,21 @@ def search_knowledge(
     freshness: FreshnessReport | None = None,
 ) -> SearchResponse:
     top_k = max(1, req.top_k)
+    now = dt.datetime.now(dt.timezone.utc)
+    excluded: set[str] = set()
+
+    def eligible(scored: ScoredNode) -> bool:
+        if req.evidence == "current" and exclusion_reason(scored.node, now):
+            excluded.add(scored.node.id)
+            return False
+        return True
     hops = max(0, min(req.hops, config.max_hops))
     budget = retrieval_budget(req.token_budget, config.default_token_budget)
     pk = pk_map_with_fallback(engine)
     tables = candidate_tables(engine, config, req.labels)
     # Oversample each label so fusion/diversity can select beyond a modality's
     # first top_k. A bounded shortlist is not an exhaustive graph-wide ranking.
-    candidate_k = max(32, 4 * top_k)
+    candidate_k = candidate_quota(tables, max(32, 4 * top_k))
 
     fts_list: list[ScoredNode] = []
     vec_list: list[ScoredNode] = []
@@ -76,19 +88,24 @@ def search_knowledge(
                     candidate_k,
                     pk,
                     cols=text_properties[table],
+                    evidence_now=now if req.evidence == "current" else None,
                 )
             )
-        fts_list = rank_lexical(engine, fts_list, req.query, text_properties)
+        fts_list = rank_lexical(engine, [s for s in fts_list if eligible(s)], req.query, text_properties)
         if config.embedder is None:
             vector_status = "off"
         else:
             try:
                 vec_list = vector_candidates(
-                    engine, config, req.query, req.labels, candidate_k, per_table=True
+                    engine, config, req.query, tables, candidate_k, per_table=True,
+                    evidence_now=now if req.evidence == "current" else None,
                 )
+                vec_list = [s for s in vec_list if eligible(s)]
                 pending = sum(
                     pending_embedding_count(engine, config, t) for t in tables
                 )
+            except ResourceLimitError:
+                raise  # never conceal exhausted work as ordinary FTS-only retrieval
             except Exception as exc:  # noqa: BLE001 — vector path is best-effort
                 log.warning("Vector search skipped, degrading to FTS-only: %s", exc)
                 vector_status = "error"
@@ -96,7 +113,8 @@ def search_knowledge(
     fused = _rrf_fuse({"fts": fts_list, "vector": vec_list})
     seeds = _diversify(fused, top_k, config.search_label_cap)
     expanded, expansion_limited = _expand_neighborhood(
-        engine, _seed_refs(seeds, pk), hops, pk
+        engine, _seed_refs(seeds, pk), hops, pk,
+        excluded=excluded if req.evidence == "current" else None, now=now,
     )
     subgraph = merge_subgraphs(Subgraph(nodes=[s.node for s in seeds]), expanded)
     return pack_search_response(
@@ -108,6 +126,9 @@ def search_knowledge(
         index_status=index_status,
         expansion_limited=expansion_limited,
         freshness=freshness,
+        query=req.query,
+        evidence_policy=req.evidence,
+        excluded_evidence=len(excluded),
     )
 
 
@@ -127,6 +148,7 @@ def _fts_seeds(
     pk: dict[str, str],
     *,
     cols: list[str] | None = None,
+    evidence_now: dt.datetime | None = None,
 ) -> list[ScoredNode]:
     if cols is None:
         cols = string_props(engine, table)
@@ -139,11 +161,22 @@ def _fts_seeds(
         f"CALL QUERY_FTS_INDEX('{_ident(table)}', '{index}', $q, TOP := {int(top_k)}) "
         "RETURN node, score"
     )
+    params = {"q": query}
+    predicate = current_predicate(engine, table, "node") if evidence_now is not None else "true"
+    if predicate != "true" and evidence_now is not None:
+        # Native TOP runs before WHERE. Filter first so a table's retired
+        # memories cannot monopolize the bounded shortlist.
+        cypher = (f"CALL QUERY_FTS_INDEX('{_ident(table)}', '{index}', $q) "
+                  f"WITH node, score WHERE {predicate} RETURN node, score "
+                  f"ORDER BY score DESC, node.{_ident(pk[table])} LIMIT {int(top_k)}")
+        params["evidence_now"] = evidence_now.isoformat()
     try:
-        res = engine.execute(cypher, {"q": query})
+        res = engine.execute(cypher, params)
+    except ResourceLimitError:
+        raise
     except GragError:
         # reader may hold a stale catalog; the write connection is authoritative
-        res = engine.execute_write(cypher, {"q": query})
+        res = engine.execute_write(cypher, params)
     # TOP bounds the set, but the native API does not promise result-row order.
     return sorted(
         [
@@ -277,24 +310,41 @@ def _seed_refs(seeds: list[ScoredNode], pk: dict[str, str]) -> list[tuple[str, A
 
 
 def _expand_neighborhood(
-    engine: Engine, seed_refs: list[tuple[str, Any]], hops: int, pk: dict[str, str]
+    engine: Engine, seed_refs: list[tuple[str, Any]], hops: int, pk: dict[str, str],
+    *, excluded: set[str] | None = None, now: dt.datetime | None = None,
 ) -> tuple[Subgraph, bool]:
     """Undirected k-hop neighborhood of the seed nodes, across all rel types."""
     if hops <= 0 or not seed_refs:
         return Subgraph(), False
     subs = []
     limited = False
+    remaining = MAX_EXPANSION_PATHS
     for label, key in seed_refs:
+        if remaining == 0:
+            limited = True
+            break
+        cap = min(_MAX_EXPANSION_PATHS, remaining)
         p = pk.get(label)
         if not p:
             continue
         res = engine.execute(
             f"MATCH p = (a:{_ident(label)} {{{_ident(p)}: $key}})-[*1..{int(hops)}]-(b) "
-            f"RETURN p LIMIT {_MAX_EXPANSION_PATHS + 1}",
+            f"RETURN p LIMIT {cap + 1}",
             {"key": key},
         )
-        if len(res.rows) > _MAX_EXPANSION_PATHS:
+        if len(res.rows) > cap:
             limited = True
-            res.rows = res.rows[:_MAX_EXPANSION_PATHS]
-        subs.append(extract_subgraph(res, pk))
+            res.rows = res.rows[:cap]
+        remaining -= len(res.rows)
+        if excluded is None:
+            subs.append(extract_subgraph(res, pk))
+        else:
+            # Reject the complete path: inactive evidence must not become a
+            # hidden bridge to apparently connected current facts.
+            for row in res.rows:
+                path = extract_subgraph(type(res)(columns=res.columns, rows=[row]), pk)
+                hidden = {n.id for n in path.nodes if exclusion_reason(n, now or dt.datetime.now(dt.timezone.utc))}
+                excluded.update(hidden)
+                if not hidden:
+                    subs.append(path)
     return (merge_subgraphs(*subs) if subs else Subgraph()), limited

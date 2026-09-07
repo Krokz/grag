@@ -641,7 +641,7 @@ def test_500_returns_generic_body(tmp_path, monkeypatch):
     with TestClient(app, raise_server_exceptions=False) as c:
         res = c.post("/api/query", json={"cypher": "RETURN 1"})
     assert res.status_code == 500
-    assert res.json() == {"error": "Internal server error.", "hint": None}
+    assert res.json() == {"error": "Internal server error.", "hint": None, "code": "internal_error"}
     assert "/secret/path" not in res.text
 
 

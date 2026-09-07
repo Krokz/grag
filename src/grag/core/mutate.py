@@ -32,6 +32,7 @@ from grag.core.types import (
     PropertyDoc,
     RelTableDoc,
     RelTableSpec,
+    SchemaDetail,
     SchemaDocument,
     UpsertEdgesRequest,
     UpsertNodesRequest,
@@ -271,7 +272,7 @@ def _similar_error(name: str, existing: str, kind: str) -> SchemaError:
 
 
 def define_schema(
-    engine: Engine, config: GragConfig, req: DefineSchemaRequest
+    engine: Engine, config: GragConfig, req: DefineSchemaRequest, *, detail: SchemaDetail = "full",
 ) -> SchemaDocument:
     _validate_request(req)
 
@@ -353,7 +354,7 @@ def define_schema(
         from grag.core.schema import build_schema_document
     except ImportError:
         return _fallback_schema_document(engine)
-    return build_schema_document(engine, config)
+    return build_schema_document(engine, config, detail=detail)
 
 
 def _exists_error(name: str) -> SchemaError:

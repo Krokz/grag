@@ -131,6 +131,12 @@ jobs:
               sys.exit("could not install LadybugDB extensions after 5 attempts")
           PY
 
+      - name: Verify shared MCP lifecycle (Windows)
+        # Fail early with proxy/daemon diagnostics for native restart issues.
+        # The full suite below also checks this after the other DB workloads.
+        if: runner.os == 'Windows'
+        run: python -m pytest -q tests/test_shared_agent_workflow.py
+
       - name: Run tests
         run: pytest
 

@@ -259,7 +259,7 @@ def test_get_context_budget_truncation(docs_engine):
     assert tight.omitted_nodes or tight.omitted_properties
     assert tight.response_token_estimate <= 256
     room = get_context(
-        docs_engine, cfg, ContextRequest(node_ids=ids, hops=0, token_budget=100_000)
+        docs_engine, cfg, ContextRequest(node_ids=ids, hops=0, token_budget=32_768)
     )
     assert not room.truncated
     assert set(room.included_node_ids) == set(ids)

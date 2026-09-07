@@ -38,6 +38,11 @@ def is_replay_error(message: str) -> bool:
     message = message.lower()
     if "could not set lock" in message or "permission denied" in message:
         return False
+    # Reproduced on 0.20.2 when replaying ALTER ... DEFAULT NULL after commit.
+    # This native opening error omits the word WAL; keep normal opens strict
+    # and route it to the same preserve-and-recover-a-copy guidance.
+    if "trying to a create a vector with any type" in message:
+        return True
     return bool(re.search(r"\b(wal|shadow)\b", message)) and any(
         word in message for word in ("replay", "corrupt", "checksum")
     )
@@ -228,8 +233,6 @@ def _replay(path: Path, buffer_pool_size: int, *, allow_loss: bool) -> dict:
 
     config = GragConfig(db_path=path, embedder=None, buffer_pool_size=buffer_pool_size)
     with Engine(config, _recover_wal=allow_loss) as engine:
-        if not allow_loss:
-            engine._drop_stale_vector_indexes()
         tables = _inspect(engine)
         engine.execute_write("CHECKPOINT")
     # A strict reopen must succeed without fallback and retain all observed

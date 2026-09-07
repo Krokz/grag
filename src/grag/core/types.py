@@ -59,6 +59,7 @@ Storage conventions:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -144,11 +145,13 @@ def merge_subgraphs(*subs: Subgraph) -> Subgraph:
 
 
 class PropertySpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str
     type: CypherType = "STRING"
 
 
 class NodeTableSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str
     primary_key: str = "id"
     properties: list[PropertySpec] = Field(default_factory=list)
@@ -156,6 +159,7 @@ class NodeTableSpec(BaseModel):
 
 
 class RelTableSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str
     from_label: str
     to_label: str
@@ -182,7 +186,7 @@ class PropertyDoc(BaseModel):
 class NodeTableDoc(BaseModel):
     name: str
     properties: list[PropertyDoc] = Field(default_factory=list)
-    row_count: int = 0
+    row_count: int | None = None  # unknown when detail=compact
     sample_keys: list[str] = Field(default_factory=list)
     searchable: bool = False
 
@@ -192,7 +196,7 @@ class RelTableDoc(BaseModel):
     from_label: str = ""
     to_label: str = ""
     properties: list[PropertyDoc] = Field(default_factory=list)
-    row_count: int = 0
+    row_count: int | None = None
 
 
 FreshnessMode = Literal["allow_stale", "wait", "require"]
@@ -212,6 +216,9 @@ class FreshnessReport(BaseModel):
     timed_out: bool = False
 
 
+SchemaDetail = Literal["compact", "full"]
+
+
 class SchemaDocument(BaseModel):
     """Full schema introspection. `text` is the prompt-shaped rendering an LLM
     anchors on before writing Cypher — keep it compact."""
@@ -219,10 +226,34 @@ class SchemaDocument(BaseModel):
     node_tables: list[NodeTableDoc] = Field(default_factory=list)
     rel_tables: list[RelTableDoc] = Field(default_factory=list)
     text: str = ""
+    detail: SchemaDetail = "full"
+    schema_revision: str = ""
+    unchanged: bool = False
     freshness: FreshnessReport = Field(default_factory=FreshnessReport)
 
 
 # --- mutation -------------------------------------------------------------------
+
+
+class EvidenceUpdate(BaseModel):
+    """Opt a memory into history, or patch its explicit evidence lifecycle."""
+
+    model_config = ConfigDict(extra="forbid")
+    state: Literal["current", "superseded", "retracted"] | None = None
+    review: Literal["unreviewed", "accepted", "disputed"] | None = None
+    expires_at: datetime | None = None
+    superseded_by: str | None = Field(default=None, min_length=3, max_length=2048)
+    actor: str | None = Field(default=None, max_length=256)
+    reason: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode="after")
+    def explicit_values(self) -> EvidenceUpdate:
+        for field in ("state", "review"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
+        if self.expires_at is not None and self.expires_at.utcoffset() is None:
+            raise ValueError("expires_at requires an explicit timezone")
+        return self
 
 
 class UpsertNode(BaseModel):
@@ -232,6 +263,7 @@ class UpsertNode(BaseModel):
     properties: dict[str, Any] = Field(default_factory=dict)
     source: str | None = None  # provenance -> _source
     expected_revision: str | None = Field(default=None, pattern=r"^(absent|[0-9a-f]{64})$")
+    evidence: EvidenceUpdate | None = None
 
 
 class UpsertEdge(BaseModel):
@@ -272,7 +304,7 @@ class MutationSummary(BaseModel):
 
 
 class QueryRequest(ReadPolicy):
-    cypher: str
+    cypher: str = Field(max_length=65_536)
     limit: int | None = None  # clamped to [1, config.max_query_limit]
 
 
@@ -289,20 +321,34 @@ class QueryResponse(BaseModel):
 
 # A successful response needs room for its graph and completeness metadata.
 MIN_RETRIEVAL_BUDGET = 256
+EvidenceMode = Literal["current", "all"]
 
 
 class SearchRequest(ReadPolicy):
-    query: str
-    top_k: int = 8
+    query: str = Field(max_length=8192)
+    top_k: int = Field(default=8, ge=1, le=64)
     hops: int = 1  # clamped to config.max_hops
-    labels: list[str] | None = None  # restrict seed node tables
-    token_budget: int | None = Field(default=None, ge=MIN_RETRIEVAL_BUDGET)
+    labels: list[str] | None = Field(default=None, max_length=64)  # seed tables
+    token_budget: int | None = Field(default=None, ge=MIN_RETRIEVAL_BUDGET, le=32_768)
+    evidence: EvidenceMode = "current"
 
 
 class ScoredNode(BaseModel):
     node: NodeRecord
     score: float
     match: Literal["fts", "vector", "graph"]
+
+
+class TextExcerpt(BaseModel):
+    """Exact partial STRING evidence; offsets are Unicode character positions."""
+
+    node_id: str
+    property: str
+    text: str
+    offset: int
+    end: int  # exclusive
+    total_chars: int
+    sha256: str  # compatible with get_context(text_sha256=...)
 
 
 class RetrievalMetadata(BaseModel):
@@ -315,6 +361,9 @@ class RetrievalMetadata(BaseModel):
     omitted_properties: int = 0  # on included records; values are never clipped
     expansion_limited: bool = False  # path enumeration reached its cap
     freshness: FreshnessReport = Field(default_factory=FreshnessReport)
+    text_excerpts: list[TextExcerpt] = Field(default_factory=list)
+    evidence_policy: EvidenceMode | None = None
+    excluded_evidence: int = 0  # encountered nodes excluded, not a graph-wide count
 
 
 class SearchResponse(RetrievalMetadata):
@@ -339,15 +388,25 @@ class SearchResponse(RetrievalMetadata):
 
 
 class ContextRequest(ReadPolicy):
-    node_ids: list[str]
+    node_ids: list[str] = Field(max_length=64)
     hops: int = 1
-    token_budget: int | None = Field(default=None, ge=MIN_RETRIEVAL_BUDGET)
+    token_budget: int | None = Field(default=None, ge=MIN_RETRIEVAL_BUDGET, le=32_768)
     text_property: str | None = None  # page one STRING property on one node
     text_offset: int = Field(default=0, ge=0)  # Unicode character offset
     text_sha256: str | None = None  # refuse continuation if the text changed
+    evidence: EvidenceMode = "current"
+    history: bool = False
+    history_before: int | None = Field(default=None, ge=1, le=2**63-1)
+    revision: int | None = Field(default=None, ge=0, le=2**63-1)
 
     @model_validator(mode="after")
     def validate_text_page(self) -> ContextRequest:
+        if (self.history or self.revision is not None) and len(self.node_ids) != 1:
+            raise ValueError("history/revision requires exactly one node id")
+        if self.history_before is not None and not self.history:
+            raise ValueError("history_before requires history=true")
+        if self.history and (self.revision is not None or self.text_property is not None):
+            raise ValueError("history cannot be combined with revision or text paging")
         if self.text_property is not None:
             if not self.text_property or len(self.node_ids) != 1:
                 raise ValueError(
@@ -371,6 +430,23 @@ class ContextResponse(RetrievalMetadata):
     context: str
     subgraph: Subgraph = Field(default_factory=Subgraph)
     text_page: TextPage | None = None
+    history: EvidenceHistory | None = None
+
+
+class EvidenceHistoryEntry(BaseModel):
+    sequence: int
+    revision: str
+    recorded_at: str
+    source: str | None = None
+    actor: str | None = None
+    reason: str | None = None
+    baseline: bool = False
+
+
+class EvidenceHistory(BaseModel):
+    node_id: str
+    entries: list[EvidenceHistoryEntry] = Field(default_factory=list)
+    next_before: int | None = None
 
 
 class PackedContext(BaseModel):
@@ -384,6 +460,7 @@ class PackedContext(BaseModel):
     omitted_edges: int = 0
     omitted_properties: int = 0
     subgraph: Subgraph = Field(default_factory=Subgraph)
+    text_excerpts: list[TextExcerpt] = Field(default_factory=list)
 
 
 # --- ingestion ------------------------------------------------------------------
@@ -421,7 +498,7 @@ class IngestResponse(BaseModel):
 class CodeIngestRequest(BaseModel):
     paths: list[str]
     calls: bool = True
-    max_file_kb: int = 1024
+    max_file_kb: int = Field(default=1024, ge=1, le=32_768)
     # Skip the database writes for files whose content (and parse options)
     # match the hash recorded at their last ingest. Every file is still
     # parsed so cross-file IMPORTS/CALLS/INHERITS resolve, but only changed

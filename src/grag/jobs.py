@@ -29,6 +29,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from grag.core.errors import GragError, ShutdownError
+from grag.core.limits import MAX_JOBS, MAX_RESPONSE_BYTES, check_size, json_bytes
 from grag.core.types import JobRecord
 
 log = logging.getLogger(__name__)
@@ -39,7 +40,8 @@ def _now() -> str:
 
 
 class JobManager:
-    def __init__(self, *, max_history: int = 200):
+    def __init__(self, *, max_history: int = 200, max_pending: int = MAX_JOBS):
+        self.max_pending = max(1, int(max_pending))
         self.max_history = max(1, int(max_history))
         self._jobs: OrderedDict[str, JobRecord] = OrderedDict()
         self._lock = threading.RLock()
@@ -51,15 +53,16 @@ class JobManager:
         self, kind: str, fn: Callable[[], BaseModel | dict[str, Any]], params: dict
     ) -> JobRecord:
         job = JobRecord(id=secrets.token_hex(8), kind=kind, created_at=_now(), params=params)
+        # Reserve room for completion timestamps and bounded failure details.
+        # Refuse before admission so an oversized reply cannot hide a queued ID.
+        json_bytes(job, MAX_RESPONSE_BYTES - 32_768, "job_record_bytes")
         with self._lock:
             if self._closed:
                 raise ShutdownError()
+            check_size("pending_jobs", len(self._futures) + 1, self.max_pending,
+                       hint="Poll job_status and submit again after a job finishes; the rejected job was not queued.")
             self._jobs[job.id] = job
-            while len(self._jobs) > self.max_history:
-                _oldest_id, oldest = next(iter(self._jobs.items()))
-                if oldest.status in ("queued", "running"):
-                    break  # never forget live work
-                self._jobs.popitem(last=False)
+            self._trim()
             # Admission and executor submission share the shutdown lock. Otherwise
             # shutdown can strand a queued record before submit reaches the pool.
             try:
@@ -107,6 +110,14 @@ class JobManager:
                 self._update(job_id, status="failed", finished_at=_now(),
                              error=f"{type(error).__name__}: {error}")
             self._futures.pop(job_id, None)
+            self._trim()
+
+    def _trim(self) -> None:
+        for key, job in list(self._jobs.items()):
+            if len(self._jobs) <= self.max_history:
+                break
+            if job.status not in ("queued", "running"):
+                del self._jobs[key]
 
     # -- internals ------------------------------------------------------------------
 
@@ -114,6 +125,9 @@ class JobManager:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
+                error = fields.get("error")
+                if isinstance(error, str) and len(error.encode("utf-8")) > 4096:
+                    fields["error"] = error.encode("utf-8")[:4096].decode("utf-8", errors="ignore") + " [truncated]"
                 self._jobs[job_id] = job.model_copy(update=fields)
 
     def _run(self, job_id: str, fn: Callable[[], BaseModel | dict[str, Any]]) -> None:
@@ -121,6 +135,9 @@ class JobManager:
         try:
             out = fn()
             result = out.model_dump() if isinstance(out, BaseModel) else dict(out)
+            with self._lock:
+                completed = self._jobs[job_id].model_copy(update={"status": "done", "finished_at": _now(), "result": result})
+            json_bytes(completed, MAX_RESPONSE_BYTES - 128, "job_result_bytes")
         except ShutdownError as exc:
             self._update(job_id, status="cancelled", finished_at=_now(), error=exc.message)
             return

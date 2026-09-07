@@ -214,14 +214,18 @@ Engine(GragConfig(db_path=sys.argv[1], buffer_pool_size=128*1024**2))
 
 
 @pytest.mark.parametrize("auto_recover", [False, True])
-def test_normal_open_never_prompts_or_selects_lossy_replay(cfg, monkeypatch, auto_recover):
+@pytest.mark.parametrize("error", [
+    "Corrupted wal file. Read out invalid WAL record type.",
+    "Runtime exception: Trying to a create a vector with ANY type. This should not happen. Data type is expected to be resolved during binding.",
+])
+def test_normal_open_never_prompts_or_selects_lossy_replay(cfg, monkeypatch, auto_recover, error):
     import grag.core.engine as module
 
     calls = []
 
     def failed_open(*args, **kw):
         calls.append(kw)
-        raise RuntimeError("Corrupted wal file. Read out invalid WAL record type.")
+        raise RuntimeError(error)
 
     def unexpected_input(*args, **kw):
         pytest.fail("normal database open must not prompt for destructive recovery")

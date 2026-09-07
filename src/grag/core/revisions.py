@@ -25,6 +25,8 @@ _REVISION_METADATA = {
     "_source",
     "_created_at",
     "_document_owner",
+    "_evidence_state", "_review_state", "_expires_at", "_superseded_by",
+    "_evidence_seq", "_document_state",
 }
 
 
@@ -58,9 +60,18 @@ def content_revision(value: dict) -> str:
 
 
 def annotate_revisions(value: Any) -> Any:
+    """Present whole entities without derived vectors; projections stay exact.
+
+    Recurse through paths, collections and maps, retaining native identity and
+    provenance. An explicitly projected vector is a plain list and is untouched.
+    Revisions always fingerprint the original evidence before presentation.
+    """
     if isinstance(value, dict):
         if "_LABEL" in value and "_ID" in value:
-            return {**value, "_revision": content_revision(value)}
+            return {
+                **{k: v for k, v in value.items() if k not in VECTOR_PROPS},
+                "_revision": content_revision(value),
+            }
         return {key: annotate_revisions(v) for key, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [annotate_revisions(v) for v in value]
