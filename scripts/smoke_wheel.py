@@ -51,7 +51,8 @@ print('wheel: native write/reopen/query, UI asset, real stdio MCP handshake/read
 
 
 def main() -> None:
-    wheels = [Path(sys.argv[1]).resolve()] if len(sys.argv) > 1 else list((ROOT / "dist").glob("*.whl"))
+    arguments = [arg for arg in sys.argv[1:] if arg != "--code"]
+    wheels = [Path(arguments[0]).resolve()] if arguments else list((ROOT / "dist").glob("*.whl"))
     if len(wheels) != 1:
         raise SystemExit("Expected one built wheel in dist/")
     wheel = wheels[0]
@@ -100,6 +101,16 @@ def main() -> None:
         result = subprocess.run([*command, "doctor", "--json"], cwd=root, env=env, capture_output=True, timeout=90)
         assert result.returncode == 0 and json.loads(result.stdout)["ready"], result.stderr
         print("wheel: explicit first-use extension preparation and offline FTS search passed")
+        if "--code" in sys.argv[1:]:
+            subprocess.run([str(python), "-m", "pip", "install", f"{wheel}[code]"], check=True, cwd=root, env=env)
+            result = subprocess.run([*command, "doctor", "--prepare", "--json"], cwd=root, env=env, capture_output=True, timeout=900)
+            report = json.loads(result.stdout)
+            assert result.returncode == 0 and report["ready"], (report, result.stderr)
+            result = subprocess.run([*command, "doctor", "--json"], cwd=root, env=env, capture_output=True, timeout=150)
+            report = json.loads(result.stdout)
+            assert result.returncode == 0 and report["ready"], (report, result.stderr)
+            assert sum(c["key"].startswith("grammar:") for c in report["checks"]) >= 19
+            print("wheel: optional code extra, grammar preparation and offline parsing passed")
 
 
 if __name__ == "__main__":

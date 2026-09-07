@@ -41,7 +41,7 @@ jobs:
           python -m pip install build
           python -m build --wheel
       - name: Install into clean environment and run native/CLI/MCP smoke
-        run: python scripts/smoke_wheel.py
+        run: python scripts/smoke_wheel.py --code
       - if: runner.os == 'Windows'
         uses: actions/setup-python@v5
         with:

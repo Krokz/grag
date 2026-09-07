@@ -12,6 +12,44 @@ pip install -e ".[embed-local]"   # optional: local embeddings (fastembed/ONNX, 
 pip install -e ".[embed-remote]"  # optional: OpenAI-compatible remote embeddings
 ```
 
+## Windows source builds
+
+Before `pip install` on Windows, use an **x64 Visual Studio Developer Command
+Prompt** with MSVC and Strawberry Perl on PATH:
+
+```bat
+python scripts/build_windows_runtime.py
+python -m pip install -e ".[dev]"
+```
+
+The builder downloads official OpenSSL 3.5.8 source, verifies its pinned SHA-256,
+and compiles two DLLs into the ignored `src/grag/_runtime/` directory. Windows
+wheels include those DLLs, the OpenSSL license, and source/build provenance.
+The build hook refuses an incomplete Windows runtime and excludes it from other
+platforms' wheels and source archives. Source archives include the builder.
+Updates must change the source pin/checksum together and pass the clean-wheel
+gate; there is no end-user runtime downloader or fallback to another app's DLLs.
+
+## Validate the distribution
+
+```bash
+python -m pip install build
+python -m build
+python scripts/smoke_wheel.py dist/<built-wheel>.whl
+```
+
+The smoke creates a disposable environment outside the checkout, installs the
+wheel without developer extras, restricts PATH, and checks native writes/reopen,
+the packaged UI, real stdio MCP, legacy console encoding, cold-cache diagnostics,
+explicit extension preparation and subsequent offline FTS. The clean-wheel CI
+gate runs on Linux/macOS/Windows, including Windows Python 3.10, 3.13 and 3.14.
+Pass `--code` to also install the optional code extra and verify first-use grammar
+preparation followed by offline parsing; CI does this on each platform.
+The publish workflow waits for this gate and includes the verified Windows wheel
+alongside the universal wheel and source archive.
+
+## Use the checkout from your harness
+
 To have the normal CLI and MCP launcher use this checkout, install it in editable
 mode with pipx after building the UI:
 

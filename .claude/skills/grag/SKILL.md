@@ -12,7 +12,8 @@ description: >-
 
 grag is an embedded Cypher graph DB (LadybugDB) wrapped in an MCP/REST tool contract
 designed for LLM grounding. **Local-first**: one `.lbdb` file per project per developer,
-zero daemons, nothing leaves the machine. Its core value is **token efficiency** — answer
+a local embedded engine with an optional shared server. Graph storage/retrieval stays local;
+agent harnesses and explicitly configured remote embedders may send context to their providers. Its core value is **token efficiency** — answer
 structural/rationale questions from the graph instead of re-reading source files.
 
 **Core loop:** search/traverse the graph to ground an answer, or build the graph by
@@ -100,14 +101,20 @@ If grag is genuinely unavailable (no server, no DB), say so and proceed without 
 don't stall.
 
 > **Semantic search is opt-in.** `search_knowledge` defaults to BM25 full-text only.
-> For significantly better recall on natural-language queries, enable vector search:
+> Start with BM25. Enable vectors when semantic questions justify the model/download cost:
 > ```
-> pip install 'gragdb[embed-local]'          # fastembed + ONNX, ~50-100 MB, no API key
+> pip install 'gragdb[embed-local]'          # optional local model + ONNX
 > GRAG_EMBED_PROVIDER=fastembed grag --db <file> serve --with-mcp
 > ```
-> If the user hasn't enabled this, suggest it. When `search_knowledge` returns
+> With the same provider/model settings as MCP, use `grag doctor --prepare` to
+> explicitly download missing assets, then `grag doctor` to verify offline loading
+> and inference. Plain doctor does not download or open the project DB. It also
+> checks real native/FTS queries and installed grammar parsing; failed checks include
+> cache/installation hints. Windows wheels carry their own required runtime.
+> These checks are in the M16 development build, not released 0.8.0.
+> When `search_knowledge` returns
 > `pending_embeddings > 0`, nodes are still being embedded — the server's background
-> worker drains the backlog on its own within seconds. A footer with no `pending_embeddings`
+> worker drains the backlog; duration depends on the model and corpus. A footer with no `pending_embeddings`
 > field does **not** mean "fully embedded" — check the `vector` field instead:
 > absent/missing means vector search ran fine, `"vector":"off"` means no
 > embedder is configured on this server process (FTS-only is expected, and
@@ -481,18 +488,19 @@ universe. Detect it with `GET /api/dbs` — `dbs` non-empty means multi-db.
 ## Enabling semantic (vector) search
 
 Hybrid search is off until you give it an embedder. The supported path is **fastembed**
-(ONNX Runtime — *no* PyTorch), which keeps grag light:
+(ONNX Runtime — no PyTorch). It adds optional startup, memory and indexing costs:
 
 ```bash
-pip install -e ".[embed-local]"            # fastembed + onnxruntime, ~50-100MB
+pip install 'gragdb[embed-local]'          # install in the same environment as grag
 GRAG_EMBED_PROVIDER=fastembed grag --db knowledge.lbdb serve
 ```
 
 - Model defaults to `BAAI/bge-small-en-v1.5` (384-dim); override with
-  `GRAG_EMBED_MODEL` / `GRAG_EMBED_DIM`. Downloads once to a cache (~50MB), then offline.
-- Steady state is ~300ms/query on CPU. Server RSS rises from ~120MB to ~530MB.
-- A serving grag embeds new/updated nodes on a background worker (ingests return at
-  once; `pending_embeddings` in the search footer shrinks on its own). The embedding
+  `GRAG_EMBED_MODEL` / `GRAG_EMBED_DIM`. Asset size and cache completeness depend on the model. Verify with doctor;
+  set FASTEMBED_CACHE_PATH to a persistent writable location for durable offline use.
+- Query latency, indexing duration and resident memory depend on the workload; measure against BM25.
+- A serving grag embeds new/updated nodes on a background worker (one-shot CLI
+  ingests still embed synchronously; `pending_embeddings` in the search footer shrinks on its own). The embedding
   text is the node's prose STRING props — `meta`, `path`, `heading_path`, `language`
   and git fields are left out — and queries/documents get the model family's retrieval
   prefixes automatically. Model, prefix, text-policy, endpoint, and codec changes

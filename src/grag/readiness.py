@@ -189,13 +189,17 @@ def _worker(payload: dict) -> dict:
             raise ValueError(f"Unknown probe: {kind}")
         return {"status": "ready", "detail": detail}
     except Exception as exc:  # noqa: BLE001 — diagnostic boundary; report all native/provider failures
+        from grag.core.errors import GragError
+
         hint = (
             "Reinstall gragdb in this Python environment; check native library dependencies."
             if kind == "engine" else
             "Run grag doctor --prepare while online. Check cache permissions and installed extras; "
             "preparation does not reinstall packages or replace incompatible/corrupt cached binaries."
         )
-        return {"status": "unavailable", "detail": f"{type(exc).__name__}: {exc}. {hint}"[:4096]}
+        if isinstance(exc, GragError) and exc.hint:
+            hint = ""
+        return {"status": "unavailable", "detail": f"{type(exc).__name__}: {exc} {hint}".strip()[:4096]}
 
 
 if __name__ == "__main__":

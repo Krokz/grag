@@ -9,7 +9,7 @@ the client.
 | Symptom | Check and next step |
 |---|---|
 | MCP fails to reconnect, but status shows a server | Verify the registration's launcher, database and port; exercise `describe_schema` through that client and inspect the log. Health alone does not verify its MCP connection. |
-| Windows reports a missing native library | Follow the [OpenSSL instructions](../installation.md). Doctor's package-presence check does not verify native loading. |
+| Windows reports a missing native library | See [Windows installation](../installation.md#windows). M16 wheels bundle the runtime; PyPI 0.8.0 and earlier do not. The M16 doctor verifies an actual native query. |
 | Windows refuses independent daemon startup | Run the exact `serve --with-mcp` command printed by grag in a separate terminal, keep it open, and reconnect. This avoids a harness killing the database owner on client disconnect. |
 | `Could not set lock`, including Windows error 33 | Another process owns the file. Use that server's MCP/REST ingestion; for direct CLI work, disconnect auto-starting clients and stop the owner first. |
 | `UnicodeEncodeError` in a Windows terminal | In PowerShell, try `$env:PYTHONIOENCODING = "utf-8"` before launching grag. The same setting can help when output is redirected. Native handling of legacy console encodings remains incomplete. |

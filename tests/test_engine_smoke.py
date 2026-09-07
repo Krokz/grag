@@ -232,6 +232,11 @@ def test_version_stamp_marks_preexisting_database_unknown(tmp_path):
     # Simulate a database created before stamping existed: tables, no _grag_meta.
     import ladybug as lb
 
+    from grag.native import prepare_native_runtime
+
+    # This fixture deliberately bypasses Engine; bootstrap the same owned
+    # runtime explicitly so the test also works alone on Windows.
+    prepare_native_runtime()
     database = lb.Database(str(db))
     conn = lb.Connection(database)
     conn.execute("CREATE NODE TABLE Doc(id STRING PRIMARY KEY)")

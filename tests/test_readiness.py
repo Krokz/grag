@@ -63,7 +63,7 @@ def test_doctor_leaves_corrupt_project_and_sidecars_untouched(tmp_path, monkeypa
         path.write_bytes(b"corrupt fixture " + suffix.encode())
         before[path] = path.read_bytes()
     monkeypatch.setattr(admin, "find_server", lambda *a, **kw: None)
-    monkeypatch.setattr(admin, "_repo_rows_engine", lambda *a: pytest.fail("doctor opened project DB"))
+    monkeypatch.setattr(Engine, "__init__", lambda *a, **kw: pytest.fail("doctor opened project DB"))
     checks = [{"status": "ready", "label": "fixture", "detail": "probe"}]
     admin.doctor_lines(GragConfig(db_path=db), checks=checks)
     assert {p: p.read_bytes() for p in before} == before

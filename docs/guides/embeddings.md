@@ -30,7 +30,14 @@ grag serve --with-mcp
 
 The default model is `BAAI/bge-small-en-v1.5`. First use downloads model assets;
 size and startup time depend on the model/cache. It runs locally through ONNX
-Runtime, without PyTorch. An initialized serving process (`serve`, `mcp`) runs a
+Runtime, without PyTorch. The M16 development build tries a cached load first;
+when missing assets require preparation it logs that step and reports download
+or cache-permission errors. With `HF_HUB_OFFLINE=1`, a failed cached load never
+falls back to a download. Use `grag doctor --prepare` with the same embedding
+settings, then `grag doctor`, to verify actual offline inference. A present cache
+directory is not sufficient. See [installation](../installation.md).
+
+An initialized serving process (`serve`, `mcp`) runs a
 background embedding worker. Health reports counters under `embedding`; searches
 report `pending_embeddings` while it drains. `GRAG_EMBED_BACKGROUND=0` enables
 inline work. **One-shot CLI ingests still embed synchronously** and can take much

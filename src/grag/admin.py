@@ -1227,20 +1227,6 @@ def restart_daemon(
 # ---------------------------------------------------------------------------
 
 
-def _module_available(name: str) -> bool:
-    import importlib.util
-
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, ValueError):
-        return False
-
-
-def _check(label: str, ok: bool, detail_ok: str, detail_bad: str) -> str:
-    mark = "ok" if ok else "--"
-    return f"  [{mark}] {label}: {detail_ok if ok else detail_bad}"
-
-
 def _git_commits_behind(repo_path: str, commit: str) -> int | None:
     """How many commits repo_path has on HEAD since `commit`; None if unknown."""
     try:
@@ -1356,23 +1342,3 @@ def doctor_lines(config: GragConfig, *, checks: list[dict] | None = None) -> lis
         lines.append("code index:")
         lines.extend(_repo_staleness_lines(repo_rows))
     return lines
-
-
-def _repo_rows_engine(config: GragConfig) -> list[dict] | None:
-    from grag.core.engine import Engine
-    from grag.core.errors import GragError
-
-    try:
-        engine = Engine(config)
-    except Exception:  # noqa: BLE001 — locked/corrupt db is a report, not a crash
-        return None
-    try:
-        res = engine.execute(
-            "MATCH (r:Repo) RETURN r.path AS path, "
-            "r.git_commit AS git_commit, r.ingested_at AS ingested_at"
-        )
-        return res.as_dicts()
-    except GragError:
-        return None  # no Repo table (nothing ingested) — fine
-    finally:
-        engine.close()

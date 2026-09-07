@@ -109,7 +109,7 @@ The configuration-affecting options are:
 | `stop` | — | Gracefully stops the managed background server for the selected database. |
 | `stop -a` / `-all` / `--all` | off | Stops every safely verifiable managed grag server. Refuses unresolved legacy registrations instead of reporting false success. |
 | `stop --force` | off | Also permits signaling a live legacy/unverified registration; use only after independently verifying its recorded PID. |
-| `doctor` | — | Install/runtime health report: extras, embedder, env, server, code-index staleness vs git HEAD. |
+| `doctor` | `--prepare`, `--json`, `--timeout` (M16 development build) | Isolated native/FTS/model/grammar readiness checks; explicit asset preparation. Human report includes env/server and reachable-server index staleness. Exit 1 for unavailable required capabilities. |
 | `export --out FILE` | stdout | Dumps the database as portable JSONL (schema, nodes, edges, provenance; embeddings excluded). |
 | `export --url URL` | `GRAG_SERVER_URL` or unset | Online backup: streams `GET /api/export` from a running server (bearer from `GRAG_API_TOKEN`) instead of opening the file, which the single-writer lock forbids while a server runs. `--server-db` selects the database on a multi-db server. |
 | `import FILE` | — | Replays a `grag export` file into the selected database (idempotent merge). |

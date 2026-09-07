@@ -67,7 +67,7 @@ the truth of authored memories. Read [freshness](guides/freshness.md) and
 
 ```bash
 grag status     # selected database, server address and log
-grag doctor     # installation and index diagnostics, with known limits
+grag doctor     # installation diagnostics; see installation guide for release-specific checks
 grag stop       # clean shutdown of the selected managed server
 ```
 

@@ -1,5 +1,7 @@
 """Include the owned OpenSSL runtime only in Windows distribution wheels."""
 
+import hashlib
+import json
 import platform
 import sys
 from pathlib import Path
@@ -29,5 +31,9 @@ class CustomBuildHook(BuildHookInterface):
                     "(x64 Visual Studio Developer Command Prompt and Strawberry Perl required)"
                 )
             build_data["force_include"][str(asset)] = f"grag/_runtime/{name}"
+        manifest = json.loads((runtime / "provenance.json").read_text(encoding="utf-8"))
+        for name in ("libcrypto-3-x64.dll", "libssl-3-x64.dll"):
+            if hashlib.sha256((runtime / name).read_bytes()).hexdigest() != manifest["files"][name]:
+                raise RuntimeError(f"Windows runtime checksum mismatch for {name}; rebuild the runtime")
         build_data["pure_python"] = False
         build_data["tag"] = "py3-none-win_amd64"

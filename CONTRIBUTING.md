@@ -59,8 +59,15 @@ ruff check src tests        # lint (config pinned in pyproject.toml)
 mypy src/grag               # type-check
 ```
 
+On Windows, build the owned runtime before installing from source: run
+`python scripts/build_windows_runtime.py` in an x64 MSVC Developer Command Prompt
+with Strawberry Perl on PATH. See [Windows source builds](docs/development.md#windows-source-builds).
+
 grag targets **Python 3.10+** (CI tests 3.10–3.14). LadybugDB downloads its FTS
 and VECTOR extensions on first use, so the first test run needs network access.
+`grag doctor --prepare` prepares assets explicitly; `grag doctor` verifies offline
+readiness without opening the project database. The clean-wheel workflow also
+tests installed distributions outside the checkout and gates publishing.
 
 ## Documentation
 
