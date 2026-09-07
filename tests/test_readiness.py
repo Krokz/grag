@@ -119,6 +119,24 @@ def test_offline_grammar_uses_load_only_registry(monkeypatch):
     assert result["status"] == "unavailable"
     assert "damaged cached grammar" in result["detail"]
     assert calls == ["rust"]
+    assert os.environ["TREE_SITTER_LANGUAGE_PACK_LIBS_DIR"] == "before"
+
+
+def test_preparation_downloads_one_grammar_batch_then_probes_offline(monkeypatch):
+    batches = []
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", SimpleNamespace(download=batches.append))
+    result = readiness._worker({"kind": "grammar_assets", "prepare": True})
+    assert result["status"] == "ready"
+    assert batches == [["bash", "c", "cpp", "java", "kotlin", "lua", "php", "ruby", "rust", "scala", "sql", "swift"]]
+    calls = []
+    def probe(kind, config, **kwargs):
+        calls.append((kind, kwargs["prepare"]))
+        return {"status": "ready", "detail": "fixture"}
+    monkeypatch.setattr(readiness, "_probe", probe)
+    monkeypatch.setattr(readiness, "_installed", lambda name: True)
+    readiness.check_install(GragConfig(), prepare=True)
+    assert calls.count(("grammar_assets", True)) == 1
+    assert all(not prepare for kind, prepare in calls if kind.startswith("grammar:"))
 
 
 @pytest.mark.parametrize("offline", [False, True])

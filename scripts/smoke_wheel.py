@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
 import venv
 import zipfile
 from pathlib import Path
@@ -103,8 +105,16 @@ def main() -> None:
         print("wheel: explicit first-use extension preparation and offline FTS search passed")
         if "--code" in sys.argv[1:]:
             subprocess.run([str(python), "-m", "pip", "install", f"{wheel}[code]"], check=True, cwd=root, env=env)
-            result = subprocess.run([*command, "doctor", "--prepare", "--json"], cwd=root, env=env, capture_output=True, timeout=900)
-            report = json.loads(result.stdout)
+            for attempt in range(3):
+                result = subprocess.run([*command, "doctor", "--prepare", "--json"], cwd=root, env=env, capture_output=True, timeout=900)
+                report = json.loads(result.stdout)
+                failed = [c for c in report["checks"] if c["status"] == "unavailable"]
+                transient = any(c["key"] == "grammar_assets" and re.search(r"http status: (429|500|502|503|504)\b", c["detail"]) for c in failed)
+                if report["ready"] or not transient or any(not c["key"].startswith("grammar") for c in failed):
+                    break
+                if attempt < 2:
+                    print(f"Grammar host returned a transient HTTP error; preparation retry {attempt + 1}/2", flush=True)
+                    time.sleep(5 * (attempt + 1))
             assert result.returncode == 0 and report["ready"], (report, result.stderr)
             result = subprocess.run([*command, "doctor", "--json"], cwd=root, env=env, capture_output=True, timeout=150)
             report = json.loads(result.stdout)

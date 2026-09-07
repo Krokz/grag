@@ -20,13 +20,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Build UI
@@ -43,21 +43,44 @@ jobs:
       - name: Install into clean environment and run native/CLI/MCP smoke
         run: python scripts/smoke_wheel.py --code
       - if: runner.os == 'Windows'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.10'
       - name: Windows oldest supported Python
         if: runner.os == 'Windows'
         run: python scripts/smoke_wheel.py
       - if: runner.os == 'Windows'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.14'
       - name: Windows newest supported Python
         if: runner.os == 'Windows'
         run: python scripts/smoke_wheel.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: grag-wheel-${{ matrix.os }}
           path: dist/*.whl
           retention-days: 7
+
+  artifacts:
+    name: Verify distribution artifact transfer
+    runs-on: ubuntu-latest
+    needs: [wheel]
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: grag-wheel-*
+          path: wheels
+      - name: Check downloaded wheels
+        run: |
+          python - <<'PY'
+          import pathlib, zipfile
+          wheels = list(pathlib.Path('wheels').rglob('*.whl'))
+          assert len(wheels) == 3, wheels
+          windows = [w for w in wheels if w.name.endswith('win_amd64.whl')]
+          assert len(windows) == 1, wheels
+          for wheel in wheels:
+              with zipfile.ZipFile(wheel) as archive:
+                  assert 'grag/api/static/index.html' in archive.namelist()
+          print('All distribution artifacts downloaded and verified')
+          PY

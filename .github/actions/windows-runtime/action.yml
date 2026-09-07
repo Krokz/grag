@@ -3,7 +3,7 @@ description: Compile the OpenSSL runtime included in grag's Windows wheel
 runs:
   using: composite
   steps:
-    - uses: actions/cache@v4
+    - uses: actions/cache@v6
       id: runtime
       with:
         path: src/grag/_runtime
