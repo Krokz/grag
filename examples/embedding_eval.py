@@ -1,4 +1,4 @@
-"""Compare embedding models on YOUR graph: recall@k, MRR and latency per model.
+"""Compare embedding models on YOUR graph: seed hit@k, MRR and vector latency.
 
 Usage:
     python examples/embedding_eval.py --export graph.jsonl --questions q.jsonl \
@@ -22,6 +22,10 @@ where `expect` holds canonical node ids ("Chunk:doc-…#3-2-retry@0000") or
 substrings of them ("#3-2-retry"); a question is a hit when any expected item
 matches any returned seed id.
 
+This is an any-match seed proxy, not recall of all required evidence or an
+answer-quality score. Use tests/workflow_eval.py for packed nodes, directed
+relationships, decisive text, citations and lifecycle evaluation.
+
 Remote models need GRAG_EMBED_BASE_URL and GRAG_EMBED_API_KEY_ENV in the
 environment (same as serving). Switching the server afterwards is
 GRAG_EMBED_MODEL + GRAG_EMBED_DIM and a `grag reindex`.
@@ -41,10 +45,9 @@ from pathlib import Path
 from grag.config import EmbedderConfig, GragConfig
 from grag.core.engine import Engine
 from grag.core.types import SearchRequest
-from grag.retrieval.search import _fts_seeds, search_knowledge
+from grag.retrieval.search import search_knowledge
 from grag.retrieval.vectors import (
     embed_pending_nodes,
-    pk_map_with_fallback,
     searchable_node_tables,
     vector_candidates,
 )
@@ -119,8 +122,7 @@ def evaluate(export: Path, questions: list[dict], cfg: EmbedderConfig, k: int) -
                 for t in searchable_node_tables(engine, config)
             )
             embed_s = time.perf_counter() - t0
-            pk = pk_map_with_fallback(engine)
-            tables = searchable_node_tables(engine, config)
+            lexical_config = config.model_copy(update={"embedder": None})
             ranks = {"vector": [], "fts": [], "hybrid": []}
             latency = []
             for q in questions:
@@ -128,11 +130,12 @@ def evaluate(export: Path, questions: list[dict], cfg: EmbedderConfig, k: int) -
                 vec = vector_candidates(engine, config, q["query"], None, k)
                 latency.append(time.perf_counter() - t1)
                 ranks["vector"].append(_hit_rank([s.node.id for s in vec], q["expect"]))
-                fts = []
-                for t in tables:
-                    fts.extend(_fts_seeds(engine, t, q["query"], k, pk))
-                fts.sort(key=lambda s: s.score, reverse=True)
-                ranks["fts"].append(_hit_rank([s.node.id for s in fts[:k]], q["expect"]))
+                # Use production cross-label ranking/diversity. Raw native
+                # scores from separate FTS indexes are not comparable.
+                fts = search_knowledge(
+                    engine, lexical_config, SearchRequest(query=q["query"], top_k=k, hops=0)
+                )
+                ranks["fts"].append(_hit_rank([s.node.id for s in fts.seeds], q["expect"]))
                 hyb = search_knowledge(
                     engine, config, SearchRequest(query=q["query"], top_k=k, hops=0)
                 )
@@ -142,7 +145,7 @@ def evaluate(export: Path, questions: list[dict], cfg: EmbedderConfig, k: int) -
     out = {"model": cfg.model, "embedded": embedded, "embed_s": embed_s,
            "query_ms": 1000 * statistics.median(latency) if latency else 0.0}
     for mode, rs in ranks.items():
-        out[f"{mode}_recall"], out[f"{mode}_mrr"] = _score(rs, k)
+        out[f"{mode}_hit_rate"], out[f"{mode}_mrr"] = _score(rs, k)
     return out
 
 
@@ -169,16 +172,16 @@ def main() -> int:
             finally:
                 engine.close()
     print(f"{len(questions)} question(s), top_k={args.top_k}\n")
-    header = f"{'model':44} {'embed s':>8} {'q ms':>6} | {'vec R@k':>7} {'MRR':>5} | {'fts R@k':>7} {'MRR':>5} | {'hyb R@k':>7} {'MRR':>5}"
+    header = f"{'model':44} {'embed s':>8} {'vec ms':>6} | {'vec hit':>7} {'MRR':>5} | {'fts hit':>7} {'MRR':>5} | {'hyb hit':>7} {'MRR':>5}"
     print(header)
     print("-" * len(header))
     for spec in args.models:
         r = evaluate(args.export, questions, _parse_model(spec), args.top_k)
         print(
             f"{r['model'][:44]:44} {r['embed_s']:8.1f} {r['query_ms']:6.0f} | "
-            f"{r['vector_recall']:7.2f} {r['vector_mrr']:5.2f} | "
-            f"{r['fts_recall']:7.2f} {r['fts_mrr']:5.2f} | "
-            f"{r['hybrid_recall']:7.2f} {r['hybrid_mrr']:5.2f}"
+            f"{r['vector_hit_rate']:7.2f} {r['vector_mrr']:5.2f} | "
+            f"{r['fts_hit_rate']:7.2f} {r['fts_mrr']:5.2f} | "
+            f"{r['hybrid_hit_rate']:7.2f} {r['hybrid_mrr']:5.2f}"
         )
     return 0
 

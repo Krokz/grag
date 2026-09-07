@@ -417,7 +417,7 @@ def upsert_entities(svc) -> None:
         (
             "fp32 as the safe default vector codec",
             "Codec ladder fp32/int8/binary/polar, "
-            "selected by GRAG_VECTOR_CODEC; fp32 is the default and uses native HNSW.",
+            "selected by GRAG_VECTOR_CODEC; fp32 is the default and uses exact cosine scanning.",
             "Compressed codecs use an O(rows) direction-code candidate scan followed by exact "
             "fp32 rescoring. int8 remains the best compressed tradeoff; polar is experimental.",
         ),

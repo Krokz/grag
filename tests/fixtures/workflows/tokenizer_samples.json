@@ -1,0 +1,9 @@
+[
+  {"kind":"English prose","text":"Keep project knowledge on this machine. A short cache lifetime limits how long revoked permissions remain usable."},
+  {"kind":"code","text":"async def refresh_session(user_id: str) -> dict[str, bool]:\n    return {\"authorized\": await check_access(user_id)}\n"},
+  {"kind":"JSON and identifiers","text":"{\"expected_revision\":\"a83f4e97109a4501\",\"_source\":\"/workspace/project/src/auth.py:19\",\"freshness_timeout_ms\":5000}"},
+  {"kind":"Spanish","text":"Los permisos revocados dejan de funcionar después de quince segundos. La caché del proyecto es local."},
+  {"kind":"Hebrew","text":"המידע נשמר במחשב המקומי. שינוי הרשאות מבטל את הגישה לאחר זמן קצר, ויש לבדוק את המקור לפני תשובה."},
+  {"kind":"Chinese","text":"项目知识保存在本地数据库中。回答问题时需要检查来源、代码行号和节点之间的关系。"},
+  {"kind":"emoji and escaping","text":"🔐 → 🗃️ → 📎\n\"quoted\"\tC:\\project\\src\\auth.py\n<|example marker|>"}
+]

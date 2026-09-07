@@ -1,0 +1,20 @@
+{
+  "nodes": [
+    {"label":"Decision","key":"authorization-cache","properties":{"title":"Short authorization cache","body":"Cache access decisions for 15 seconds. A short lifetime limits how long revoked permissions remain usable.","status":"current"}},
+    {"label":"Decision","key":"single-owner","properties":{"title":"One database owner for shared project memory","body":"Claude Code and Cursor connect through separate proxies to one owning server. The server serializes writes to the shared project database.","status":"current"}},
+    {"label":"Decision","key":"offline","properties":{"title":"Keep project knowledge on this machine","body":"Confidential source code and customer notes must stay local. Search works without an API key or a network connection after dependencies are installed.","status":"current"}},
+    {"label":"Decision","key":"retired-cache-policy","properties":{"title":"Historical authorization cache proposal","body":"The old proposal allowed cached permissions for 30 minutes. That proposal is superseded by the short authorization cache decision.","status":"superseded"}},
+    {"label":"Note","key":"spanish","properties":{"title":"Permisos del proyecto","body":"Los permisos revocados dejan de funcionar después de 15 segundos. La caché es local."}},
+    {"label":"Note","key":"rollout","properties":{"title":"Session rollout exception","body":"Background: session rollout requires coordination with callers. ","repeat_body":120,"tail":"The decisive exception: service accounts must reauthenticate immediately after signing-key rotation."}},
+    {"label":"Task","key":"first","properties":{"title":"Verify revoked permissions","body":"Confirm access is denied after cache expiry. Acceptance: revoked access stops within 15 seconds.","status":"open","priority":1}},
+    {"label":"Task","key":"second","properties":{"title":"Document export behavior","body":"Explain where a local report is saved.","status":"open","priority":2}},
+    {"label":"Task","key":"finished","properties":{"title":"Open the local settings page","body":"The settings page was verified already.","status":"done","priority":0}}
+  ],
+  "edges": [
+    {"type":"EXPLAINS","from":"Decision:authorization-cache","to":"Function:read_cached_policy"},
+    {"type":"EXPLAINS","from":"Decision:single-owner","to":"Function:save_context"},
+    {"type":"EXPLAINS","from":"Decision:offline","to":"Function:export_report"},
+    {"type":"IMPLEMENTS_DECISION","from":"Task:first","to":"Decision:authorization-cache"},
+    {"type":"REPLACES","from":"Decision:authorization-cache","to":"Decision:retired-cache-policy"}
+  ]
+}
