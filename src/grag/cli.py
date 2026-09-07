@@ -539,15 +539,20 @@ def main(argv: list[str] | None = None) -> int:
 
             asyncio.run(run_proxy(cfg.db_path, args.port, api_token=cfg.api_token))
         else:
+            from grag.core.errors import GragError
             from grag.mcp_server.server import run
 
-            run(
-                cfg,
-                transport=args.transport,
-                host=args.host,
-                port=args.port,
-                path=args.path,
-            )
+            try:
+                run(
+                    cfg,
+                    transport=args.transport,
+                    host=args.host,
+                    port=args.port,
+                    path=args.path,
+                )
+            except GragError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
     elif args.cmd == "ingest":
         from grag.ingest.loaders import ingest_paths
 

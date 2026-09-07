@@ -1023,7 +1023,7 @@ def _spawn_server_process(
     with_mcp: bool = True,
     mcp_path: str = "/mcp",
     host: str = "127.0.0.1",
-) -> None:
+) -> subprocess.Popen:
     """Launch a detached ``grag serve`` daemon. Output goes to ~/.grag/logs/
     (not /dev/null) so embedder failures and startup errors stay debuggable.
     Env is inherited, so ``GRAG_EMBED_PROVIDER=fastembed grag start`` carries
@@ -1075,6 +1075,7 @@ def _spawn_server_process(
     finally:
         if isinstance(log_fd, int) and log_fd >= 0:
             os.close(log_fd)
+    return process
 
 
 def start_daemon(
@@ -1104,7 +1105,7 @@ def start_daemon(
     _prepare_server_target(target)
     if port is None:
         port = derive_port(target)
-    _spawn_server_process(
+    process = _spawn_server_process(
         config.db_path,
         port,
         db_dir=config.db_dir,
@@ -1124,6 +1125,11 @@ def start_daemon(
                 f"{f', pid {info.pid}' if info.pid else ''}) on "
                 f"{origin}/{mcp}\n"
                 f"  log: {log_path(target)}"
+            )
+        if process is not None and process.poll() is not None:
+            raise DaemonLifecycleError(
+                f"Server exited during startup (exit code {process.returncode}). "
+                f"Check the log for the database or configuration error: {log_path(target)}"
             )
     raise DaemonLifecycleError(
         f"Launched daemon but it did not answer on port {port} within "

@@ -484,6 +484,23 @@ def test_start_daemon_spawns_then_reports_started(tmp_path, monkeypatch):
     assert spawned and "Started server" in msg and "42000" in msg
 
 
+def test_start_daemon_reports_child_exit_without_waiting_for_timeout(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    cfg = GragConfig(db_path=tmp_path / "broken.lbdb")
+    monkeypatch.setattr(admin, "find_server", lambda target: None)
+    monkeypatch.setattr(
+        admin, "_spawn_server_process",
+        lambda *args, **kwargs: SimpleNamespace(poll=lambda: 1, returncode=1),
+    )
+    waits = []
+    monkeypatch.setattr(admin.time, "sleep", waits.append)
+    with pytest.raises(admin.DaemonLifecycleError, match="exited during startup") as error:
+        admin.start_daemon(cfg)
+    assert str(admin.log_path(cfg.db_path)) in str(error.value)
+    assert waits == [0.5]
+
+
 def test_list_servers_lists_live_and_reaps_stale(tmp_path, monkeypatch):
     live = tmp_path / "live.lbdb"
     dead = tmp_path / "dead.lbdb"

@@ -121,6 +121,31 @@ def test_strict_failure_preserves_every_original_byte(cfg, tmp_path):
     assert not (bundle / "partial").exists()
 
 
+@pytest.mark.parametrize("arguments", [["serve"], ["serve", "--with-mcp"], ["mcp"]])
+def test_single_db_startup_rejects_corrupt_wal(cfg, tmp_path, arguments):
+    """A live HTTP process or MCP handshake must not hide a failed DB open."""
+    _corrupt_wal(cfg)
+    before = _files(cfg)
+    home = tmp_path / "daemon-state"
+    result = _child(
+        """
+import json, sys
+from pathlib import Path
+from grag import admin
+from grag.cli import main
+admin.GRAG_HOME = Path(sys.argv[2])
+sys.exit(main(['--db', sys.argv[1], *json.loads(sys.argv[3])]))
+""",
+        cfg.db_path, home, json.dumps(arguments),
+    )
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "Database replay failed" in result.stderr
+    assert "recover" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not list(home.glob("run/*.json"))
+    assert _files(cfg) == before
+
+
 @pytest.mark.parametrize("damage", ["after_commits", "before_commits"])
 def test_explicit_partial_replay_uses_fresh_copy_and_records_uncertain_loss(cfg, tmp_path, damage):
     _corrupt_wal(cfg)

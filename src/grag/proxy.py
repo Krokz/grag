@@ -211,8 +211,9 @@ async def _ensure_server(db_path: Path, port: int, url: str) -> str:
 
     # Shared with 'grag start': detached daemon, logs to ~/.grag/logs/ so
     # embedder failures and startup errors stay debuggable.
+    process = None
     try:
-        _spawn_server_process(db_path, port, with_mcp=True)
+        process = _spawn_server_process(db_path, port, with_mcp=True)
     except DaemonLifecycleError:
         # Another proxy/start command can claim the registration after our
         # initial health probe but before this spawn. If it is the same live
@@ -244,6 +245,11 @@ async def _ensure_server(db_path: Path, port: int, url: str) -> str:
         )
         if ready_path is not None:
             return ready_path
+        if process is not None and process.poll() is not None:
+            sys.exit(
+                f"grag proxy: server exited during startup (exit code {process.returncode}). "
+                f"Check the log for the database or configuration error: {log_path(db_path)}"
+            )
 
     sys.exit(f"grag proxy: server at {url} did not become ready (waited 20 s)")
 

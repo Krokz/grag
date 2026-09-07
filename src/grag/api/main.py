@@ -210,10 +210,14 @@ def create_app(config: GragConfig) -> FastAPI:
     # determinable default (2+ DBs, none named after db_path), registry.get()
     # raises at startup and the server would never come up — taking /api/dbs
     # (discovery) and all explicitly-selected requests down with it. Startup must
-    # not depend on a default existing; only a request with no selector does.
+    # not depend on a default existing in multi-db mode. A single-db startup
+    # error is fatal: process health must not hide an unusable database.
     try:
         app.state.service = registry.get()
     except GragError:
+        if config.db_dir is None:
+            registry.close()
+            raise
         app.state.service = None
 
     # Mount MCP before the SPA catch-all at "/" so the MCP path is matched first.
