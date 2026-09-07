@@ -8,6 +8,13 @@ from collections.abc import Sequence
 from pydantic import ValidationError
 
 
+def _bounded_text(value: str, maximum: int = 4096) -> str:
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= maximum:
+        return value
+    return encoded[:maximum].decode("utf-8", errors="ignore") + " [truncated]"
+
+
 class GragError(Exception):
     code = "grag_error"
 
@@ -22,7 +29,8 @@ class GragError(Exception):
         return self.message
 
     def to_dict(self) -> dict:
-        return {"error": self.message, "hint": self.hint, "code": self.code}
+        return {"error": _bounded_text(self.message),
+                "hint": _bounded_text(self.hint) if self.hint else self.hint, "code": self.code}
 
 
 class CypherError(GragError):
@@ -97,13 +105,15 @@ class FreshnessError(GragError):
 def validation_error_body(exc: ValidationError | Sequence[dict]) -> dict:
     """Same bounded, value-free validation details in REST and MCP errors."""
     errors = exc.errors(include_input=False, include_url=False) if isinstance(exc, ValidationError) else exc
-    details = [{"loc": list(e["loc"]), "type": e["type"], "message": e["msg"]} for e in errors[:5]]
+    details = [{"loc": [part if isinstance(part, int) else _bounded_text(str(part), 128)
+                        for part in e["loc"][:16]],
+                "type": e["type"], "message": _bounded_text(e["msg"], 512)} for e in errors[:5]]
     summary = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['message']}" for e in details)
     omitted = max(0, len(errors) - len(details))
     if omitted:
         summary += f"; … ({omitted} more)"
     return {
-        "code": "validation_error", "error": f"Invalid arguments — {summary}",
+        "code": "validation_error", "error": _bounded_text(f"Invalid arguments — {summary}"),
         "hint": "Check the tool input schema for the expected shape and field names.",
         "details": details, "omitted_errors": omitted,
     }

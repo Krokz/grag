@@ -53,6 +53,9 @@ class JobManager:
         self, kind: str, fn: Callable[[], BaseModel | dict[str, Any]], params: dict
     ) -> JobRecord:
         job = JobRecord(id=secrets.token_hex(8), kind=kind, created_at=_now(), params=params)
+        # Reserve room for completion timestamps and bounded failure details.
+        # Refuse before admission so an oversized reply cannot hide a queued ID.
+        json_bytes(job, MAX_RESPONSE_BYTES - 32_768, "job_record_bytes")
         with self._lock:
             if self._closed:
                 raise ShutdownError()
@@ -122,6 +125,9 @@ class JobManager:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
+                error = fields.get("error")
+                if isinstance(error, str) and len(error.encode("utf-8")) > 4096:
+                    fields["error"] = error.encode("utf-8")[:4096].decode("utf-8", errors="ignore") + " [truncated]"
                 self._jobs[job_id] = job.model_copy(update=fields)
 
     def _run(self, job_id: str, fn: Callable[[], BaseModel | dict[str, Any]]) -> None:
@@ -129,7 +135,9 @@ class JobManager:
         try:
             out = fn()
             result = out.model_dump() if isinstance(out, BaseModel) else dict(out)
-            json_bytes(result, MAX_RESPONSE_BYTES, "job_result_bytes")
+            with self._lock:
+                completed = self._jobs[job_id].model_copy(update={"status": "done", "finished_at": _now(), "result": result})
+            json_bytes(completed, MAX_RESPONSE_BYTES - 128, "job_result_bytes")
         except ShutdownError as exc:
             self._update(job_id, status="cancelled", finished_at=_now(), error=exc.message)
             return

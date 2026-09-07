@@ -326,3 +326,46 @@ def test_history_cannot_commit_an_unpageable_metadata_entry(engine):
     with pytest.raises(ResourceLimitError, match="history_metadata_bytes"):
         write(engine, "a", "body", source="a" * 20_000, evidence=EvidenceUpdate())
     assert engine.execute("MATCH (n:Note) RETURN count(n)").rows == [[0]]
+
+
+def test_job_record_rejected_before_admission():
+    manager = JobManager()
+    try:
+        with pytest.raises(ResourceLimitError, match="job_record_bytes"):
+            manager.submit("test", lambda: pytest.fail("must not run"), {"path": "a" * limits.MAX_RESPONSE_BYTES})
+        assert not manager.list()
+    finally:
+        manager.shutdown(wait=True)
+
+
+def test_oversized_job_result_becomes_a_readable_failure():
+    from concurrent.futures import Future
+
+    manager = JobManager()
+    finished = threading.Event()
+    original = manager._finished
+    def done(job_id: str, future: Future):
+        original(job_id, future)
+        finished.set()
+    manager._finished = done
+    try:
+        job = manager.submit("test", lambda: {"value": "a" * limits.MAX_RESPONSE_BYTES}, {"note": "metadata"})
+        assert finished.wait(5)
+        result = manager.get(job.id)
+        assert result.status == "failed" and "job_result_bytes" in result.error
+        assert len(result.model_dump_json().encode()) <= limits.MAX_RESPONSE_BYTES
+    finally:
+        manager.shutdown(wait=True)
+
+
+def test_error_envelopes_bound_large_names_and_native_messages():
+    import json
+
+    from grag.core.errors import GragError, validation_error_body
+
+    value = "\x00" * limits.MAX_REQUEST_BYTES
+    body = validation_error_body([{"loc": ("nodes", value), "type": "extra_forbidden", "msg": "Extra inputs are not permitted"}])
+    assert "[truncated]" in body["details"][0]["loc"][1]
+    assert len(json.dumps(body).encode()) < 32_768
+    body = GragError(value, hint=value).to_dict()
+    assert len(json.dumps(body).encode()) < 65_536

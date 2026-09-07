@@ -748,7 +748,10 @@ timeout remain in force.
 
 Each database admits at most 32 active operations and 16 running/queued jobs.
 A full queue returns `resource_limit`; poll existing jobs before resubmitting.
-Finished job history is bounded to 200 entries. Source scans share 256 MiB and
+Finished job history is bounded to 200 entries. Admission reserves room for
+completion/error details; full job records are byte-bounded. Oversized results
+become readable failed jobs, and oversized error messages/names are explicitly
+marked as truncated. Source scans share 256 MiB and
 100,000 directory/file entries across roots and verification passes. An incomplete
 scan never certifies freshness. Document batches accept at most 256 documents,
 with 2 MiB of loaded file content; narrow paths or split batches when needed.
