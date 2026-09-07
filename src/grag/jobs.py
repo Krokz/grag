@@ -29,6 +29,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from grag.core.errors import GragError, ShutdownError
+from grag.core.limits import MAX_JOBS, MAX_RESPONSE_BYTES, check_size, json_bytes
 from grag.core.types import JobRecord
 
 log = logging.getLogger(__name__)
@@ -39,7 +40,8 @@ def _now() -> str:
 
 
 class JobManager:
-    def __init__(self, *, max_history: int = 200):
+    def __init__(self, *, max_history: int = 200, max_pending: int = MAX_JOBS):
+        self.max_pending = max(1, int(max_pending))
         self.max_history = max(1, int(max_history))
         self._jobs: OrderedDict[str, JobRecord] = OrderedDict()
         self._lock = threading.RLock()
@@ -54,12 +56,10 @@ class JobManager:
         with self._lock:
             if self._closed:
                 raise ShutdownError()
+            check_size("pending_jobs", len(self._futures) + 1, self.max_pending,
+                       hint="Poll job_status and submit again after a job finishes; the rejected job was not queued.")
             self._jobs[job.id] = job
-            while len(self._jobs) > self.max_history:
-                _oldest_id, oldest = next(iter(self._jobs.items()))
-                if oldest.status in ("queued", "running"):
-                    break  # never forget live work
-                self._jobs.popitem(last=False)
+            self._trim()
             # Admission and executor submission share the shutdown lock. Otherwise
             # shutdown can strand a queued record before submit reaches the pool.
             try:
@@ -107,6 +107,14 @@ class JobManager:
                 self._update(job_id, status="failed", finished_at=_now(),
                              error=f"{type(error).__name__}: {error}")
             self._futures.pop(job_id, None)
+            self._trim()
+
+    def _trim(self) -> None:
+        for key, job in list(self._jobs.items()):
+            if len(self._jobs) <= self.max_history:
+                break
+            if job.status not in ("queued", "running"):
+                del self._jobs[key]
 
     # -- internals ------------------------------------------------------------------
 
@@ -121,6 +129,7 @@ class JobManager:
         try:
             out = fn()
             result = out.model_dump() if isinstance(out, BaseModel) else dict(out)
+            json_bytes(result, MAX_RESPONSE_BYTES, "job_result_bytes")
         except ShutdownError as exc:
             self._update(job_id, status="cancelled", finished_at=_now(), error=exc.message)
             return

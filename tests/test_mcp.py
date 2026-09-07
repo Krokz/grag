@@ -410,8 +410,9 @@ def test_mcp_end_to_end_tool_calls(tmp_path):
                 "cypher_query", {"cypher": "CREATE (p:Person {name: 'x'})"}
             )
         )
-        assert not res.is_error
+        assert res.is_error
         assert res.content[0].text.startswith("ERROR:")
+        assert res.structured_content["code"] == "read_only_violation"
 
         res = asyncio.run(
             server.call_tool("search_knowledge", {"query": "ada", "labels": ["Person"]})
@@ -501,15 +502,17 @@ def test_tool_closure_applies_error_contract_to_routing(multi_db_dir):
         tool_fn = server._tool_manager._tools["describe_schema"].fn
 
         beta_out = tool_fn(ctx=_StubCtx({"x-grag-db": "beta"}))
-        assert not beta_out.startswith("ERROR")
-        assert "BetaThing" in beta_out
+        assert not beta_out.is_error
+        assert "BetaThing" in beta_out.content[0].text
 
         # routing failures arrive as readable ERROR/HINT output, not raises
         ghost_out = tool_fn(ctx=_StubCtx({"x-grag-db": "ghost"}))
-        assert ghost_out.startswith("ERROR:")
-        assert "ghost" in ghost_out
-        assert "HINT:" in ghost_out
-        assert "alpha" in ghost_out and "beta" in ghost_out
+        assert ghost_out.is_error and ghost_out.structured_content["code"] == "not_found"
+        ghost_text = ghost_out.content[0].text
+        assert ghost_text.startswith("ERROR:")
+        assert "ghost" in ghost_text
+        assert "HINT:" in ghost_text
+        assert "alpha" in ghost_text and "beta" in ghost_text
     finally:
         server.grag_registry.close()
 

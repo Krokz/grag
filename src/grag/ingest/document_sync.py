@@ -13,12 +13,24 @@ from grag.core.mutate import _connection_of, _table_columns, _table_index
 from grag.core.types import DOCUMENT_OWNER_PROP
 
 
+def prepare_document_state(engine: Engine, labels: list[str]) -> None:
+    for label in labels:
+        if "_document_state" not in _table_columns(engine, label):
+            engine.execute_write(f"ALTER TABLE {label} ADD _document_state STRING DEFAULT CAST(NULL AS STRING)")
+            engine.execute_write(f"MATCH (n:{label}) SET n._document_state='unverified'")
+
+
+def mark_current(engine: Engine, label: str, keys: list[str]) -> None:
+    if keys:
+        engine.execute_write(f"MATCH (n:{label}) WHERE n.id IN $keys SET n._document_state='current'", {"keys": keys})
+
+
 def prepare_ownership(engine: Engine, tables: list[str]) -> None:
     """Schema preparation runs under serialized_writes, outside the transaction."""
     for table in tables:
         if DOCUMENT_OWNER_PROP not in _table_columns(engine, table):
             engine.execute_write(
-                f"ALTER TABLE {table} ADD {DOCUMENT_OWNER_PROP} STRING DEFAULT NULL"
+                f"ALTER TABLE {table} ADD {DOCUMENT_OWNER_PROP} STRING DEFAULT CAST(NULL AS STRING)"
             )
 
 
@@ -96,6 +108,7 @@ def prune_unreferenced_nodes(
     pruned = int(rows[0][0])
     retained = len(keys) - pruned
     if retained:
+        engine.execute_write(f"MATCH (n:{label}) WHERE n.id IN $keys SET n._document_state='obsolete'", {"keys": keys})
         warnings.append(
             f"Retained {retained} obsolete {label} node(s) because relationships "
             "outside this ingest still reference them. Their content may describe "

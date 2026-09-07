@@ -10,9 +10,9 @@ mode, stdio calls always get the default. `run` serves stdio, or the
 streamable-http Starlette app via uvicorn.
 
 Error contract: expected failures (GragError, pydantic ValidationError) are
-RETURNED as "ERROR: <message>\\nHINT: <hint>" strings so the LLM receives the
-failure as readable tool output and can self-correct. Unexpected exceptions
-propagate.
+returned with readable ERROR/HINT text plus a JSON error envelope. MCP
+marks them isError=true and includes the same envelope in structuredContent.
+Unexpected exceptions propagate to the SDK for logging and redaction.
 """
 
 from __future__ import annotations
@@ -22,16 +22,25 @@ import hmac
 import inspect
 import ipaddress
 import json
-from collections.abc import Callable
-from typing import Any, TypeVar
+import logging
+from collections.abc import Callable, Sequence
+from typing import Annotated, Any, Literal, TypeVar
 
 from mcp.server.mcpserver import Context, MCPServer
-from pydantic import ValidationError
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+from mcp.types import CallToolResult, InputRequiredResult, TextContent
+from pydantic import Field, ValidationError
 from starlette.responses import JSONResponse
 
 from grag.config import GragConfig
-from grag.core.errors import ConfigurationError, FreshnessError, GragError
-from grag.core.serialize import with_freshness
+from grag.core.errors import ConfigurationError, GragError, validation_error_body
+from grag.core.limits import (
+    MAX_REQUEST_BYTES,
+    MAX_RESPONSE_BYTES,
+    check_size,
+    json_bytes,
+)
+from grag.core.schema import schema_text
 from grag.core.types import (
     CodeIngestRequest,
     ContextRequest,
@@ -42,6 +51,7 @@ from grag.core.types import (
     NodeTableSpec,
     QueryRequest,
     RelTableSpec,
+    SchemaDetail,
     SearchRequest,
     UpsertEdge,
     UpsertEdgesRequest,
@@ -49,6 +59,7 @@ from grag.core.types import (
     UpsertNodesRequest,
 )
 from grag.registry import ServiceRegistry
+from grag.request_limits import RequestLimitMiddleware
 from grag.service import GragService
 
 __all__ = [
@@ -123,8 +134,8 @@ def _standalone_http_app(
         streamable_http_path=path, stateless_http=True, host=host
     )
     if config.api_token:
-        return _BearerAuthMiddleware(app, config.api_token)
-    return app
+        return _BearerAuthMiddleware(RequestLimitMiddleware(app), config.api_token)
+    return RequestLimitMiddleware(app)
 
 
 def _validate_standalone_http_security(config: GragConfig, host: str) -> None:
@@ -171,34 +182,70 @@ _INSTRUCTIONS = (
 # --- error contract ---------------------------------------------------------------
 
 
-def _format_grag_error(e: GragError) -> str:
-    from grag.core.errors import ConflictError
+class _ErrorText(str):
+    """Readable direct-call compatibility with a typed MCP error payload."""
 
-    if isinstance(e, ConflictError):
-        return f"ERROR: {e.message}\nHINT: {e.hint}\nCODE: {e.code}"
-    if isinstance(e, FreshnessError):
-        return f"ERROR: {e.message}\nHINT: {e.hint}\n---\n" + json.dumps(
-            {"code": "freshness_unavailable", "freshness": e.freshness}, separators=_COMPACT,
-        )
-    if e.hint:
-        return f"ERROR: {e.message}\nHINT: {e.hint}"
-    return f"ERROR: {e.message}"
+    payload: dict
+
+    def __new__(cls, payload: dict):
+        readable = f"ERROR: {payload['error']}"
+        if payload.get("hint"):
+            readable += f"\nHINT: {payload['hint']}"
+        readable += f"\nCODE: {payload['code']}"
+        readable += "\n---\n" + json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
+        obj = super().__new__(cls, readable)
+        obj.payload = payload
+        return obj
+
+
+def _format_grag_error(e: GragError) -> str:
+    return _ErrorText(e.to_dict())
 
 
 def _format_validation_error(e: ValidationError) -> str:
-    parts = []
-    for err in e.errors()[:5]:
-        loc = ".".join(str(x) for x in err["loc"]) or "<args>"
-        parts.append(f"{loc}: {err['msg']}")
-    msg = "Invalid arguments — " + "; ".join(parts)
-    extra = len(e.errors()) - 5
-    if extra > 0:
-        msg += f"; +{extra} more"
-    return (
-        f"ERROR: {msg}\n"
-        "HINT: Check the argument shapes against this tool's docstring; call "
-        "describe_schema to confirm table names and primary keys."
+    return _ErrorText(validation_error_body(e))
+
+
+def _error_result(payload: dict) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=_ErrorText(payload))],
+        structured_content=payload, is_error=True,
     )
+
+
+def _mcp_result(fn: _F) -> Callable[..., CallToolResult]:
+    """Do not make agents infer failure from an apparently successful string."""
+    safe_fn = _return_errors(fn)
+
+    @functools.wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> CallToolResult:
+        result = safe_fn(*args, **kwargs)
+        if isinstance(result, _ErrorText):
+            return _error_result(result.payload)
+        # No duplicate structured string: text already carries success metadata.
+        return CallToolResult(content=[TextContent(type="text", text=result)])
+
+    return wrapped
+
+
+class _GragMCPServer(MCPServer):
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Context | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        try:
+            json_bytes(arguments, MAX_REQUEST_BYTES, "request_bytes")
+            return await super().call_tool(name, arguments, context)
+        except GragError as exc:
+            return _error_result(exc.to_dict())
+        except ToolError as exc:
+            # Typed arguments are validated by the SDK before the tool body.
+            # Use the public call boundary so HTTP and stdio see the same error.
+            if not isinstance(exc, UnexpectedToolError) and isinstance(exc.__cause__, ValidationError):
+                return _error_result(validation_error_body(exc.__cause__))
+            if isinstance(exc, UnexpectedToolError):
+                logging.getLogger(__name__).exception("MCP tool %r failed", name)
+                return _error_result({"code": "internal_error", "error": "Internal server error.", "hint": None})
+            return _error_result({"code": "tool_error", "error": str(exc), "hint": None})
 
 
 def _return_errors(fn: _F) -> _F:
@@ -207,7 +254,9 @@ def _return_errors(fn: _F) -> _F:
     @functools.wraps(fn)
     def inner(*args: Any, **kwargs: Any) -> str:
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            check_size("response_bytes", len(result.encode("utf-8")), MAX_RESPONSE_BYTES)
+            return result
         except GragError as e:
             return _format_grag_error(e)
         except ValidationError as e:
@@ -231,10 +280,16 @@ def _summary_json(summary: MutationSummary) -> str:
 @_return_errors
 def describe_schema(
     service: GragService, freshness: FreshnessMode = "allow_stale", freshness_timeout_ms: int = 5000,
+    detail: SchemaDetail = "compact", if_revision: str | None = None,
 ) -> str:
     """Return the current knowledge-graph schema as compact text: node tables
-    with properties, primary keys, row counts and sample keys, plus
-    relationship tables with their endpoint labels.
+    with property types and primary keys, plus directed relationship endpoints.
+    Derived vector columns, counts and samples are omitted by default. Use
+    detail="full" for those details. The footer includes schema_revision and
+    freshness; pass if_revision from a previous response of the same detail
+    level to receive unchanged=true instead of repeating the schema. Reuse
+    your cached schema only when unchanged=true. The revision describes this
+    schema view, not source freshness (full views include counts and samples).
 
     Call this BEFORE writing any Cypher — cypher_query needs exact table and
     property names, and upsert keys are the table's primary key. Also call it
@@ -242,15 +297,15 @@ def describe_schema(
     text too, so re-describing right away is optional). On an empty database
     the text is empty: define a schema first.
     """
-    doc = service.describe_schema(freshness=freshness, freshness_timeout_ms=freshness_timeout_ms)
-    return with_freshness(doc.text, doc.freshness)
+    doc = service.describe_schema(freshness=freshness, freshness_timeout_ms=freshness_timeout_ms, detail=detail, if_revision=if_revision)
+    return schema_text(doc)
 
 
 @_return_errors
 def define_schema(
     service: GragService,
-    node_tables: list[dict],
-    rel_tables: list[dict],
+    node_tables: Sequence[NodeTableSpec | dict],
+    rel_tables: Sequence[RelTableSpec | dict],
     if_not_exists: bool = True,
     allow_similar: bool = False,
 ) -> str:
@@ -288,12 +343,12 @@ def define_schema(
         if_not_exists=if_not_exists,
         allow_similar=allow_similar,
     )
-    doc = service.define_schema(req)
-    return with_freshness(doc.text, doc.freshness)
+    doc = service.define_schema(req, detail="compact")
+    return schema_text(doc)
 
 
 @_return_errors
-def upsert_nodes(service: GragService, nodes: list[dict], edges: list[dict] | None = None, operation_id: str | None = None) -> str:
+def upsert_nodes(service: GragService, nodes: Sequence[UpsertNode | dict], edges: Sequence[UpsertEdge | dict] | None = None, operation_id: str | None = None) -> str:
     """Record facts you discover about the project. Create or update nodes.
     Identity is (label, key) where key is the
     table's primary-key value: an existing key merges properties, a new key
@@ -312,6 +367,15 @@ def upsert_nodes(service: GragService, nodes: list[dict], edges: list[dict] | No
             the node's _source property.
             Optional "expected_revision" checks the last-read _revision;
             "absent" means create only. A conflict rejects the entire batch.
+            Optional "evidence": {} adopts this node into durable history.
+            It can patch state (current/superseded/retracted), review
+            (unreviewed/accepted/disputed), expires_at (timezone required;
+            null clears), superseded_by (canonical id; null clears), actor
+            and reason. Existing-node evidence changes require expected_revision.
+            Superseding requires state=superseded; cycles/missing targets fail.
+            Actor is a caller-supplied attribution, not authenticated identity.
+            Omitted fields preserve metadata. Later upserts retain history even
+            without evidence; absent actor stays unknown for that edit.
         edges: optional relationships to save atomically with these nodes;
             uses the same shape as upsert_edges. Endpoints can be in nodes.
         operation_id: optional unique ID (1-128 characters). Reuse the exact
@@ -324,14 +388,15 @@ def upsert_nodes(service: GragService, nodes: list[dict], edges: list[dict] | No
     No nodes or edges commit on error. Guarded/retryable writes also return
     revisions keyed by canonical entity ID. To read a token, return a whole
     entity via cypher_query (RETURN n, or RETURN a,r,b); _revision is computed
-    metadata, not a stored Cypher column. Tokens check content, not edit history.
+    metadata, not a stored Cypher column. Tracked nodes also carry a monotonically
+    increasing _evidence_seq; earlier edits before adoption remain unknown.
     """
     req = UpsertNodesRequest(nodes=[UpsertNode.model_validate(n) for n in nodes], edges=[UpsertEdge.model_validate(e) for e in edges or []], operation_id=operation_id)
     return _summary_json(service.upsert_nodes(req))
 
 
 @_return_errors
-def upsert_edges(service: GragService, edges: list[dict], operation_id: str | None = None) -> str:
+def upsert_edges(service: GragService, edges: Sequence[UpsertEdge | dict], operation_id: str | None = None) -> str:
     """Record relationships between facts you discover. Create or update
     relationships between existing nodes. Both endpoint
     nodes must exist already (upsert_nodes first) and the direction must match
@@ -380,6 +445,9 @@ def cypher_query(
             come back as JSON objects (their "_ID"/"_LABEL" keys are
             grag-internal — ignore them; canonical "Label:key" ids come from
             search_knowledge / get_context).
+            Whole entities omit derived vector properties (embedding, _emb_*).
+            Explicit property projections such as RETURN n.embedding still
+            return the requested value, including inside a user-built map.
             Whole entities include computed "_revision" for conditional
             upserts; it is not a stored column, so RETURN n rather than n._revision.
         limit: max rows, clamped to the server's configured limits (default
@@ -389,14 +457,9 @@ def cypher_query(
     resp = service.cypher_query(QueryRequest(
         cypher=cypher, limit=limit, freshness=freshness, freshness_timeout_ms=freshness_timeout_ms,
     ))
-    payload = {
-        "columns": resp.columns,
-        "rows": resp.rows,
-        "row_count": resp.row_count,
-        "truncated": resp.truncated,
-        "freshness": resp.freshness.model_dump(),
-    }
-    return json.dumps(payload, ensure_ascii=False, separators=_COMPACT, default=str)
+    # Match REST's JSON conversion (especially timestamps and nested values).
+    payload = resp.model_dump(mode="json", exclude={"subgraph"})
+    return json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
 
 
 @_return_errors
@@ -409,6 +472,7 @@ def search_knowledge(
     token_budget: int | None = None,
     freshness: FreshnessMode = "allow_stale",
     freshness_timeout_ms: int = 5000,
+    evidence: Literal["current", "all"] = "current",
 ) -> str:
     """Call this first for any question about what exists in the knowledge
     graph — even when you think you already know. Full-text seeds (plus vector
@@ -423,6 +487,12 @@ def search_knowledge(
         hops: graph expansion depth from each seed (default 1, server-clamped).
         labels: optional node-table allowlist for seeds, e.g. ["Doc",
             "Person"].
+        evidence: current (default) excludes superseded/retracted/expired,
+            disputed and retained obsolete document evidence before ranking
+            and expansion. Legacy status values superseded/retracted/expired
+            are recognized; other statuses (including task done) are unchanged.
+            Unreviewed/legacy evidence remains eligible, not certified true.
+            all includes inactive evidence for explicit historical review.
         token_budget: estimated tokens for the complete response, including
             graph and footer (minimum 256; server default when omitted).
 
@@ -432,7 +502,14 @@ def search_knowledge(
     expansion. The footer also reports truncated, omission counts, and
     expansion_limited. A truncated response is partial evidence: increase the
     budget or use get_context with text_property to page a long STRING. Values
-    are either complete or omitted. Estimates use ceil(UTF-8 bytes / 4), not a
+    in the graph are either complete or omitted. Oversized prose may also
+    appear as an explicitly marked excerpt: text_excerpts in the footer gives
+    node_id, property, character offset/end, total_chars and sha256. This is
+    partial evidence, not the whole property. Read more with get_context using
+    text_property, text_offset=offset (or end) and text_sha256=sha256; restart
+    paging from 0 if you need the entire value. A changed hash requires a fresh
+    read. Selection uses lexical sentence matches and may miss semantic-only
+    passages. Estimates use ceil(UTF-8 bytes / 4), not a
     model-specific tokenizer. When the footer includes "pending_embeddings": n, n nodes are
     still awaiting vector embedding — vector recall improves as later
     searches or the background worker drain that backlog. The freshness footer
@@ -445,6 +522,10 @@ def search_knowledge(
     "fully embedded." "vector": "error" means an embedder is configured but
     the vector path failed for this call (bad install or config) and
     silently fell back to FTS — worth checking server logs.
+    evidence_policy names the selection policy. excluded_evidence counts only
+    encountered post-shortlist/path exclusions, not all rows filtered in the
+    database. Cypher is an unfiltered structural read. No policy establishes
+    truth or detects contradictory claims automatically.
     """
     resp = service.search_knowledge(
         SearchRequest(
@@ -454,6 +535,7 @@ def search_knowledge(
             labels=labels,
             token_budget=token_budget,
             freshness=freshness, freshness_timeout_ms=freshness_timeout_ms,
+            evidence=evidence,
         )
     )
     from grag.retrieval.packing import mcp_retrieval_text
@@ -472,6 +554,10 @@ def get_context(
     text_sha256: str | None = None,
     freshness: FreshnessMode = "allow_stale",
     freshness_timeout_ms: int = 5000,
+    evidence: Literal["current", "all"] = "current",
+    history: bool = False,
+    history_before: int | None = None,
+    revision: int | None = None,
 ) -> str:
     """Fetch token-budgeted context around specific nodes by canonical id. Use
     after search_knowledge (pass its seed ids) or with ids discovered via
@@ -488,6 +574,18 @@ def get_context(
             from the text_page footer until it is null.
         text_sha256: pass the previous page's sha256 on continuation to detect
             text changes; on a mismatch restart at offset 0 without a hash.
+        evidence: current (default) uses search's lifecycle policy; all allows
+            inspection/paging of obsolete, expired or disputed evidence.
+        history: list recorded authored revisions for exactly one node,
+            newest first. Read entries and next_before from the history footer.
+            Starts at adoption, with sequence 0 baseline for an existing node;
+            earlier edits and baseline authorship are unknown. No graph expansion.
+        history_before: continue history using its next_before cursor. At most
+            20 entries per page, further constrained by token_budget.
+        revision: read a recorded sequence for one node (including historical
+            evidence), optionally with text_property paging. No expansion:
+            historical relationship topology is not recorded. Cannot combine
+            with history. Raw Cypher/relocation and import are not history events.
 
     Returns cited context plus a JSON footer after "---". truncated and the
     omitted_nodes/edges/properties counts describe incomplete packing. Increase
@@ -503,6 +601,7 @@ def get_context(
             node_ids=node_ids, hops=hops, token_budget=token_budget,
             text_property=text_property, text_offset=text_offset, text_sha256=text_sha256,
             freshness=freshness, freshness_timeout_ms=freshness_timeout_ms,
+            evidence=evidence, history=history, history_before=history_before, revision=revision,
         )
     )
     from grag.retrieval.packing import mcp_retrieval_text
@@ -692,21 +791,22 @@ def create_server(
     (run() closes it)."""
     if registry is None:
         registry = ServiceRegistry(config)
-    server = MCPServer("grag", instructions=_INSTRUCTIONS)
+    server = _GragMCPServer("grag", instructions=_INSTRUCTIONS)
 
-    @server.tool(name="describe_schema", description=_doc(describe_schema))
-    @_return_errors
+    @server.tool(name="describe_schema", structured_output=False, description=_doc(describe_schema))
+    @_mcp_result
     def describe_schema_tool(
         freshness: FreshnessMode = "allow_stale", freshness_timeout_ms: int = 5000,
+        detail: SchemaDetail = "compact", if_revision: str | None = None,
         ctx: Context | None = None,
     ) -> str:
-        return describe_schema(_resolve_service(registry, ctx), freshness, freshness_timeout_ms)
+        return describe_schema(_resolve_service(registry, ctx), freshness, freshness_timeout_ms, detail, if_revision)
 
-    @server.tool(name="define_schema", description=_doc(define_schema))
-    @_return_errors
+    @server.tool(name="define_schema", structured_output=False, description=_doc(define_schema))
+    @_mcp_result
     def define_schema_tool(
-        node_tables: list[dict],
-        rel_tables: list[dict],
+        node_tables: list[NodeTableSpec],
+        rel_tables: list[RelTableSpec],
         if_not_exists: bool = True,
         allow_similar: bool = False,
         ctx: Context | None = None,
@@ -719,66 +819,72 @@ def create_server(
             allow_similar,
         )
 
-    @server.tool(name="upsert_nodes", description=_doc(upsert_nodes))
-    @_return_errors
-    def upsert_nodes_tool(nodes: list[dict], edges: list[dict] | None = None, operation_id: str | None = None, ctx: Context | None = None) -> str:
+    @server.tool(name="upsert_nodes", structured_output=False, description=_doc(upsert_nodes))
+    @_mcp_result
+    def upsert_nodes_tool(nodes: list[UpsertNode], edges: list[UpsertEdge] | None = None, operation_id: str | None = None, ctx: Context | None = None) -> str:
         return upsert_nodes(_resolve_service(registry, ctx), nodes, edges, operation_id)
 
-    @server.tool(name="upsert_edges", description=_doc(upsert_edges))
-    @_return_errors
-    def upsert_edges_tool(edges: list[dict], operation_id: str | None = None, ctx: Context | None = None) -> str:
+    @server.tool(name="upsert_edges", structured_output=False, description=_doc(upsert_edges))
+    @_mcp_result
+    def upsert_edges_tool(edges: list[UpsertEdge], operation_id: str | None = None, ctx: Context | None = None) -> str:
         return upsert_edges(_resolve_service(registry, ctx), edges, operation_id)
 
-    @server.tool(name="cypher_query", description=_doc(cypher_query))
-    @_return_errors
+    @server.tool(name="cypher_query", structured_output=False, description=_doc(cypher_query))
+    @_mcp_result
     def cypher_query_tool(
-        cypher: str, limit: int | None = None,
+        cypher: Annotated[str, Field(max_length=65_536)], limit: int | None = None,
         freshness: FreshnessMode = "allow_stale", freshness_timeout_ms: int = 5000,
         ctx: Context | None = None,
     ) -> str:
         return cypher_query(_resolve_service(registry, ctx), cypher, limit, freshness, freshness_timeout_ms)
 
-    @server.tool(name="search_knowledge", description=_doc(search_knowledge))
-    @_return_errors
+    @server.tool(name="search_knowledge", structured_output=False, description=_doc(search_knowledge))
+    @_mcp_result
     def search_knowledge_tool(
-        query: str,
-        top_k: int = 8,
+        query: Annotated[str, Field(max_length=8192)],
+        top_k: Annotated[int, Field(ge=1, le=64)] = 8,
         hops: int = 1,
-        labels: list[str] | None = None,
-        token_budget: int | None = None,
+        labels: Annotated[list[str], Field(max_length=64)] | None = None,
+        token_budget: Annotated[int, Field(ge=256, le=32_768)] | None = None,
         freshness: FreshnessMode = "allow_stale",
         freshness_timeout_ms: int = 5000,
+        evidence: Literal["current", "all"] = "current",
         ctx: Context | None = None,
     ) -> str:
         return search_knowledge(
             _resolve_service(registry, ctx), query, top_k, hops, labels, token_budget,
-            freshness, freshness_timeout_ms,
+            freshness, freshness_timeout_ms, evidence,
         )
 
-    @server.tool(name="get_context", description=_doc(get_context))
-    @_return_errors
+    @server.tool(name="get_context", structured_output=False, description=_doc(get_context))
+    @_mcp_result
     def get_context_tool(
-        node_ids: list[str],
+        node_ids: Annotated[list[str], Field(max_length=64)],
         hops: int = 1,
-        token_budget: int | None = None,
+        token_budget: Annotated[int, Field(ge=256, le=32_768)] | None = None,
         text_property: str | None = None,
         text_offset: int = 0,
         text_sha256: str | None = None,
         freshness: FreshnessMode = "allow_stale",
         freshness_timeout_ms: int = 5000,
+        evidence: Literal["current", "all"] = "current",
+        history: bool = False,
+        history_before: int | None = None,
+        revision: int | None = None,
         ctx: Context | None = None,
     ) -> str:
         return get_context(
             _resolve_service(registry, ctx), node_ids, hops, token_budget,
             text_property, text_offset, text_sha256, freshness, freshness_timeout_ms,
+            evidence, history, history_before, revision,
         )
 
-    @server.tool(name="ingest_code", description=_doc(ingest_code))
-    @_return_errors
+    @server.tool(name="ingest_code", structured_output=False, description=_doc(ingest_code))
+    @_mcp_result
     def ingest_code_tool(
-        paths: list[str],
+        paths: Annotated[list[str], Field(max_length=64)],
         calls: bool = True,
-        max_file_kb: int = 1024,
+        max_file_kb: Annotated[int, Field(ge=1, le=32_768)] = 1024,
         background: bool = False,
         ctx: Context | None = None,
     ) -> str:
@@ -786,10 +892,10 @@ def create_server(
             _resolve_service(registry, ctx), paths, calls, max_file_kb, background
         )
 
-    @server.tool(name="ingest_docs", description=_doc(ingest_docs))
-    @_return_errors
+    @server.tool(name="ingest_docs", structured_output=False, description=_doc(ingest_docs))
+    @_mcp_result
     def ingest_docs_tool(
-        paths: list[str],
+        paths: Annotated[list[str], Field(max_length=64)],
         sections: bool = True,
         label: str = "Chunk",
         background: bool = False,
@@ -799,8 +905,8 @@ def create_server(
             _resolve_service(registry, ctx), paths, sections, label, background
         )
 
-    @server.tool(name="job_status", description=_doc(job_status))
-    @_return_errors
+    @server.tool(name="job_status", structured_output=False, description=_doc(job_status))
+    @_mcp_result
     def job_status_tool(job_id: str, ctx: Context | None = None) -> str:
         return job_status(_resolve_service(registry, ctx), job_id)
 

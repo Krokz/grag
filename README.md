@@ -384,7 +384,7 @@ Any MCP client gets these 10 tools:
 
 | tool | purpose |
 |---|---|
-| `describe_schema` | prompt-shaped schema: tables, properties, row counts, sample keys. Call before writing Cypher — kills hallucinated labels. |
+| `describe_schema` | compact schema: tables, property types, primary keys and directed endpoints. Optional full detail and revision-based reuse. Call before writing Cypher. |
 | `define_schema` | create node/rel tables (LLM designs the graph for a domain) |
 | `upsert_nodes` / `upsert_edges` | atomic MERGE batches; optional retry IDs and revision checks; `_source` provenance automatic |
 | `cypher_query` | read-only Cypher; errors come back with correction hints |
@@ -394,7 +394,48 @@ Any MCP client gets these 10 tools:
 | `ingest_docs` | index Markdown/text files on the server as `Document → Section → Chunk` graphs with `MENTIONS_*` links into the code graph (`sections=false` for flat chunks) |
 | `job_status` | poll a background ingest by id |
 
-Errors are returned as `ERROR: ... HINT: ...` tool output so the model self-corrects in-loop.
+Nested schema/upsert inputs advertise their required fields, property types and
+revision guards. Expected failures set MCP `isError=true` with readable
+`ERROR: ... HINT: ...` text and a JSON footer containing `code`, `error`, and
+`hint`. The same envelope is available in `structuredContent`; REST uses the
+same codes (and HTTP status codes). Validation errors identify nested fields.
+Successful text responses carry their metadata once, without a duplicate
+structured string.
+
+MCP schema tools return the compact view by default: usable property types,
+primary keys and relationship directions. `describe_schema(detail="full")`
+also includes counts, sample keys and vector columns. REST/Python keep their
+full default and accept the same detail option. Schema views are cached until
+a writer statement invalidates them. Pass a previous `schema_revision` as
+`if_revision` to omit a repeated view when `unchanged=true`; keep your cached
+schema for that case. Revisions identify the requested view, including counts
+and samples for full detail, and are separate from source freshness.
+
+Search packing prioritizes cited evidence and connections between seeds before
+bookkeeping fields and unrelated neighbors. Oversized prose can appear as a
+marked, exact excerpt, selected by lexical sentence matches. The full property
+remains omitted and `truncated` stays true. `text_excerpts` carries character
+`offset`/`end`, `total_chars`, `node_id`, `property` and `sha256`; Python/REST also
+include the exact `text`. Use those coordinates and hash with the existing
+`get_context` text pager to read more, or start at 0 for the complete value.
+Excerpts may omit qualifications outside the selected window and may miss
+semantic-only matches. This adds no configuration or model dependency.
+
+Search and context default to `evidence="current"`: explicitly superseded,
+retracted, expired, disputed, and retained obsolete document nodes are excluded
+before ranking and expansion. Use `evidence="all"` to inspect them. Legacy
+`status` values `superseded`, `retracted`, and `expired` are recognized; task
+`open`/`done` and other business statuses are unchanged. Unreviewed or legacy
+evidence stays eligible; this is a selection policy, not a truth guarantee.
+Cypher remains unfiltered. The footer names `evidence_policy`;
+`excluded_evidence` counts encountered post-shortlist/path exclusions only,
+not every row filtered within the database.
+
+Whole-entity Cypher replies (`RETURN n`, paths, lists and maps of entities)
+omit derived vector properties. Entity IDs, relationships, provenance and
+revision guards remain available. Explicit projections (`RETURN n.embedding`)
+still return the requested values. Query replies are row-limited; they do not
+use search/context token budgets.
 
 **Save a memory and its links together.** Both upsert calls are atomic: an error
 commits none of that call's nodes or edges. `upsert_nodes` accepts an optional
@@ -424,11 +465,39 @@ To avoid overwriting another agent's work, first query a whole entity
 `_revision` as `expected_revision` on that upsert item. Use `"absent"` for
 create-only writes. All preconditions check the state before this batch's first
 write; a mismatch rejects the batch with `revision_conflict` (REST HTTP 409;
-MCP includes `CODE`). Read the current state and reconcile before retrying.
+MCP returns a structured error code). Read the current state and reconcile before retrying.
 Guarded or retryable writes return a `revisions` map keyed by canonical entity ID.
-Tokens represent stored content and provenance, not edit history: reverting to
-identical content can restore a previous token. `_revision` is computed metadata,
+For untracked nodes, reverting to identical content can restore a previous token.
+History-tracked nodes also include their increasing sequence. `_revision` is computed metadata,
 so query the entity rather than a nonexistent `n._revision` column.
+
+**Keep a memory's correction history.** Add `"evidence": {}` to its upsert item
+to opt it in. On an existing node, supply `expected_revision`; grag preserves
+the previous value as baseline revision 0, with unknown authorship. Later upserts
+record snapshots with their sources, content revisions and increasing sequences
+in the same transaction as the edit and retry receipt. Identical writes do not
+add revisions; a supplied actor or reason records an explicit review action.
+
+The optional evidence patch accepts `state` (`current`, `superseded`, `retracted`),
+`review` (`unreviewed`, `accepted`, `disputed`), `actor`, `reason`, `expires_at`
+(timestamp with timezone), and `superseded_by` (another canonical node id).
+Omitted fields preserve values; null clears expiry or the supersession pointer.
+Supersession requires `state="superseded"`; missing targets and cycles are
+rejected. Change the old and replacement memories in one guarded upsert batch.
+Review defaults to unreviewed. Accepted/disputed are explicit caller judgments;
+actor attribution is supplied by the caller, not authenticated by grag.
+No expiry is inferred and expiry never deletes data. Later edits without an
+actor record an unknown updater, rather than crediting the previous author.
+
+Read `get_context(node_ids=["Decision:storage"], history=true)` for a budgeted
+list of revisions. Continue with `history_before=history.next_before` until it
+is null. Use `revision=<sequence>` to retrieve a snapshot, optionally with
+`text_property` paging. These modes use one node and skip expansion: historical
+relationship topology is not recorded. History starts at adoption; it cannot
+recover earlier overwritten text. Raw writes, relocation, and import do not
+create authored review events. JSONL export/import currently omits internal
+history; retain the original database for historical evidence. Ordinary nodes
+need no history setup, preset schema, additional service or model.
 
 Primary keys belong in `key`, never `properties`; invalid keys and unknown
 request fields are errors. Undeclared, reserved, or mismatched properties retain
@@ -616,8 +685,11 @@ and the MCP text (including its footer). `response_token_estimate` reports that
 size; `token_estimate` measures only `context`. Both use `ceil(UTF-8 bytes / 4)`,
 a deterministic estimate rather than a model-specific tokenizer count. HTTP/MCP
 protocol envelopes, client-added formatting, and tool errors are outside this
-budget. The default remains 2000; requests and configured defaults below **256**
-are rejected so metadata has room. Compared with v0.6.0, the same budget may
+budget. The default remains 2000; supported budgets are **256–32,768**.
+The compact application payload is bounded to `4 * token_budget` UTF-8 bytes;
+this is **not a model-token guarantee**. Multilingual text, identifiers and JSON
+can cost more tokens than this estimate; count with your harness's tokenizer
+when enforcing a model context limit. Compared with v0.6.0, the same budget may
 return fewer records: `seeds` and `subgraph` now contain only packed records and
 properties, rather than an unbounded second copy of the retrieved graph.
 
@@ -652,11 +724,51 @@ subset of the value has `truncated=true`, including a final page starting after
 offset 0; `next_offset=null` is the end-of-text signal. An id or citation too
 large to leave room for a character produces an actionable budget error.
 
+**Resource limits.** Normal use needs no additional configuration. Requests are
+limited to 2 MiB, upserts to 1,000 total nodes plus edges, and searches/context
+lookups to 64 seeds/IDs and 64 labels. Search shares a pool of at most 1,024
+candidates per modality across labels; narrowing labels gives each more room.
+Neighborhood expansion shares 1,024 paths across seeds (at most 512 per seed)
+and reports `expansion_limited` when clipped. Exact cosine still scores the
+eligible vectors; hitting a work limit returns an error instead of silently
+sampling vectors or presenting partial ranking as exact.
+
+Read operations share limits of 64 MiB of decoded-result JSON, 100,000 result
+rows and 4,096 statements. Lexical processing shares 4 MiB of text and 200,000
+terms. Packing shares 128 MiB of rendered text work and 8,192 build attempts.
+Text pages hash the selected property in 64K-character projections and load
+only the requested window and its citation/lifecycle fields. They still verify
+the whole value each call, within the shared read limits; stored history
+snapshots are at most 1 MiB; new history identities and entry metadata are capped
+at 2 KiB and 16 KiB so they remain readable within a supported page budget. Ordinary JSON/MCP responses are capped at 1 MiB;
+explicit streaming JSONL export is separate. These are application bounds,
+not a process-memory ceiling: native query execution and a single decoded value
+can allocate before Python checks them. The native buffer pool and statement
+timeout remain in force.
+
+Each database admits at most 32 active operations and 16 running/queued jobs.
+A full queue returns `resource_limit`; poll existing jobs before resubmitting.
+Finished job history is bounded to 200 entries. Source scans share 256 MiB and
+100,000 directory/file entries across roots and verification passes. An incomplete
+scan never certifies freshness. Document batches accept at most 256 documents,
+with 2 MiB of loaded file content; narrow paths or split batches when needed.
+
+Authored history keeps at most 1,000 entries per node, 100,000 overall and a
+conservative 256 MiB storage allowance. Retry receipts keep at most 100,000
+entries and a conservative 64 MiB allowance. Existing strings are accounted at
+four bytes per Unicode character. Capacity failures roll back the entire upsert;
+history and receipts are never silently evicted, and existing operation IDs
+remain replayable at capacity. Preserve the database and continue in a new graph
+if durable storage fills. Supersession chains allow 128 links and 1,024 traversed
+links per mutation batch. `resource_limit` includes the limiting resource and a
+correction hint; REST uses 413 for size/work limits and 429 for busy admission,
+and MCP marks the tool result as an error.
+
 Codec ladder (`grag bench` reproduces these numbers on a synthetic 1500-doc corpus):
 
 | codec | bytes/vec (dim 64) | recall@10 | note |
 |---|---|---|---|
-| `fp32` | 256 | 0.998 | baseline; native HNSW index |
+| `fp32` | 256 | 1.000 | baseline; full-precision cosine scoring |
 | `int8` | 68 | 0.998 | 4x smaller, near-zero loss |
 | `binary` | 8 | 0.476 | 32x, hamming scan + rescore |
 | `polar` | 14 | 0.766 | experimental PolarQuant-style angular codes (sine-power-law bit allocation, training-free) |
@@ -664,6 +776,17 @@ Codec ladder (`grag bench` reproduces these numbers on a synthetic 1500-doc corp
 Select with `GRAG_VECTOR_CODEC` / `GragConfig.vector_codec`. `polar` is opt-in; `int8` is the sweet spot today.
 
 Two honest costs of the codec path: candidate generation for non-fp32 codecs is an O(rows) approximate scan (only pk + code bytes cross the wire; fp32 nodes are fetched for the 4·top_k rescore shortlist only) — that's the property `grag bench` measures, so no ANN index is involved. And the first searches after a large ingest embed lazily: at most `GRAG_MAX_EMBED_PER_SEARCH` (default 256) nodes per search call, with the remainder reported as `pending_embeddings` on the search response so agents know vector recall is still improving.
+
+Full-precision (`fp32`) retrieval uses an exact cosine scan, also O(rows × dimensions),
+with full records fetched only for the shortlist. Native HNSW acceleration is
+disabled because LadybugDB 0.20.2 can crash when text edits invalidate and refill
+indexed embeddings. On writable open, grag removes its legacy `grag_vec__*`
+indexes, checkpoints and reopens before serving; graph data and stored vectors
+are preserved. This also applies when embeddings are disabled. Read-only
+inspection leaves indexes intact; externally managed HNSW indexes require their
+owner to remove them before grag accepts writes. An already unreadable WAL still
+requires the separate `grag recover` workflow. Search may be slower on large
+graphs, but semantic search, codecs, and the embedding model settings remain available.
 
 ## Configuration
 
@@ -679,9 +802,9 @@ unless you call `GragConfig.from_env()`.
 | `GRAG_DB_PATH` | Filesystem path | `knowledge.lbdb` | Database used in single-database mode. In multi-db mode, its filename identifies the preferred default database. Overridden by global CLI option `--db`. |
 | `GRAG_DB_DIR` | Directory path | unset | Enables multi-database mode: short database names resolve to `<dir>/<name>.lbdb`. Overridden by global CLI option `--db-dir`. |
 | `GRAG_BUFFER_POOL_MB` | Integer MiB | `256` | LadybugDB buffer-pool memory. Raise it for large imports/index builds; lower it to reduce resident-memory pressure. This is not the database file size. |
-| `GRAG_TOKEN_BUDGET` | Integer ≥ 256 | `2000` | Estimated budget for the complete retrieval payload, including graph and metadata; request-level `token_budget` wins. |
+| `GRAG_TOKEN_BUDGET` | Integer 256–32768 | `2000` | Estimated budget for the complete retrieval payload, including graph and metadata; request-level `token_budget` wins. Not a model-token guarantee. |
 | `GRAG_SEARCH_LABEL_CAP` | Integer | `2` | Maximum fused search seeds contributed by one node label before other labels get a turn. Prevents large tables such as `Function` from crowding out `Decision`/`Concept`. Set `0` or a negative value to disable diversity capping and use pure fused rank order. |
-| `GRAG_VECTOR_CODEC` | `fp32`, `int8`, `binary`, `polar` | `fp32` | Storage/candidate-generation codec. `fp32` uses native HNSW; compressed codecs scan compact codes and exactly rescore shortlisted fp32 vectors. Changes make existing vectors pending for automatic rebuilding. |
+| `GRAG_VECTOR_CODEC` | `fp32`, `int8`, `binary`, `polar` | `fp32` | Storage/candidate-generation codec. `fp32` uses exact cosine scanning; compressed codecs scan compact codes and exactly rescore shortlisted fp32 vectors. Changes make existing vectors pending for automatic rebuilding. |
 | `GRAG_POLAR_BITS_PER_DIM` | Float in `(0, 8]` | `1.0` | Approximate angular bits per vector dimension when `GRAG_VECTOR_CODEC=polar`. Higher values improve reconstruction at the cost of larger codes. Read directly by the polar codec. |
 | `GRAG_MAX_EMBED_PER_SEARCH` | Non-negative integer | `256` | Maximum pending nodes embedded synchronously by one search when no background worker is running (`GRAG_EMBED_BACKGROUND=0`, or library use without a serving process). Remaining work is reported as `pending_embeddings`. |
 | `GRAG_EMBED_BACKGROUND` | `1`/`0` | `1` | Serving processes run a background embedding worker per database, so ingests and searches never embed on the request thread. `0` restores inline embedding (search embeds up to `GRAG_MAX_EMBED_PER_SEARCH`; ingest embeds its own writes). |
@@ -843,11 +966,20 @@ in-place lossy recovery, including in supervised deployments.
 ## Develop
 
 ```bash
-python -m pytest tests/          # 400+ tests
+python -m pytest tests/            # unit, recovery and agent-workflow checks
 ruff check src tests && mypy src/grag   # CI gates on both
 grag bench                        # codec recall/latency/RSS table
 cd ui && npm run build            # rebuilds the UI into src/grag/api/static/
 ```
+
+For evidence-level retrieval evaluation, run
+`python tests/workflow_eval.py --scenarios --output /tmp/grag-workflows.json`.
+The checked-in questions compare keyword search, optional real local embeddings,
+graph expansion and explicit relationship queries. Reports measure required text,
+nodes, edges and citations after packing, plus latency and token costs against file
+reading. See the [workflow evaluation guide](tests/fixtures/workflows/README.md)
+for the real MCP drill, optional tokenizer calibration, and measurement limits.
+Vector-neighbor recall from `grag bench` is a separate metric.
 
 See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the branching model (Gitflow-lite:
 `main` + `dev` + `feature`/`release`/`hotfix`), PR rules, and how releases are

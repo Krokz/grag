@@ -65,7 +65,8 @@ def test_search_latency_and_rss(tmp_path):
         )
         for i in range(500)
     ]
-    svc.ingest(IngestRequest(documents=docs, chunk=True))
+    for start in range(0, len(docs), 256):
+        svc.ingest(IngestRequest(documents=docs[start:start + 256], chunk=True))
 
     rss_before = _rss_mb()
 

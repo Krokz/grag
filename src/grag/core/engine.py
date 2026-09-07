@@ -30,6 +30,7 @@ import ladybug as lb
 from grag.config import GragConfig
 from grag.core.errors import ConfigurationError, CypherError, GragError
 from grag.core.ident import validate_identifier
+from grag.core.limits import charge, charge_result
 from grag.core.types import (
     EMB_CODE_PROP,
     EMB_FINGERPRINT_PROP,
@@ -37,6 +38,7 @@ from grag.core.types import (
     RESERVED_PREFIX,
     EdgeRecord,
     NodeRecord,
+    SchemaDocument,
     Subgraph,
     make_node_id,
 )
@@ -87,6 +89,11 @@ class Engine:
             self._secure_database_files()
         self._write_conn = lb.Connection(self._db)
         self._write_lock = threading.RLock()
+        # Conservative invalidation: any writer statement (including failed
+        # statements) discards schema views. Readers never cache transactions.
+        self.schema_cache: dict[str, SchemaDocument] = {}
+        self._catalog_generation = 0
+        self._prepared_catalog: dict[lb.Connection, int] = {}
         self._transaction_owner: int | None = None
         self._transaction_failed = False
         # Serialize code-ingest planning as well as publishing. Parsing stays
@@ -101,9 +108,18 @@ class Engine:
         self._set_timeout(self._write_conn)
         try:
             self._preload_extensions()
-            if self.wal_recovered:
-                self._drop_stale_vector_indexes()
             if not read_only:
+                if self._retire_native_vector_indexes():
+                    # Retiring the extension index changes internal catalog
+                    # tables. Finish that migration and start a fresh native
+                    # session before any user writes can enter a new WAL.
+                    self._run(self._write_conn, "CHECKPOINT", None)
+                    self.close()
+                    self._db = self._open_db(db_path, config)
+                    self._write_conn = lb.Connection(self._db)
+                    self.plan_cache_disabled = self._disable_plan_cache(self._write_conn)
+                    self._set_timeout(self._write_conn)
+                    self._preload_extensions()
                 self._stamp_version()
         except BaseException:
             self.close()
@@ -139,49 +155,60 @@ class Engine:
                 "after a database can open." + legacy,
             ) from exc
 
-    def _drop_stale_vector_indexes(self) -> None:
-        """After WAL recovery, drop all grag HNSW indexes (potentially stale).
+    def _retire_native_vector_indexes(self) -> bool:
+        """Remove grag's derived HNSW indexes before exposing a writable engine.
 
-        Stale HNSW entries (nodes whose embedding writes were rolled back by WAL
-        recovery) cause SIGSEGV in LadybugDB's HNSW maintenance when a new
-        embedding write triggers a neighbor search over NULL pointers.  Dropping
-        here is safe: _ensure_vector_index() recreates the index on first search,
-        building it from the embeddings that survived recovery.
+        LadybugDB 0.20.2 can segfault when refilling invalidated embeddings in an
+        existing HNSW index, even with one writer. Exact cosine retrieval uses
+        the same stored vectors without native index maintenance. Do this on
+        every writable open, including with embeddings disabled and on recovery
+        copies; read-only inspection leaves the file untouched.
         """
         try:
-            res = self._run(self._write_conn, "CALL SHOW_TABLES() RETURN *", None)
+            indexes = self._run(self._write_conn, "CALL SHOW_INDEXES() RETURN *", None).as_dicts()
         except GragError as exc:
             raise ConfigurationError(
-                f"Cannot inspect vector indexes after recovery: {exc}",
-                hint="Keep the recovery snapshot; do not serve this unverified copy.",
+                f"Cannot inspect native vector indexes before opening for writes: {exc}",
+                hint="Keep the database and sidecars; verify the supported LadybugDB runtime.",
             ) from exc
-        for row in res.rows:
-            table_name = str(row[1])
-            table_type = str(row[2]).upper()
-            if table_type != "NODE":
-                continue
-            idx = f"grag_vec__{table_name}"
-            validate_identifier(table_name)
-            props = self._run(self._write_conn, f"CALL TABLE_INFO('{table_name}') RETURN *", None)
-            if not any(prop[1] == EMBEDDING_PROP for prop in props.rows):
-                continue
+        native = [idx for idx in indexes if str(idx["index_type"]).upper() == "HNSW"]
+        # Validate the entire set before retiring anything. Never silently drop
+        # externally managed indexes or permit their unsafe maintenance on writes.
+        for idx in native:
+            table, name = str(idx["table_name"]), str(idx["index_name"])
+            if name != f"grag_vec__{table}" or idx["property_names"] != [EMBEDDING_PROP]:
+                raise ConfigurationError(
+                    f"Native vector index '{name}' on '{table}' is not managed by grag.",
+                    hint="Native HNSW updates can crash this runtime. Preserve a backup and "
+                    "have its owner remove this derived index before opening for writes; "
+                    "read-only inspection remains available. Stored vectors need not be removed.",
+                )
+            validate_identifier(table)
+            if not idx["extension_loaded"]:
+                raise ConfigurationError(
+                    f"Cannot retire native vector index '{name}': VECTOR extension is unavailable.",
+                    hint="Restore the VECTOR extension matching the installed LadybugDB runtime "
+                    "and retry. Keep the database and sidecars; do not delete stored data.",
+                )
+        for idx in native:
+            table, name = str(idx["table_name"]), str(idx["index_name"])
             try:
                 self._run(
                     self._write_conn,
-                    f"CALL DROP_VECTOR_INDEX('{table_name}', '{idx}')",
+                    f"CALL DROP_VECTOR_INDEX('{table}', '{name}')",
                     None,
                 )
-                logger.warning(
-                    "WAL recovery: dropped stale HNSW index on %s", table_name
-                )
             except GragError as exc:
-                message = str(exc).lower()
-                if "doesn't have an index" not in message and "does not exist" not in message:
-                    raise ConfigurationError(
-                        f"Cannot remove potentially stale vector index {idx}: {exc}",
-                        hint="Keep the recovery snapshot; restore extension availability before retrying.",
-                    ) from exc
-        self._run(self._write_conn, "CHECKPOINT", None)
+                raise ConfigurationError(
+                    f"Cannot retire unsafe native vector index '{name}': {exc}",
+                    hint="Keep the database and sidecars; resolve the index-removal error "
+                    "before serving this database for writes.",
+                ) from exc
+            logger.warning(
+                "Retired native vector index %s on %s; embeddings are preserved and "
+                "semantic search uses exact cosine scoring.", name, table,
+            )
+        return bool(native)
 
     def _preload_extensions(self) -> None:
         """LOAD FTS and VECTOR once at startup so no operation path has to.
@@ -272,7 +299,7 @@ class Engine:
     # -- execution -------------------------------------------------------------
 
     def execute(
-        self, cypher: str, params: dict[str, Any] | None = None
+        self, cypher: str, params: dict[str, Any] | None = None, *, max_rows: int | None = None
     ) -> EngineResult:
         """Run a read query on a pooled connection.
 
@@ -292,7 +319,7 @@ class Engine:
         conn = self._borrow_reader()
         try:
             self._clear_prepared_cache(conn)
-            return self._run(conn, cypher, params)
+            return self._run(conn, cypher, params, max_rows=max_rows)
         finally:
             self._readers.put(conn)
 
@@ -315,6 +342,13 @@ class Engine:
         tests/test_mutate.py::test_upsert_edges_distinct_endpoints_*.
         """
         with self._write_lock:
+            self.schema_cache.clear()
+            if cypher.lstrip().upper().startswith(("ALTER ", "CREATE NODE TABLE ", "CREATE REL TABLE ", "DROP TABLE ", "COMMIT", "ROLLBACK")):
+                # The Python prepared statement can retain a bound RETURN n
+                # shape after ALTER even with physical plan caching disabled.
+                # Commit invalidation also covers readers used during the DDL
+                # transaction; rollback must invalidate its temporary shape.
+                self._catalog_generation += 1
             if self._transaction_failed:
                 raise CypherError(
                     "The write transaction has failed; further statements are refused.",
@@ -397,6 +431,7 @@ class Engine:
             finally:
                 self._transaction_owner = None
                 self._transaction_failed = False
+                self._catalog_generation += 1
                 self._secure_database_files()
 
     # Ladybug's Python layer memoises PreparedStatement objects per (query
@@ -442,7 +477,8 @@ class Engine:
         """
         cache = getattr(conn, "_pybind_implicit_prepared_cache", None)
         lock = getattr(conn, "_prepared_cache_lock", None)
-        if self.plan_cache_disabled:
+        catalog_current = self._prepared_catalog.get(conn) == self._catalog_generation
+        if self.plan_cache_disabled and catalog_current:
             if cache is not None and lock is not None:
                 with suppress(Exception):
                     if len(cache) > self._PREPARED_MEMO_LIMIT:
@@ -456,6 +492,7 @@ class Engine:
                 hint="Install the verified runtime with: pip install 'ladybug==0.20.2'.",
             )
         self._evict_prepared(cache, lock)
+        self._prepared_catalog[conn] = self._catalog_generation
 
     @staticmethod
     def _evict_prepared(cache: dict, lock: Any) -> None:
@@ -480,8 +517,9 @@ class Engine:
                 path.chmod(0o600)
 
     def _run(
-        self, conn: lb.Connection, cypher: str, params: dict[str, Any] | None
+        self, conn: lb.Connection, cypher: str, params: dict[str, Any] | None, *, max_rows: int | None = None
     ) -> EngineResult:
+        charge("statements")
         try:
             results = conn.execute(cypher, params or {})
             # The bindings return a list of QueryResults for multi-statement
@@ -489,13 +527,23 @@ class Engine:
             result = results[-1] if isinstance(results, list) else results
             columns = list(result.get_column_names())
             rows: list[list[Any]] = []
-            while result.has_next():
-                rows.append([_plain(v) for v in result.get_next()])
-            result.close()
+            try:
+                while (max_rows is None or len(rows) < max_rows) and result.has_next():
+                    charge("result_rows")
+                    row = [_plain(v) for v in result.get_next()]
+                    charge_result(row)
+                    rows.append(row)
+            finally:
+                result.close()
             return EngineResult(columns, rows)
         except GragError:
             raise
         except Exception as exc:
+            if str(exc).startswith("Buffer manager exception:") and "buffer pool is full" in str(exc):
+                from grag.core.errors import ResourceLimitError
+
+                raise ResourceLimitError("native_buffer_bytes", self.config.buffer_pool_size,
+                    hint="Narrow the query/labels/hops or restart with more GRAG_BUFFER_POOL_MB if the machine has capacity. The default is 256 MiB; this is a memory limit, not a Cypher syntax error.") from exc
             raise CypherError(
                 str(exc),
                 hint="Check Cypher syntax and confirm table/property names via describe_schema.",
@@ -671,6 +719,8 @@ def _has_internal_graph_value(cell: Any) -> bool:
         )
     if isinstance(cell, (list, tuple)):
         return any(_has_internal_graph_value(x) for x in cell)
+    if isinstance(cell, dict):
+        return any(_has_internal_graph_value(x) for x in cell.values())
     return False
 
 
@@ -714,6 +764,9 @@ def extract_subgraph(
                 walk(r)
         elif isinstance(v, (list, tuple)):
             for x in v:
+                walk(x)
+        elif isinstance(v, dict):
+            for x in v.values():
                 walk(x)
 
     for row in result.rows:

@@ -56,6 +56,8 @@ from grag.core.types import (
     UpsertNodesRequest,
 )
 from grag.ingest.document_sync import (
+    mark_current,
+    prepare_document_state,
     prepare_ownership,
     prune_unreferenced_nodes,
     replace_owned_edges,
@@ -382,6 +384,7 @@ def _ingest_markdown(
         ),
     )
     prepare_ownership(engine, generated_tables)
+    prepare_document_state(engine, [DOCUMENT_LABEL, SECTION_LABEL, chunk_label])
 
     docs: list[UpsertNode] = []
     sections_out: list[UpsertNode] = []
@@ -532,6 +535,7 @@ def _ingest_markdown(
         for batch in (docs, sections_out, chunks):
             if batch:
                 upsert_nodes(engine, config, UpsertNodesRequest(nodes=batch))
+                mark_current(engine, batch[0].label, [n.key for n in batch])
         replace_owned_edges(engine, generated_tables, list(identities), warnings)
         for owner, edges in edges_by_owner.items():
             if edges:

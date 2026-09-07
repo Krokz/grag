@@ -13,6 +13,7 @@ from grag.code_state import Fingerprint as Fingerprint
 from grag.code_state import fingerprint as fingerprint
 from grag.code_state import index_records, saved_request, scan_sources
 from grag.core.errors import FreshnessError, GragError, ShutdownError
+from grag.core.limits import bounded_sources
 from grag.core.types import FreshnessReport, FreshnessState, ReadPolicy
 
 log = logging.getLogger(__name__)
@@ -222,6 +223,7 @@ class CodeIndexRefresher:
             state.retry_at = time.monotonic() + self._backoff(state.failures)
             self._condition.notify_all()
 
+    @bounded_sources
     def _cycle(self, serial: int) -> dict:
         try:
             with self._condition:

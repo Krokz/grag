@@ -54,6 +54,7 @@ from grag.code_state import (
 from grag.config import GragConfig
 from grag.core.engine import Engine
 from grag.core.errors import GragError
+from grag.core.limits import bounded_sources, charge, read_source
 from grag.core.mutate import define_schema, upsert_edges, upsert_nodes
 from grag.core.types import (
     CodeIngestRequest,
@@ -244,21 +245,23 @@ def _walk(
         if errors is not None:
             errors.append(message)
 
-    for path in paths:
+    def candidates_for(path: Path):
         if path.is_file():
-            candidates = [(path.parent, path)]
+            charge("source_entries")
+            yield path.parent, path
         elif path.is_dir():
-            candidates = []
             for dirpath, dirnames, filenames in os.walk(
                 path, onerror=lambda exc: failed(f"skipped directory {exc.filename}: {exc}")
             ):
+                charge("source_entries", 1 + len(dirnames) + len(filenames))
                 dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
-                candidates.extend(
-                    (path, Path(dirpath) / name) for name in sorted(filenames)
-                )
+                for name in sorted(filenames):
+                    yield path, Path(dirpath) / name
         else:
             failed(f"skipped {path}: no such file or directory")
-            continue
+
+    for path in paths:
+        candidates = candidates_for(path)
         for root, file in candidates:
             if _skip_file(file.name) or file.suffix.lower() not in (*_PARSERS, *_UNSUPPORTED_CODE_SUFFIXES):
                 continue
@@ -824,6 +827,7 @@ def _git_state(root: Path) -> dict[str, str]:
 # --- public: ingest_code ----------------------------------------------------------
 
 
+@bounded_sources
 def ingest_code(
     engine: Engine, config: GragConfig, req: CodeIngestRequest
 ) -> CodeIngestResponse:
@@ -913,7 +917,7 @@ def _ingest_code(
         repo = persisted_ids.get(str(root), _repo_id(root))
         repo_name = root.name or "repo"
         try:
-            raw = file.read_bytes()
+            raw = read_source(file, req.max_file_kb * 1024)
             source = raw.decode("utf-8")
             parsed = parser(file, source, repo=repo, rel_path=rel_path, calls=req.calls)
             if rel_path == "__init__.py":

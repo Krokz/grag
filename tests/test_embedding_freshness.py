@@ -226,7 +226,7 @@ def test_configuration_change_rebuilds_lazily_without_serving_old_vectors(svc, c
     svc.config.vector_codec = codec
     assert embed(svc) == 2
     original = row(svc)[EMB_FINGERPRINT_PROP]
-    # Warm HNSW before invalidating to exercise index NULL maintenance.
+    # Search before invalidating to exercise the complete retrieval lifecycle.
     assert vectors.vector_candidates(svc.engine, svc.config, "old", ["Memory"], 2)
     svc.config.embedder.model = "another-model"
     assert pending(svc) == 2
@@ -386,10 +386,6 @@ def test_first_vector_ddl_excludes_concurrent_upsert(svc, monkeypatch):
 def test_shortlist_edit_does_not_return_a_score_for_old_text(svc, monkeypatch, codec):
     svc.config.vector_codec = codec
     assert embed(svc) == 1
-    if codec == "fp32":
-        def no_hnsw(*args, **kw):
-            raise ConfigurationError("force exact scan")
-        monkeypatch.setattr(vectors, "_query_vector_index", no_hnsw)
     original = vectors._fetch_nodes_by_keys
 
     def edit_before_fetch(*args, **kw):

@@ -161,3 +161,27 @@ def test_search_knowledge_repeated_queries_not_stale(tmp_path):
         assert len(set(seen.values())) > 1
     finally:
         svc.close()
+
+
+def test_warm_whole_entity_reads_follow_added_columns_and_rollback(engine):
+    """0.20.2 disables physical plan caching but retains the bound row shape."""
+    import threading
+    engine.execute_write('CREATE NODE TABLE Memo(id STRING PRIMARY KEY, body STRING)')
+    engine.execute_write("CREATE (n:Memo {id:'a',body:'evidence'})")
+    query='MATCH (n:Memo {id:$id}) RETURN n'
+    assert 'new_state' not in engine.execute(query,{'id':'a'}).rows[0][0]
+    during=[]
+    with engine.write_transaction():
+        engine.execute_write('ALTER TABLE Memo ADD new_state STRING DEFAULT NULL')
+        engine.execute_write("MATCH (n:Memo) SET n.new_state='current'")
+        thread=threading.Thread(target=lambda:during.append(engine.execute(query,{'id':'a'}).rows))
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    assert during
+    assert engine.execute(query,{'id':'a'}).rows[0][0]['new_state']=='current'
+    with pytest.raises(RuntimeError), engine.write_transaction():
+        engine.execute_write('ALTER TABLE Memo ADD temporary STRING DEFAULT NULL')
+        assert 'temporary' in engine.execute(query,{'id':'a'}).rows[0][0]
+        raise RuntimeError('rollback DDL')
+    assert 'temporary' not in engine.execute(query,{'id':'a'}).rows[0][0]

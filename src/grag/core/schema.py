@@ -8,6 +8,8 @@ every query tolerates an empty database and a missing meta table.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from grag.config import GragConfig
@@ -15,10 +17,12 @@ from grag.core.engine import Engine, is_internal_label
 from grag.core.errors import GragError
 from grag.core.types import (
     META_TABLE,
+    VECTOR_PROPS,
     GraphStats,
     NodeTableDoc,
     PropertyDoc,
     RelTableDoc,
+    SchemaDetail,
     SchemaDocument,
 )
 
@@ -30,7 +34,7 @@ def _show_tables(engine: Engine) -> list[dict[str, Any]]:
     return res.as_dicts()
 
 
-def _meta_rows(engine: Engine) -> dict[str, dict[str, Any]]:
+def _meta_rows(engine: Engine, *, strict: bool = False) -> dict[str, dict[str, Any]]:
     """name -> meta row for tables recorded by define_schema; {} if absent."""
     try:
         res = engine.execute(
@@ -38,6 +42,8 @@ def _meta_rows(engine: Engine) -> dict[str, dict[str, Any]]:
             "RETURN m.name, m.kind, m.pk, m.searchable, m.from_label, m.to_label"
         )
     except GragError:
+        if strict:
+            raise
         return {}
     rows: dict[str, dict[str, Any]] = {}
     for d in res.as_dicts():
@@ -96,7 +102,7 @@ def pk_map(engine: Engine) -> dict[str, str]:
     return mapping
 
 
-def _row_count(engine: Engine, table: str, kind: str) -> int:
+def _row_count(engine: Engine, table: str, kind: str, *, strict: bool = False) -> int:
     try:
         if kind == "REL":
             res = engine.execute(f"MATCH ()-[r:{table}]->() RETURN count(r)")
@@ -104,10 +110,12 @@ def _row_count(engine: Engine, table: str, kind: str) -> int:
             res = engine.execute(f"MATCH (n:{table}) RETURN count(n)")
         return int(res.rows[0][0]) if res.rows else 0
     except GragError:
+        if strict:
+            raise
         return 0
 
 
-def _sample_keys(engine: Engine, table: str, pk: str | None) -> list[str]:
+def _sample_keys(engine: Engine, table: str, pk: str | None, *, strict: bool = False) -> list[str]:
     if not pk:
         return []
     try:
@@ -115,11 +123,13 @@ def _sample_keys(engine: Engine, table: str, pk: str | None) -> list[str]:
             f"MATCH (n:{table}) RETURN n.{pk} LIMIT {_SAMPLE_KEY_LIMIT}"
         )
     except GragError:
+        if strict:
+            raise
         return []
     return [str(row[0]) for row in res.rows]
 
 
-def _rel_connection(engine: Engine, table: str) -> tuple[str, str]:
+def _rel_connection(engine: Engine, table: str, *, strict: bool = False) -> tuple[str, str]:
     try:
         res = engine.execute(f"CALL SHOW_CONNECTION('{table}') RETURN *")
         row = res.as_dicts()[0]
@@ -128,16 +138,38 @@ def _rel_connection(engine: Engine, table: str) -> tuple[str, str]:
             str(row.get("destination table name") or ""),
         )
     except (GragError, IndexError):
+        if strict:
+            raise
         return "", ""
 
 
-def build_schema_document(engine: Engine, config: GragConfig) -> SchemaDocument:
-    try:
-        tables = _show_tables(engine)
-    except GragError:
-        tables = []
-    meta = _meta_rows(engine)
-    pks = pk_map(engine)
+def build_schema_document(
+    engine: Engine, config: GragConfig, *, detail: SchemaDetail = "full",
+    if_revision: str | None = None,
+) -> SchemaDocument:
+    """Cache one view per detail level until a writer statement invalidates it.
+
+    The revision fingerprints the returned view, excluding read freshness. Full
+    views include counts/samples; compact views only describe the usable schema.
+    An unchanged reply lets a caller reuse its own copy of that exact view.
+    """
+    if detail not in ("compact", "full"):
+        raise ValueError("detail must be 'compact' or 'full'")
+    with engine.serialized_writes():
+        doc = engine.schema_cache.get(detail) if not engine.in_write_transaction else None
+        if doc is None:
+            doc = _build_schema_document(engine, detail)
+            if not engine.in_write_transaction:
+                engine.schema_cache[detail] = doc
+        if if_revision == doc.schema_revision:
+            return SchemaDocument(detail=detail, schema_revision=doc.schema_revision, unchanged=True)
+        # Freshness and caller mutations must never contaminate the cached view.
+        return doc.model_copy(deep=True)
+
+
+def _build_schema_document(engine: Engine, detail: SchemaDetail) -> SchemaDocument:
+    tables = _show_tables(engine)
+    meta = _meta_rows(engine, strict=True) if any(t.get("name") == META_TABLE for t in tables) else {}
 
     node_docs: list[NodeTableDoc] = []
     rel_docs: list[RelTableDoc] = []
@@ -147,19 +179,19 @@ def build_schema_document(engine: Engine, config: GragConfig) -> SchemaDocument:
             continue
         kind = str(t.get("type", "")).upper()
         m = meta.get(name, {})
-        try:
-            props = _table_info(engine, name)
-        except GragError:
-            props = []
+        props = _table_info(engine, name)
+        pk = m.get("pk") or next((p.name for p in props if p.is_primary_key), None)
+        if detail == "compact":
+            props = [p for p in props if p.name not in VECTOR_PROPS]
         if kind == "REL":
-            from_label, to_label = _rel_connection(engine, name)
+            from_label, to_label = _rel_connection(engine, name, strict=True)
             rel_docs.append(
                 RelTableDoc(
                     name=name,
                     from_label=m.get("from_label") or from_label,
                     to_label=m.get("to_label") or to_label,
                     properties=props,
-                    row_count=_row_count(engine, name, kind),
+                    row_count=_row_count(engine, name, kind, strict=True) if detail == "full" else None,
                 )
             )
         else:
@@ -167,17 +199,35 @@ def build_schema_document(engine: Engine, config: GragConfig) -> SchemaDocument:
                 NodeTableDoc(
                     name=name,
                     properties=props,
-                    row_count=_row_count(engine, name, kind),
-                    sample_keys=_sample_keys(engine, name, pks.get(name)),
+                    row_count=_row_count(engine, name, kind, strict=True) if detail == "full" else None,
+                    sample_keys=_sample_keys(engine, name, pk, strict=True) if detail == "full" else [],
                     searchable=bool(m.get("searchable", False)),
                 )
             )
 
-    return SchemaDocument(
+    node_docs.sort(key=lambda t: t.name)
+    rel_docs.sort(key=lambda t: t.name)
+    doc = SchemaDocument(
         node_tables=node_docs,
         rel_tables=rel_docs,
         text=_render_text(node_docs, rel_docs),
+        detail=detail,
     )
+    encoded = json.dumps(
+        doc.model_dump(exclude={"freshness", "text", "schema_revision", "unchanged"}),
+        sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+    doc.schema_revision = hashlib.sha256(("grag-schema-v1:" + encoded).encode()).hexdigest()
+    return doc
+
+
+def schema_text(doc: SchemaDocument) -> str:
+    """Shared MCP and REST text presentation, including all control metadata."""
+    footer = json.dumps({
+        "schema_revision": doc.schema_revision, "detail": doc.detail,
+        "unchanged": doc.unchanged, "freshness": doc.freshness.model_dump(),
+    }, separators=(",", ":"))
+    return f"{doc.text}\n\n---\n{footer}" if doc.text else footer
 
 
 def _render_text(node_docs: list[NodeTableDoc], rel_docs: list[RelTableDoc]) -> str:
@@ -187,10 +237,10 @@ def _render_text(node_docs: list[NodeTableDoc], rel_docs: list[RelTableDoc]) -> 
             f"{p.name}:{p.type} PK" if p.is_primary_key else f"{p.name}:{p.type}"
             for p in t.properties
         )
-        flags = [f"{t.row_count} rows"]
+        flags = [f"{t.row_count} rows"] if t.row_count is not None else []
         if t.searchable:
             flags.append("searchable")
-        line = f"{t.name}({props}) [{', '.join(flags)}]"
+        line = f"{t.name}({props})" + (f" [{', '.join(flags)}]" if flags else "")
         if t.sample_keys:
             quoted = ",".join(f'"{k}"' for k in t.sample_keys)
             line += f" samples: {quoted}"
@@ -199,7 +249,7 @@ def _render_text(node_docs: list[NodeTableDoc], rel_docs: list[RelTableDoc]) -> 
         head = f"{r.from_label} -> {r.to_label}" if r.from_label or r.to_label else ""
         props = ", ".join(f"{p.name}:{p.type}" for p in r.properties)
         inner = ", ".join(part for part in (head, props) if part)
-        lines.append(f"{r.name}({inner}) [{r.row_count} rows]")
+        lines.append(f"{r.name}({inner})" + (f" [{r.row_count} rows]" if r.row_count is not None else ""))
     return "\n".join(lines)
 
 

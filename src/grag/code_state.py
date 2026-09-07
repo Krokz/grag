@@ -11,6 +11,7 @@ from pathlib import Path
 
 from grag.core.engine import Engine
 from grag.core.errors import GragError
+from grag.core.limits import bounded_sources, read_source
 from grag.core.types import CodeIngestRequest
 
 INDEX_COLUMNS = ("_index_options", "_index_generation", "_index_error")
@@ -140,6 +141,7 @@ def _head(root: Path) -> str:
     raise GragError(f"Cannot inspect git state for {root}: {error.strip()}")
 
 
+@bounded_sources
 def scan_sources(root: Path, req: CodeIngestRequest) -> SourceScan:
     from grag import __version__
     from grag.ingest.code import _PARSERS, _walk
@@ -164,7 +166,7 @@ def scan_sources(root: Path, req: CodeIngestRequest) -> SourceScan:
             continue
         file = walked_root.resolve() / walked_file.relative_to(walked_root)
         try:
-            files[str(file)] = hashlib.sha256(file.read_bytes()).hexdigest()
+            files[str(file)] = hashlib.sha256(read_source(file, req.max_file_kb * 1024)).hexdigest()
         except OSError as exc:
             errors.append(f"Cannot read {file}: {exc}")
     if errors:

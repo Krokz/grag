@@ -14,6 +14,7 @@ import unicodedata
 from collections import Counter
 
 from grag.core.engine import Engine
+from grag.core.limits import bounded_work, charge
 from grag.core.types import ScoredNode
 
 _WORDS = re.compile(r"[^\W_]+", re.UNICODE)
@@ -22,9 +23,13 @@ _B = 0.75
 
 
 def _tokens(text: str) -> list[str]:
-    return _WORDS.findall(unicodedata.normalize("NFKC", text).casefold())
+    charge("lexical_bytes", len(text.encode("utf-8")))
+    tokens = _WORDS.findall(unicodedata.normalize("NFKC", text).casefold())
+    charge("lexical_terms", len(tokens))
+    return tokens
 
 
+@bounded_work
 def rank_lexical(
     engine: Engine,
     candidates: list[ScoredNode],

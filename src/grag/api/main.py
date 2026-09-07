@@ -18,6 +18,7 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
@@ -32,8 +33,9 @@ from grag.core.errors import (
     NotFoundError,
     ReadOnlyViolation,
     ShutdownError,
+    validation_error_body,
 )
-from grag.core.serialize import with_freshness
+from grag.core.schema import schema_text
 from grag.core.types import (
     CodeIngestRequest,
     CodeIngestResponse,
@@ -49,6 +51,7 @@ from grag.core.types import (
     QueryRequest,
     QueryResponse,
     ReadPolicy,
+    SchemaDetail,
     SchemaDocument,
     SearchRequest,
     SearchResponse,
@@ -56,6 +59,7 @@ from grag.core.types import (
     UpsertNodesRequest,
 )
 from grag.registry import ServiceRegistry
+from grag.request_limits import RequestLimitMiddleware
 from grag.service import GragService
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -263,6 +267,7 @@ def create_app(config: GragConfig) -> FastAPI:
         allow_methods=["GET", "POST"],
         allow_headers=["content-type", "authorization", DB_HEADER],
     )
+    app.add_middleware(RequestLimitMiddleware)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts(config))
 
     def resolve(request: Request) -> GragService:
@@ -282,15 +287,15 @@ def create_app(config: GragConfig) -> FastAPI:
 
     @app.exception_handler(GragError)
     async def grag_error_handler(_: Request, exc: GragError) -> JSONResponse:
-        from grag.core.errors import ConflictError
+        from grag.core.errors import ConflictError, ResourceLimitError
+
+        if isinstance(exc, ResourceLimitError):
+            return JSONResponse(status_code=429 if exc.resource in {"pending_jobs", "active_operations"} else 413, content=exc.to_dict())
 
         if isinstance(exc, ConflictError):
-            return JSONResponse(status_code=409, content={**_error_body(exc.message, exc.hint), "code": exc.code})
+            return JSONResponse(status_code=409, content=exc.to_dict())
         if isinstance(exc, FreshnessError):
-            return JSONResponse(status_code=503, content={
-                **_error_body(exc.message, exc.hint),
-                "code": "freshness_unavailable", "freshness": exc.freshness,
-            })
+            return JSONResponse(status_code=503, content=exc.to_dict())
         if isinstance(exc, NotFoundError):
             status = 404
         elif isinstance(exc, ShutdownError):
@@ -300,8 +305,12 @@ def create_app(config: GragConfig) -> FastAPI:
         else:
             status = 400
         return JSONResponse(
-            status_code=status, content=_error_body(exc.message, exc.hint)
+            status_code=status, content=exc.to_dict()
         )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+        return JSONResponse(status_code=422, content=validation_error_body(exc.errors()))
 
     @app.exception_handler(Exception)
     async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -309,7 +318,7 @@ def create_app(config: GragConfig) -> FastAPI:
         # str(exc) leaks paths and driver internals).
         log.exception("Unhandled %s %s: %s", request.method, request.url.path, exc)
         return JSONResponse(
-            status_code=500, content=_error_body("Internal server error.", None)
+            status_code=500, content={**_error_body("Internal server error.", None), "code": "internal_error"}
         )
 
     # -- endpoints (contract: see grag.core.types docstring) --------------------
@@ -378,10 +387,11 @@ def create_app(config: GragConfig) -> FastAPI:
     @app.get("/api/schema")
     def describe_schema(
         request: Request, policy: ReadPolicyParam, format: str | None = Query(default=None),
+        detail: SchemaDetail = "full", if_revision: str | None = None,
     ):
-        doc = resolve(request).describe_schema(**policy.model_dump())
+        doc = resolve(request).describe_schema(**policy.model_dump(), detail=detail, if_revision=if_revision)
         if format == "text":
-            return PlainTextResponse(with_freshness(doc.text, doc.freshness))
+            return PlainTextResponse(schema_text(doc))
         return doc
 
     @app.post("/api/schema/define", response_model=SchemaDocument)

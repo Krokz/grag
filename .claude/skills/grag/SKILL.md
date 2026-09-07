@@ -18,6 +18,15 @@ structural/rationale questions from the graph instead of re-reading source files
 **Core loop:** search/traverse the graph to ground an answer, or build the graph by
 defining a schema and upserting nodes/edges. Every fact carries `_source` provenance.
 
+**Keep calls bounded:** upsert at most 1,000 total nodes and edges per call, with
+a separate operation ID for each batch. Requests are limited to 2 MiB; search
+and context accept at most 64 seeds/IDs and 64 labels. Budgets range from 256 to
+32,768 estimated tokens (UTF-8 bytes divided by four), not guaranteed model
+token counts. Narrow labels/IDs/projections or page text after `resource_limit`;
+poll existing jobs before retrying a full queue. Failed source scans are never
+fresh. History/receipt capacity errors roll back the upsert and preserve old
+evidence and retry IDs; do not delete internal history or receipts to bypass them.
+
 ## Always ground in grag first
 
 When a grag database is reachable (an MCP server is configured, `grag serve` is
@@ -188,7 +197,7 @@ For repeated failure, use the exact database path in the client MCP registration
 
 | tool | use |
 |---|---|
-| `describe_schema` | **Call first**, before writing any Cypher. Returns tables, properties, row counts, sample keys as prompt-shaped text. Prevents hallucinated labels. |
+| `describe_schema` | **Call first**, before writing any Cypher. Returns compact tables, property types and directed endpoints. Use `detail="full"` for counts, samples and vector columns. Pass the last `schema_revision` as `if_revision` to reuse your cached view when `unchanged=true`. |
 | `define_schema` | Create node/rel tables. Design the graph for the domain — but reuse first: near-duplicate names (case/plural/punctuation of an existing table) are refused with the existing name in the hint; `allow_similar=true` only for a genuinely different concept. |
 | `upsert_nodes` / `upsert_edges` | Atomic MERGE batches; `upsert_nodes` can include `edges`. Optional retry IDs and revision guards; provenance is automatic. |
 | `cypher_query` | Read-only Cypher. Write keywords (CREATE/MERGE/SET/DELETE/...) are rejected — use the upsert tools for writes. |
@@ -217,17 +226,69 @@ Before a competing edit, use `cypher_query` to return the whole node (`RETURN n`
 or relationship (`RETURN a,r,b`), then pass its `_revision` as `expected_revision`
 on the upsert item. Use `expected_revision="absent"` for create-only writes.
 All guards check the state before the batch writes; any conflict rejects it all.
-REST returns 409 and a conflict code; MCP includes `CODE: revision_conflict` or
-`CODE: operation_id_conflict`. Read current evidence and reconcile before retrying.
+REST returns 409 and a conflict code; MCP sets `isError=true` with
+`code: revision_conflict` or `code: operation_id_conflict` in structured content
+and its JSON text footer. Read current evidence and reconcile before retrying.
 Guarded/retryable writes include a `revisions` map; replayed revisions describe
 the original commit. These are content/provenance tokens, not history counters;
-identical content can produce the same token again. `_revision` is computed in
-whole-entity query results, not a stored Cypher column. Search output stays compact.
+identical content on an untracked node can produce the same token again.
+History-tracked nodes also include their increasing sequence. `_revision` is computed in
+whole-entity query results, not a stored Cypher column. Whole entities omit derived
+vector properties while keeping identities, provenance, edges and revision guards.
+To inspect vectors explicitly, project the property (`RETURN n.embedding`).
+
+**Evidence lifecycle and correction history.** Search and context default to
+`evidence="current"`. They exclude explicitly superseded/retracted/expired,
+disputed, and retained obsolete document nodes before ranking and expansion.
+Use `evidence="all"` to inspect or page them; Cypher remains unfiltered.
+Legacy `status` values superseded/retracted/expired are recognized. Task
+open/done and other statuses are unchanged. Unreviewed/legacy evidence remains
+eligible, not certified true. `evidence_policy` names the selection policy;
+`excluded_evidence` counts only encountered post-shortlist/path exclusions,
+not all rows filtered within the database. No automatic contradiction detection.
+
+For an authored memory that should retain corrections, add `evidence: {}` to
+its upsert item. Existing-node evidence changes require the last-read
+`expected_revision`. Adoption preserves an existing value as baseline revision
+0 with unknown earlier authorship. Subsequent upserts retain snapshots, original
+sources and increasing `_evidence_seq` values atomically with the edit and retry
+receipt, even when later calls omit `evidence`.
+
+The optional evidence patch supports:
+
+- `state`: current, superseded, retracted.
+- `review`: unreviewed (default), accepted, disputed. Disputed is excluded by
+  current retrieval; accepted is a caller judgment, not an independent check.
+- `actor` and `reason`: who supplied this edit/review and why. Actor is a
+  caller-supplied attribution. If omitted, this edit's updater stays unknown.
+- `expires_at`: explicit timestamp with timezone; null clears it. No inferred
+  TTL or automatic deletion.
+- `superseded_by`: replacement canonical id; requires state=superseded. Missing
+  targets and cycles fail the whole batch. Null clears the pointer. Save both
+  old/replacement patches and any authored links in one guarded upsert.
+
+Omitted fields preserve metadata. To restore a superseded node, set current and
+clear its pointer explicitly. Identical writes add no history; supplying an
+actor or reason records a review action. Use existing relationship upserts to
+link conflicting claims and explain the dispute; grag does not decide a winner.
+
+`get_context(node_ids=[...], history=true)` lists up to 20 recorded revisions
+within the budget, newest first. Read `history.entries` and continue with
+`history_before=history.next_before` until null. `revision=<sequence>` retrieves
+one recorded snapshot and can use `text_property` paging. Both modes require
+exactly one id and skip expansion; historical relationship topology is not
+recorded. History starts at adoption, not at project creation. Raw writes,
+relocation and import do not create authored review events. JSONL export/import
+currently omits history; preserve the original database for historical evidence.
 
 Re-ingesting documents replaces their generated links atomically. Relationships
 you create or update with `upsert_edges` remain authored and are preserved.
 Check ingestion `warnings`: obsolete sections/chunks with remaining authored or
-unknown links are retained and may describe an earlier revision. Legacy links
+unknown links are retained with `_document_state="obsolete"` and excluded from
+current retrieval; all-mode retains that qualifier. Reintroduced nodes become
+current atomically. On first use of the new loader, other pre-existing rows in
+its document tables are marked unverified until reconciled, not silently certified.
+This does not verify a source file that has changed since ingestion. Legacy links
 without ownership metadata are preserved for explicit review; do not assume
 re-ingestion removed them. New ingests track ownership automatically.
 
@@ -236,7 +297,20 @@ re-ingestion removed them. New ingests track ownership automatically.
 `search_knowledge` and `get_context` both return a JSON footer after `---` in MCP.
 Check `truncated`, `omitted_nodes`, `omitted_edges`, `omitted_properties`, and
 `expansion_limited` before treating the context as complete. Packing retains
-whole values; a missing property may simply have exceeded the budget. The
+whole property values; a missing property may simply have exceeded the budget.
+Search can separately return an explicitly marked excerpt of oversized prose,
+chosen by lexical sentence matches. It keeps nearby sentences when they fit,
+with a single-sentence fallback; it may miss semantic-only matches. Excerpts
+remain partial evidence (`truncated=true`), and the full property stays omitted.
+The `text_excerpts` footer gives `node_id`, `property`, character `offset`/`end`,
+`total_chars`, and `sha256`. Use the existing pager below with that property,
+`text_offset=offset` (or `end` for what follows) and `text_sha256=sha256`. Read from
+0 if you need the entire value; restart if the text changed. Never treat an
+excerpt as the full policy, procedure or explanation.
+
+Packing prioritizes source/line citations and status, nearby and connecting
+evidence, and useful text before repeated IDs and bookkeeping fields. It does
+not decide task priority. Lifecycle filtering follows the policy above. The
 structured graph and seeds contain only packed records/properties. Expand the
 budget, reduce hops, or retrieve a specific value before drawing a conclusion
 that depends on missing evidence. Search still covers only its requested seeds,
@@ -342,8 +416,10 @@ states verbatim, `ingest_code` the repo and `cypher_query` it instead.
   mutation layer rejects caller writes to them.
 - **Node ids are `Label:key`** (e.g. `Module:core.engine`). Use `split_node_id` /
   `make_node_id` conventions when correlating ids with primary keys.
-- **Errors are self-describing:** tool output is `ERROR: ... HINT: ...`. Read the hint
-  and retry — it's written for you.
+- **Errors are self-describing:** MCP sets `isError=true`, with readable
+  `ERROR: ... HINT: ...` text and a JSON footer containing a stable `code`. The
+  same envelope is in `structuredContent`; REST uses the same codes. Validation
+  errors identify nested fields. Read the hint and correct the request before retrying.
 
 ## Operational gotchas
 
@@ -368,8 +444,15 @@ states verbatim, `ingest_code` the repo and `cypher_query` it instead.
   LOADs FTS + VECTOR once (tolerant when offline), so no path needs per-call handling.
   Extensions are scoped to the Database, so the write conn's LOAD covers pooled readers.
 - **Buffer pool:** creating FTS indexes needs headroom; tests use a 128MB pool.
-- **Vectors:** default codec `fp32` (native HNSW); `int8`/`binary`/`polar` are opt-in via
-  `GRAG_VECTOR_CODEC`. Without an embedder, everything works FTS-only.
+- **Vectors:** default codec `fp32` uses exact cosine scanning; `int8`/`binary`/`polar`
+  are opt-in via `GRAG_VECTOR_CODEC`. Without an embedder, retrieval is FTS-only.
+  Native HNSW is disabled because ordinary embedding invalidation can crash
+  LadybugDB 0.20.2. Writable startup removes old grag-owned HNSW indexes, checkpoints
+  and reopens before serving, preserving graph data and stored vectors, even with
+  embeddings disabled. Read-only inspection leaves indexes intact. Externally
+  managed HNSW indexes require their owner to remove them before grag accepts
+  writes. Exact search scans the stored vectors and can cost more on large graphs.
+  This does not repair an unreadable WAL; use the recovery workflow above.
 - **Search is diversity-capped per label** (`GRAG_SEARCH_LABEL_CAP`, default 2). A big
   code table can't flood out knowledge tables on a general "why/what" question — a
   `Decision`/`Concept` still surfaces even when hundreds of `Function` nodes match the

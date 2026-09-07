@@ -10,6 +10,13 @@ from grag.config import GragConfig
 from grag.core.engine import Engine
 from grag.core.errors import ConflictError, NotFoundError, SchemaError
 from grag.core.ident import validate_identifier
+from grag.core.limits import (
+    MAX_RECEIPT_BYTES,
+    MAX_RECEIPTS,
+    MAX_RESPONSE_BYTES,
+    check_size,
+    json_bytes,
+)
 from grag.core.mutate import (
     _coerce_value,
     _node_pks,
@@ -213,13 +220,18 @@ def apply_mutation(
         digest = None
         if req.operation_id:
             try:
+                payload = req.model_dump(mode="json", exclude={"operation_id"})
+                if isinstance(req, UpsertNodesRequest):
+                    for node, item in zip(req.nodes, payload["nodes"], strict=True):
+                        if node.evidence is None:
+                            item.pop("evidence")  # preserve pre-M19 receipt digests
+                        else:
+                            item["evidence"] = node.evidence.model_dump(mode="json", exclude_unset=True)
                 encoded = canonical_json(
                     {
                         "contract": "grag-upsert-v1",
                         "kind": type(req).__name__,
-                        "request": req.model_dump(
-                            mode="json", exclude={"operation_id"}
-                        ),
+                        "request": payload,
                     }
                 )
             except (ValueError, TypeError) as exc:
@@ -235,6 +247,18 @@ def apply_mutation(
         # to an ingest, Python validation errors must poison that transaction.
         with engine.atomic_writes():
             nodes, edges, targets, warnings = _prepare(engine, req)
+            from grag.core.evidence import after_update, before_update, finish_update
+
+            pks = {k: v for k, v in _node_pks(engine).items() if v is not None} if nodes else {}
+            tracked_tables = {label for label in {node.label for node in nodes}
+                              if "_evidence_seq" in _table_columns(engine, label)}
+            prepared = [before_update(engine, node, pks[node.label])
+                        if node.evidence is not None or node.label in tracked_tables else None
+                        for node in nodes]
+            if any(item is not None for item in prepared):
+                identities = [(node.label, str(node.key)) for node in nodes]
+                if len(set(identities)) != len(identities):
+                    raise SchemaError("History-tracked batches require one patch per node identity")
             if req.operation_id and OPERATIONS_TABLE not in _table_index(engine):
                 engine.execute_write(
                     f"CREATE NODE TABLE {OPERATIONS_TABLE}(id STRING PRIMARY KEY, digest STRING, result STRING)"
@@ -244,6 +268,11 @@ def apply_mutation(
                 if nodes
                 else MutationSummary()
             )
+            for node, prior in zip(nodes, prepared, strict=True):
+                after_update(engine, node, pks[node.label], prior)
+            chain_steps: list[str] = []
+            for node, prior in zip(nodes, prepared, strict=True):
+                finish_update(engine, node, pks[node.label], prior, chain_steps=chain_steps)
             edge_summary = (
                 _upsert_edges(engine, config, UpsertEdgesRequest(edges=edges))
                 if edges
@@ -259,7 +288,12 @@ def apply_mutation(
                 target.expected is not None for target in targets
             ):
                 summary.revisions = {t.identity: t.revision(engine) for t in targets}
+            receipt_bytes = json_bytes(summary, MAX_RESPONSE_BYTES, "mutation_response_bytes")
             if req.operation_id:
+                count, chars = engine.execute(f"MATCH (o:{OPERATIONS_TABLE}) RETURN count(o), coalesce(sum(size(o.result) + size(o.id) + size(o.digest)), 0)").rows[0]
+                hint = "Retry existing operation IDs normally. Receipt capacity is full for new IDs; preserve this database and continue in a new graph. Receipts are never silently expired."
+                check_size("operation_receipts", count + 1, MAX_RECEIPTS, hint=hint)
+                check_size("operation_receipt_bytes", chars * 4 + receipt_bytes + len(req.operation_id.encode()) + 64, MAX_RECEIPT_BYTES, hint=hint)
                 engine.execute_write(
                     f"CREATE (o:{OPERATIONS_TABLE} {{id: $id, digest: $digest, result: $result}})",
                     {
