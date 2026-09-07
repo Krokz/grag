@@ -63,9 +63,7 @@ def check_install(config: GragConfig, *, prepare: bool = False, timeout: float |
         if prepare:
             print(f"Checking/preparing {label} ...", file=sys.stderr, flush=True)
         try:
-            # Download the language-pack bundle once as a batch; grammar
-            # probes then prove offline loading even during --prepare.
-            result = _probe(kind, config, prepare=prepare and not kind.startswith("grammar:"), timeout=timeout)
+            result = _probe(kind, config, prepare=prepare, timeout=timeout)
         except OSError as exc:
             result = {"status": "unavailable", "detail": f"Cannot create isolated probe workspace: {exc}. Check temporary-directory permissions."}
         checks.append({"key": kind, "label": label, "required": required, **result})
@@ -90,8 +88,6 @@ def check_install(config: GragConfig, *, prepare: bool = False, timeout: float |
     if _installed("tree_sitter") and checks[0]["status"] == "ready":
         from grag.ingest.code_ts import _SUFFIX_LANGUAGES
 
-        if prepare and _installed("tree_sitter_language_pack"):
-            add("grammar_assets", "language-pack preparation", required=False)
         # Every distinct grammar supported by grag, not every grammar in the pack.
         unique = {spec: suffix for suffix, spec in _SUFFIX_LANGUAGES.items()}
         for (_, _, language), suffix in sorted(unique.items()):
@@ -179,16 +175,6 @@ def _model_check(settings: dict[str, Any], prepare: bool) -> str:
     return f"model loaded and real inference passed ({config.dim} dimensions); cache: {os.environ.get('FASTEMBED_CACHE_PATH', 'FastEmbed default temp cache')}"
 
 
-def _prepare_grammars() -> str:
-    import tree_sitter_language_pack as pack
-
-    from grag.ingest.code_ts import _PACK_SUFFIXES
-
-    languages = sorted(set(_PACK_SUFFIXES.values()))
-    pack.download(languages)
-    return f"prepared {len(languages)} supported grammars; offline load/parse checks follow"
-
-
 def _worker(payload: dict) -> dict:
     kind, prepare = payload["kind"], payload["prepare"]
     try:
@@ -196,8 +182,6 @@ def _worker(payload: dict) -> dict:
             detail = _native_check(kind, prepare)
         elif kind == "model":
             detail = _model_check(payload["embedder"], prepare)
-        elif kind == "grammar_assets" and prepare:
-            detail = _prepare_grammars()
         elif kind.startswith("grammar:"):
             detail = _grammar_check(kind.split(":", 1)[1], prepare)
         else:

@@ -122,21 +122,18 @@ def test_offline_grammar_uses_load_only_registry(monkeypatch):
     assert os.environ["TREE_SITTER_LANGUAGE_PACK_LIBS_DIR"] == "before"
 
 
-def test_preparation_downloads_one_grammar_batch_then_probes_offline(monkeypatch):
-    batches = []
-    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", SimpleNamespace(download=batches.append))
-    result = readiness._worker({"kind": "grammar_assets", "prepare": True})
-    assert result["status"] == "ready"
-    assert batches == [["bash", "c", "cpp", "java", "kotlin", "lua", "php", "ruby", "rust", "scala", "sql", "swift"]]
+def test_preparation_requires_the_real_parser_path_not_a_download_counter(monkeypatch):
     calls = []
-    def probe(kind, config, **kwargs):
-        calls.append((kind, kwargs["prepare"]))
-        return {"status": "ready", "detail": "fixture"}
-    monkeypatch.setattr(readiness, "_probe", probe)
-    monkeypatch.setattr(readiness, "_installed", lambda name: True)
-    readiness.check_install(GragConfig(), prepare=True)
-    assert calls.count(("grammar_assets", True)) == 1
-    assert all(not prepare for kind, prepare in calls if kind.startswith("grammar:"))
+    def parser(name):
+        calls.append(name)
+        raise RuntimeError("grammar download did not produce a usable parser")
+    fake = SimpleNamespace(download=lambda names: len(names), get_parser=parser,
+                           downloaded_languages=lambda: [], cache_dir=lambda: "/fixture-cache")
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", fake)
+    result = readiness._worker({"kind": "grammar:.rs", "prepare": True})
+    assert calls == ["rust"]
+    assert result["status"] == "unavailable"
+    assert "did not produce a usable parser" in result["detail"]
 
 
 @pytest.mark.parametrize("offline", [False, True])

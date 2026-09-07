@@ -109,8 +109,8 @@ def main() -> None:
                 result = subprocess.run([*command, "doctor", "--prepare", "--json"], cwd=root, env=env, capture_output=True, timeout=900)
                 report = json.loads(result.stdout)
                 failed = [c for c in report["checks"] if c["status"] == "unavailable"]
-                transient = any(c["key"] == "grammar_assets" and re.search(r"http status: (429|500|502|503|504)\b", c["detail"]) for c in failed)
-                if report["ready"] or not transient or any(not c["key"].startswith("grammar") for c in failed):
+                transient = failed and all(c["key"].startswith("grammar:") and re.search(r"http status: (429|500|502|503|504)\b", c["detail"]) for c in failed)
+                if report["ready"] or not transient:
                     break
                 if attempt < 2:
                     print(f"Grammar host returned a transient HTTP error; preparation retry {attempt + 1}/2", flush=True)
