@@ -70,7 +70,7 @@ def test_node_line_format():
     )
     assert packed.included_node_ids == ["Doc:doc-0"]
     assert packed.truncated is False
-    assert packed.token_estimate == len(packed.text) // 4
+    assert packed.token_estimate == (len(packed.text.encode("utf-8")) + 3) // 4
 
 
 def test_source_suffix_omitted_when_absent():
@@ -121,12 +121,12 @@ def test_vector_props_skipped():
     assert "emb" not in packed.text
 
 
-def test_long_strings_truncated():
+def test_long_strings_are_complete_when_budget_allows():
     sub = Subgraph(nodes=[_node("Doc:a", text="x" * 500)])
     packed = pack_context(sub, token_budget=100_000)
     line = packed.text
-    assert "x" * 197 + "..." in line
-    assert "x" * 200 not in line
+    assert "x" * 500 in line
+    assert not packed.truncated
 
 
 def test_datetime_rendered_isoformat():
@@ -183,7 +183,7 @@ def test_budget_stops_packing():
     packed = pack_context(Subgraph(nodes=nodes), token_budget=200)
     assert packed.truncated is True
     assert packed.token_estimate <= 200
-    assert len(packed.included_node_ids) < 20
+    assert packed.omitted_nodes or packed.omitted_properties
     assert packed.included_node_ids  # something still fits
 
 
@@ -215,12 +215,12 @@ def test_zero_budget_empty_subgraph_not_truncated():
     assert packed.truncated is False
 
 
-def test_edge_truncation_after_all_nodes_fit():
+def test_topology_reserved_before_properties():
     line_node = 'Doc:a {title: "a"}'
     line_edge = "Doc:a -[R]-> Doc:b"
     # budget fits both node lines but not the edge line
     two_nodes = f"{line_node}\n{line_node.replace('a', 'b')}"
-    budget = estimate_tokens(two_nodes) + estimate_tokens(line_edge) - 1
+    budget = estimate_tokens(two_nodes + "\n" + line_edge) - 1
     sub = Subgraph(
         nodes=[_node("Doc:a", title="a"), _node("Doc:b", title="b")],
         edges=[
@@ -229,8 +229,10 @@ def test_edge_truncation_after_all_nodes_fit():
     )
     packed = pack_context(sub, token_budget=budget)
     assert packed.included_node_ids == ["Doc:a", "Doc:b"]
-    assert "-[R]" not in packed.text
+    assert "-[R]" in packed.text
     assert packed.truncated is True
+    assert packed.omitted_properties > 0
+    assert packed.token_estimate <= budget
 
 
 # -- engine roundtrip -----------------------------------------------------------------

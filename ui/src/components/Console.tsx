@@ -135,6 +135,13 @@ export function Console({
               </div>
             )}
 
+            {!error && result && (
+              <div className="hint-text" role="status">
+                Code index at this read: {result.freshness.status}.
+                {result.freshness.timed_out && ' The verification wait expired; this result may be stale.'}
+              </div>
+            )}
+
             {!error && result && view === 'graph' && (
               <div className="placeholder">
                 {result.subgraph.nodes.length > 0 ? (

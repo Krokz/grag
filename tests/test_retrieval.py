@@ -248,12 +248,16 @@ def test_get_context_invalid_node_id_raises(docs_engine):
 
 def test_get_context_budget_truncation(docs_engine):
     cfg = docs_engine.config
+    docs_engine.execute_write(
+        "MATCH (d:Doc {id: 'doc-0'}) SET d.text = $text", {"text": "long memory " * 100}
+    )
     ids = ["Doc:doc-0", "Doc:doc-1", "Doc:doc-2"]
     tight = get_context(
-        docs_engine, cfg, ContextRequest(node_ids=ids, hops=0, token_budget=30)
+        docs_engine, cfg, ContextRequest(node_ids=ids, hops=0, token_budget=256)
     )
     assert tight.truncated
-    assert len(tight.included_node_ids) < 3
+    assert tight.omitted_nodes or tight.omitted_properties
+    assert tight.response_token_estimate <= 256
     room = get_context(
         docs_engine, cfg, ContextRequest(node_ids=ids, hops=0, token_budget=100_000)
     )

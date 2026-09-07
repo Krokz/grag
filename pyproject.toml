@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gragdb"
-version = "0.6.0"
+version = "0.7.0"
 description = "Local-first, LLM-first graph knowledgebase: embedded Cypher engine, MCP tool contract, token-frugal GraphRAG retrieval"
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
@@ -25,11 +25,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-embed-local = ["fastembed>=0.4"]
+embed-local = ["fastembed>=0.4", "onnxruntime>=1.29"]  # 1.28.x segfaults multithreaded on macOS arm64
 embed-remote = ["httpx>=0.27"]
 # Tree-sitter grammars for the generic code parser (ts/js/cs/tf).
 # Python parses via stdlib ast and never imports these.
-code = ["tree-sitter>=0.23", "tree-sitter-python", "tree-sitter-typescript", "tree-sitter-javascript", "tree-sitter-c-sharp", "tree-sitter-hcl", "tree-sitter-go"]
+# tree-sitter-language-pack adds bash/java/kotlin/rust/c/cpp/ruby/php/swift/lua/scala/sql.
+code = ["tree-sitter>=0.23", "tree-sitter-python", "tree-sitter-typescript", "tree-sitter-javascript", "tree-sitter-c-sharp", "tree-sitter-hcl", "tree-sitter-go", "tree-sitter-language-pack>=1.16"]
 dev = ["pytest>=8.0", "httpx>=0.27", "pyyaml>=6.0", "ruff>=0.16", "mypy>=2.3"]
 
 [project.scripts]
@@ -55,6 +56,8 @@ packages = ["src/grag"]
 # optional prefix (tolerated when absent); the wheel's force-include above is
 # what *requires* it for distribution builds.
 ignore-vcs = true
+# Keep local UI dependencies out while still including the built web bundle.
+exclude = ["/ui/node_modules"]
 include = [
     "src/grag",
     "src/grag/api/static",

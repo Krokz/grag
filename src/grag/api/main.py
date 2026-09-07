@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
@@ -25,16 +27,20 @@ import grag
 from grag.config import GragConfig, database_identity
 from grag.core.errors import (
     ConfigurationError,
+    FreshnessError,
     GragError,
     NotFoundError,
     ReadOnlyViolation,
+    ShutdownError,
 )
+from grag.core.serialize import with_freshness
 from grag.core.types import (
     CodeIngestRequest,
     CodeIngestResponse,
     ContextRequest,
     ContextResponse,
     DefineSchemaRequest,
+    FreshnessMode,
     GraphSample,
     IngestRequest,
     IngestResponse,
@@ -42,6 +48,7 @@ from grag.core.types import (
     MutationSummary,
     QueryRequest,
     QueryResponse,
+    ReadPolicy,
     SchemaDocument,
     SearchRequest,
     SearchResponse,
@@ -149,6 +156,16 @@ def _error_body(message: str, hint: str | None) -> dict:
     return {"error": message, "hint": hint}
 
 
+def _read_policy(
+    freshness: Annotated[FreshnessMode, Query()] = "allow_stale",
+    freshness_timeout_ms: Annotated[int, Query(ge=0, le=60_000)] = 5000,
+) -> ReadPolicy:
+    return ReadPolicy(freshness=freshness, freshness_timeout_ms=freshness_timeout_ms)
+
+
+ReadPolicyParam = Annotated[ReadPolicy, Depends(_read_policy)]
+
+
 def create_app(config: GragConfig) -> FastAPI:
     # Validate before opening a database or constructing the optional MCP app.
     # This single gate protects REST, the bundled UI, and a mounted MCP endpoint.
@@ -185,7 +202,7 @@ def create_app(config: GragConfig) -> FastAPI:
         finally:
             # Close/checkpoint every Engine even when startup or request
             # teardown propagates an exception through the lifespan context.
-            registry.close()
+            app.state.shutdown_results = registry.close()
 
     app = FastAPI(title="grag", version=grag.__version__, lifespan=lifespan)
     app.state.registry = registry
@@ -261,8 +278,19 @@ def create_app(config: GragConfig) -> FastAPI:
 
     @app.exception_handler(GragError)
     async def grag_error_handler(_: Request, exc: GragError) -> JSONResponse:
+        from grag.core.errors import ConflictError
+
+        if isinstance(exc, ConflictError):
+            return JSONResponse(status_code=409, content={**_error_body(exc.message, exc.hint), "code": exc.code})
+        if isinstance(exc, FreshnessError):
+            return JSONResponse(status_code=503, content={
+                **_error_body(exc.message, exc.hint),
+                "code": "freshness_unavailable", "freshness": exc.freshness,
+            })
         if isinstance(exc, NotFoundError):
             status = 404
+        elif isinstance(exc, ShutdownError):
+            status = 503
         elif isinstance(exc, ReadOnlyViolation):
             status = 403
         else:
@@ -282,6 +310,13 @@ def create_app(config: GragConfig) -> FastAPI:
 
     # -- endpoints (contract: see grag.core.types docstring) --------------------
 
+    @app.get("/api/index/status")
+    def index_status(request: Request, policy: ReadPolicyParam) -> dict:
+        service = resolve(request)
+        report = service.read_freshness(policy)
+        detail = service.refresh_status(detail=True) or {"roots": [], "running": False}
+        return {**detail, "freshness": report.model_dump()}
+
     @app.get("/api/health")
     def health() -> dict:
         service = app.state.service
@@ -289,8 +324,9 @@ def create_app(config: GragConfig) -> FastAPI:
             database_identity(service.config.db_path) if service is not None else None
         )
         server_target = config.db_dir if config.db_dir is not None else config.db_path
+        shutdown = service.shutdown_status() if service is not None else None
         return {
-            "status": "ok",
+            "status": "shutting_down" if registry.closing or (shutdown and shutdown["state"] != "open") else "ok",
             "version": grag.__version__,
             "database_id": identity,
             "server_id": database_identity(server_target),
@@ -300,6 +336,9 @@ def create_app(config: GragConfig) -> FastAPI:
             # None when no embedder is configured; otherwise the background
             # worker's counters (running / idle / embedded_total / last_error).
             "embedding": service.embedding_status() if service is not None else None,
+            # None when auto-refresh is off; otherwise drift-refresh counters.
+            "code_index": service.refresh_status() if service is not None else None,
+            "shutdown": shutdown,
         }
 
     @app.post(_SHUTDOWN_PATH, include_in_schema=False, status_code=202)
@@ -333,10 +372,12 @@ def create_app(config: GragConfig) -> FastAPI:
         return {"dbs": app.state.registry.list_dbs(), "default": default}
 
     @app.get("/api/schema")
-    def describe_schema(request: Request, format: str | None = Query(default=None)):
-        doc = resolve(request).describe_schema()
+    def describe_schema(
+        request: Request, policy: ReadPolicyParam, format: str | None = Query(default=None),
+    ):
+        doc = resolve(request).describe_schema(**policy.model_dump())
         if format == "text":
-            return PlainTextResponse(doc.text)
+            return PlainTextResponse(with_freshness(doc.text, doc.freshness))
         return doc
 
     @app.post("/api/schema/define", response_model=SchemaDocument)
@@ -390,7 +431,7 @@ def create_app(config: GragConfig) -> FastAPI:
         return resolve(request).get_job(job_id)
 
     @app.get("/api/export")
-    def export_jsonl(request: Request) -> StreamingResponse:
+    def export_jsonl(request: Request, policy: ReadPolicyParam) -> StreamingResponse:
         """Online backup: stream the portable JSONL export of the live database.
 
         The CLI's `grag export` needs exclusive access to the .lbdb (single
@@ -400,30 +441,44 @@ def create_app(config: GragConfig) -> FastAPI:
         """
         from grag.transfer import export_lines
 
-        engine = resolve(request).engine
+        service = resolve(request)
+        report = service.read_freshness(policy)
+        engine = service.engine
 
         def body():
-            for line in export_lines(engine):
+            lines = export_lines(engine)
+            while True:
+                # StreamingResponse may advance the iterator on different pool
+                # threads. Keep each native read alive without a thread-local
+                # operation context spanning a yield or a slow network consumer.
+                with service.operation():
+                    line = next(lines, None)
+                if line is None:
+                    break
                 yield line + "\n"
 
         name = resolve(request).config.db_path.stem or "grag"
         return StreamingResponse(
             body(),
             media_type="application/x-ndjson",
-            headers={"Content-Disposition": f'attachment; filename="{name}.jsonl"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{name}.jsonl"',
+                "X-Grag-Freshness": json.dumps(report.model_dump(), separators=(",", ":")),
+            },
         )
 
     @app.get("/api/graph/sample", response_model=GraphSample)
     def graph_sample(
         request: Request,
+        policy: ReadPolicyParam,
         limit: int = Query(default=200),
         label: str | None = Query(default=None),
     ) -> GraphSample:
-        return resolve(request).graph_sample(limit=limit, label=label)
+        return resolve(request).graph_sample(limit=limit, label=label, **policy.model_dump())
 
     @app.get("/api/graph/full", response_model=GraphSample)
-    def graph_full(request: Request) -> GraphSample:
-        return resolve(request).graph_full()
+    def graph_full(request: Request, policy: ReadPolicyParam) -> GraphSample:
+        return resolve(request).graph_full(**policy.model_dump())
 
     # -- UI statics --------------------------------------------------------------
 

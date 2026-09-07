@@ -6,7 +6,9 @@ command. Chunk nodes carry the raw `text` plus a JSON-encoded `meta` property
 and `_source` provenance. Node keys are deterministic
 (`<source-slug>-<source-hash>#NNNN`), so same-basename sources cannot overwrite
 each other. Re-ingestion is an authoritative sync for each named source:
-current chunks are MERGEd and stale chunks from that source are pruned.
+current chunks are MERGEd and unreferenced stale chunks are pruned atomically.
+Authored/unknown relationships and their obsolete endpoints are preserved, with
+warnings directing the caller to review that earlier document content.
 """
 
 from __future__ import annotations
@@ -61,6 +63,15 @@ def ingest_documents(
         from grag.ingest.markdown import ingest_markdown
 
         return ingest_markdown(engine, config, req)
+    with engine.serialized_writes():
+        response = _ingest_chunks(engine, config, req)
+    _embed_pending(engine, config, req.label)
+    return response
+
+
+def _ingest_chunks(
+    engine: Engine, config: GragConfig, req: IngestRequest
+) -> IngestResponse:
     define_schema(
         engine,
         config,
@@ -110,17 +121,22 @@ def ingest_documents(
                 desired_by_source[doc.source].add(key)
             desired_by_identity[base_identity].add(key)
 
-    if nodes:
-        upsert_nodes(engine, config, UpsertNodesRequest(nodes=nodes))
-    nodes_pruned = _prune_stale_chunks(
-        engine,
-        req.label,
-        desired_by_source=desired_by_source,
-        desired_by_identity=desired_by_identity,
-    )
-    _embed_pending(engine, config, req.label)
+    warnings: list[str] = []
+    with engine.write_transaction():
+        if nodes:
+            upsert_nodes(engine, config, UpsertNodesRequest(nodes=nodes))
+        nodes_pruned = _prune_stale_chunks(
+            engine,
+            req.label,
+            desired_by_source=desired_by_source,
+            desired_by_identity=desired_by_identity,
+            warnings=warnings,
+        )
     return IngestResponse(
-        label=req.label, nodes_created=len(nodes), nodes_pruned=nodes_pruned
+        label=req.label,
+        nodes_created=len(nodes),
+        nodes_pruned=nodes_pruned,
+        warnings=list(dict.fromkeys(warnings)),
     )
 
 
@@ -130,20 +146,24 @@ def _prune_stale_chunks(
     *,
     desired_by_source: dict[str, set[str]],
     desired_by_identity: dict[str, set[str]],
+    warnings: list[str],
 ) -> int:
+    from grag.ingest.document_sync import prune_unreferenced_nodes
+
     if not desired_by_source and not desired_by_identity:
         return 0
     pruned = 0
     # Identity pruning handles equivalent relative/absolute spellings of the
     # same path and removes surplus duplicate-document occurrences.
     for identity, desired in desired_by_identity.items():
-        result = engine.execute_write(
-            f"MATCH (n:{label}) WHERE n.id STARTS WITH $identity "
-            f"AND NOT n.id IN $keys DETACH DELETE n RETURN count(n)",
+        pruned += prune_unreferenced_nodes(
+            engine,
+            label,
+            "n.id STARTS WITH $identity AND NOT n.id IN $keys",
             {"identity": identity, "keys": sorted(desired)},
+            warnings,
+            remove_owned_edges=True,
         )
-        if result.rows:
-            pruned += int(result.rows[0][0])
     # Provenance pruning also migrates legacy basename-only chunk ids.
     columns = {
         str(row[1])
@@ -152,13 +172,14 @@ def _prune_stale_chunks(
     if "_source" not in columns:
         return pruned
     for source, desired in desired_by_source.items():
-        result = engine.execute_write(
-            f"MATCH (n:{label}) WHERE n._source = $source "
-            f"AND NOT n.id IN $keys DETACH DELETE n RETURN count(n)",
+        pruned += prune_unreferenced_nodes(
+            engine,
+            label,
+            "n._source = $source AND NOT n.id IN $keys",
             {"source": source, "keys": sorted(desired)},
+            warnings,
+            remove_owned_edges=True,
         )
-        if result.rows:
-            pruned += int(result.rows[0][0])
     return pruned
 
 
@@ -258,6 +279,7 @@ def ingest_paths(
             f"node(s) pruned from label '{resp.label}' in {config.db_path}."
         )
     ]
+    warnings.extend(resp.warnings)
     if warnings:
         lines.append("Warnings:")
         lines.extend(f"  - {w}" for w in warnings)

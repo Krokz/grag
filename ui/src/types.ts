@@ -1,5 +1,12 @@
 // Mirrors grag.core.types — keep in sync with the frozen backend contracts.
 
+export type FreshnessMode = 'allow_stale' | 'wait' | 'require';
+export interface FreshnessReport {
+  status: 'fresh' | 'checking' | 'refreshing' | 'stale' | 'error' | 'unknown' | 'disabled';
+  checked_at: string | null;
+  timed_out: boolean;
+}
+
 export interface NodeRecord {
   id: string; // "Label:key"
   label: string;
@@ -42,12 +49,14 @@ export interface RelTableDoc {
 }
 
 export interface SchemaDocument {
+  freshness: FreshnessReport;
   node_tables: NodeTableDoc[];
   rel_tables: RelTableDoc[];
   text: string;
 }
 
 export interface QueryResponse {
+  freshness: FreshnessReport;
   columns: string[];
   rows: unknown[][];
   row_count: number;
@@ -62,9 +71,18 @@ export interface ScoredNode {
 }
 
 export interface SearchResponse {
+  freshness: FreshnessReport;
   seeds: ScoredNode[];
   subgraph: Subgraph;
   context: string;
+  token_estimate: number;
+  response_token_estimate: number;
+  included_node_ids: string[];
+  truncated: boolean;
+  omitted_nodes: number;
+  omitted_edges: number;
+  omitted_properties: number;
+  expansion_limited: boolean;
 }
 
 export interface GraphStats {
@@ -74,6 +92,7 @@ export interface GraphStats {
 }
 
 export interface GraphSample {
+  freshness: FreshnessReport;
   subgraph: Subgraph;
   stats: GraphStats;
 }

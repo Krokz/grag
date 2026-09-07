@@ -9,8 +9,8 @@ search to FTS-only rather than failing the request.
 
 from __future__ import annotations
 
-import json
 import logging
+import math
 import weakref
 from typing import Any, Literal
 
@@ -18,7 +18,7 @@ from grag.config import GragConfig
 from grag.core.engine import Engine, extract_subgraph, node_record_from_value
 from grag.core.errors import GragError
 from grag.core.types import (
-    PackedContext,
+    FreshnessReport,
     ScoredNode,
     SearchRequest,
     SearchResponse,
@@ -26,6 +26,8 @@ from grag.core.types import (
     fts_index_name,
     merge_subgraphs,
 )
+from grag.retrieval.lexical import rank_lexical
+from grag.retrieval.packing import pack_search_response, retrieval_budget
 from grag.retrieval.vectors import (
     _ensure_extension,
     _ident,
@@ -43,44 +45,69 @@ _MAX_EXPANSION_PATHS = 512  # per seed; bounds path enumeration on dense graphs
 
 
 def search_knowledge(
-    engine: Engine, config: GragConfig, req: SearchRequest
+    engine: Engine,
+    config: GragConfig,
+    req: SearchRequest,
+    *,
+    index_status: Literal["refreshing"] | None = None,
+    freshness: FreshnessReport | None = None,
 ) -> SearchResponse:
     top_k = max(1, req.top_k)
     hops = max(0, min(req.hops, config.max_hops))
-    budget = req.token_budget or config.default_token_budget
+    budget = retrieval_budget(req.token_budget, config.default_token_budget)
     pk = pk_map_with_fallback(engine)
     tables = candidate_tables(engine, config, req.labels)
+    # Oversample each label so fusion/diversity can select beyond a modality's
+    # first top_k. A bounded shortlist is not an exhaustive graph-wide ranking.
+    candidate_k = max(32, 4 * top_k)
 
     fts_list: list[ScoredNode] = []
     vec_list: list[ScoredNode] = []
     pending = 0
     vector_status: Literal["off", "error"] | None = None
     if req.query.strip():
+        text_properties = {table: string_props(engine, table) for table in tables}
         for table in tables:
-            fts_list.extend(_fts_seeds(engine, table, req.query, top_k, pk))
+            fts_list.extend(
+                _fts_seeds(
+                    engine,
+                    table,
+                    req.query,
+                    candidate_k,
+                    pk,
+                    cols=text_properties[table],
+                )
+            )
+        fts_list = rank_lexical(engine, fts_list, req.query, text_properties)
         if config.embedder is None:
             vector_status = "off"
         else:
             try:
-                vec_list = vector_candidates(engine, config, req.query, req.labels, top_k)
-                pending = sum(pending_embedding_count(engine, config, t) for t in tables)
+                vec_list = vector_candidates(
+                    engine, config, req.query, req.labels, candidate_k, per_table=True
+                )
+                pending = sum(
+                    pending_embedding_count(engine, config, t) for t in tables
+                )
             except Exception as exc:  # noqa: BLE001 — vector path is best-effort
                 log.warning("Vector search skipped, degrading to FTS-only: %s", exc)
                 vector_status = "error"
 
     fused = _rrf_fuse({"fts": fts_list, "vector": vec_list})
     seeds = _diversify(fused, top_k, config.search_label_cap)
-    seed_ids = [s.node.id for s in seeds]
-
-    expanded = _expand_neighborhood(engine, _seed_refs(seeds, pk), hops, pk)
+    expanded, expansion_limited = _expand_neighborhood(
+        engine, _seed_refs(seeds, pk), hops, pk
+    )
     subgraph = merge_subgraphs(Subgraph(nodes=[s.node for s in seeds]), expanded)
-    packed = _pack(subgraph, budget, seed_ids)
-    return SearchResponse(
-        seeds=seeds,
-        subgraph=subgraph,
-        context=packed.text,
+    return pack_search_response(
+        subgraph,
+        seeds,
+        budget,
         pending_embeddings=pending,
         vector_status=vector_status,
+        index_status=index_status,
+        expansion_limited=expansion_limited,
+        freshness=freshness,
     )
 
 
@@ -93,9 +120,16 @@ _FTS_INDEXES: weakref.WeakKeyDictionary[Engine, set[str]] = weakref.WeakKeyDicti
 
 
 def _fts_seeds(
-    engine: Engine, table: str, query: str, top_k: int, pk: dict[str, str]
+    engine: Engine,
+    table: str,
+    query: str,
+    top_k: int,
+    pk: dict[str, str],
+    *,
+    cols: list[str] | None = None,
 ) -> list[ScoredNode]:
-    cols = string_props(engine, table)
+    if cols is None:
+        cols = string_props(engine, table)
     if not cols:
         return []  # nothing indexable on this table
     _ensure_extension(engine, "FTS")
@@ -110,10 +144,16 @@ def _fts_seeds(
     except GragError:
         # reader may hold a stale catalog; the write connection is authoritative
         res = engine.execute_write(cypher, {"q": query})
-    return [
-        ScoredNode(node=node_record_from_value(nv, pk), score=float(score), match="fts")
-        for nv, score in res.rows
-    ]
+    # TOP bounds the set, but the native API does not promise result-row order.
+    return sorted(
+        [
+            ScoredNode(
+                node=node_record_from_value(nv, pk), score=float(score), match="fts"
+            )
+            for nv, score in res.rows
+        ],
+        key=lambda s: (-s.score, s.node.id),
+    )
 
 
 def _ensure_fts_index(engine: Engine, table: str, index: str, cols: list[str]) -> None:
@@ -140,15 +180,33 @@ def _ensure_fts_index(engine: Engine, table: str, index: str, cols: list[str]) -
 
 
 def _rrf_fuse(lists: dict[str, list[ScoredNode]]) -> list[ScoredNode]:
-    """combined score = sum(1/(60 + rank)) across lists. The match label comes
-    from whichever list ranked the node higher; 'fts' wins ties."""
+    """Fuse score-ordered modalities with competition ranks for equal scores.
+
+    Duplicate hits contribute once per modality. Node IDs break final ties,
+    never dict, table, query-label or native result-row order. The match label
+    comes from the better modality rank; 'fts' wins ties.
+    """
     ranks: dict[str, dict[str, int]] = {}
     nodes: dict[str, Any] = {}
-    for source, lst in lists.items():
-        for i, scored in enumerate(lst):
+    for source, lst in sorted(lists.items()):
+        unique: dict[str, ScoredNode] = {}
+        for scored in lst:
+            if not math.isfinite(scored.score):
+                continue
+            old = unique.get(scored.node.id)
+            if old is None or scored.score > old.score:
+                unique[scored.node.id] = scored
+        previous: float | None = None
+        rank = 0
+        for i, scored in enumerate(
+            sorted(unique.values(), key=lambda s: (-s.score, s.node.id))
+        ):
+            if scored.score != previous:
+                rank = i + 1
+            previous = scored.score
             nid = scored.node.id
             nodes.setdefault(nid, scored.node)
-            ranks.setdefault(nid, {})[source] = i + 1
+            ranks.setdefault(nid, {})[source] = rank
     fused = []
     for nid, src_ranks in ranks.items():
         score = sum(1.0 / (_RRF_K + r) for r in src_ranks.values())
@@ -160,7 +218,7 @@ def _rrf_fuse(lists: dict[str, list[ScoredNode]]) -> list[ScoredNode]:
             else "vector"
         )
         fused.append(ScoredNode(node=nodes[nid], score=score, match=match))
-    fused.sort(key=lambda s: s.score, reverse=True)
+    fused.sort(key=lambda s: (-s.score, s.node.id))
     return fused
 
 
@@ -220,85 +278,23 @@ def _seed_refs(seeds: list[ScoredNode], pk: dict[str, str]) -> list[tuple[str, A
 
 def _expand_neighborhood(
     engine: Engine, seed_refs: list[tuple[str, Any]], hops: int, pk: dict[str, str]
-) -> Subgraph:
+) -> tuple[Subgraph, bool]:
     """Undirected k-hop neighborhood of the seed nodes, across all rel types."""
     if hops <= 0 or not seed_refs:
-        return Subgraph()
+        return Subgraph(), False
     subs = []
+    limited = False
     for label, key in seed_refs:
         p = pk.get(label)
         if not p:
             continue
         res = engine.execute(
             f"MATCH p = (a:{_ident(label)} {{{_ident(p)}: $key}})-[*1..{int(hops)}]-(b) "
-            f"RETURN p LIMIT {_MAX_EXPANSION_PATHS}",
+            f"RETURN p LIMIT {_MAX_EXPANSION_PATHS + 1}",
             {"key": key},
         )
+        if len(res.rows) > _MAX_EXPANSION_PATHS:
+            limited = True
+            res.rows = res.rows[:_MAX_EXPANSION_PATHS]
         subs.append(extract_subgraph(res, pk))
-    return merge_subgraphs(*subs) if subs else Subgraph()
-
-
-# ---------------------------------------------------------------------------
-# context packing (Agent A preferred, trivial fallback)
-# ---------------------------------------------------------------------------
-
-
-def _pack(
-    subgraph: Subgraph, token_budget: int, seed_ids: list[str] | None = None
-) -> PackedContext:
-    try:
-        from grag.core.serialize import pack_context
-    except ImportError:
-        return _fallback_pack_context(subgraph, token_budget, seed_ids)
-    return pack_context(subgraph, token_budget, seed_ids=seed_ids)
-
-
-def _fallback_pack_context(
-    subgraph: Subgraph, token_budget: int, seed_ids: list[str] | None = None
-) -> PackedContext:
-    """Minimal line-per-record serializer, seeds first, ~4 chars per token."""
-    node_map = subgraph.node_map()
-    ordered = []
-    seen = set()
-    for nid in seed_ids or []:
-        n = node_map.get(nid)
-        if n is not None and nid not in seen:
-            ordered.append(n)
-            seen.add(nid)
-    for n in sorted(subgraph.nodes, key=lambda x: x.id):
-        if n.id not in seen:
-            ordered.append(n)
-            seen.add(n.id)
-
-    def props_json(props: dict[str, Any]) -> str:
-        return json.dumps(props, ensure_ascii=False, default=str, sort_keys=True)
-
-    lines: list[tuple[str, str | None]] = []
-    for n in ordered:
-        lines.append((f"{n.id} {props_json(n.properties)}", n.id))
-    for e in subgraph.edges:
-        eline = f"{e.source} -[{e.type}]-> {e.target}"
-        if e.properties:
-            eline += f" {props_json(e.properties)}"
-        lines.append((eline, None))
-
-    budget = max(0, int(token_budget))
-    parts: list[str] = []
-    included: list[str] = []
-    used = 0
-    truncated = False
-    for text, node_id in lines:
-        cost = max(1, (len(text) + 1) // 4)
-        if used + cost > budget:
-            truncated = True
-            continue
-        parts.append(text)
-        used += cost
-        if node_id is not None:
-            included.append(node_id)
-    return PackedContext(
-        text="\n".join(parts),
-        token_estimate=used,
-        included_node_ids=included,
-        truncated=truncated,
-    )
+    return (merge_subgraphs(*subs) if subs else Subgraph()), limited

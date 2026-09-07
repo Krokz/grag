@@ -26,10 +26,11 @@ IMPLEMENTS (Function→Section) and IMPLEMENTS_CLASS (Class→Section) tables ar
 defined here so that pass has a known target instead of inventing labels.
 
 Ids are deterministic: `<doc-identity>#<slug/path>` for sections (the same
-`<slug>-<sha256>` document identity the flat loader uses, so re-ingesting a
-file in either mode replaces the other's nodes) and `<section-id>@NNNN` for
-chunks. Re-ingest is an authoritative sync per document: current sections
-and chunks are MERGEd, stale ones pruned.
+`<slug>-<sha256>` document identity the flat loader uses) and
+`<section-id>@NNNN` for chunks. Current nodes and loader-owned relationships
+publish together in one transaction. Authored/unknown relationships survive;
+obsolete nodes still referenced by them are retained with a warning. Changing
+ingestion modes/labels does not reconcile all prior document structure.
 """
 
 from __future__ import annotations
@@ -41,8 +42,7 @@ from dataclasses import dataclass, field
 
 from grag.config import GragConfig
 from grag.core.engine import Engine
-from grag.core.errors import GragError
-from grag.core.mutate import define_schema, upsert_edges, upsert_nodes
+from grag.core.mutate import _upsert_edges, define_schema, upsert_nodes
 from grag.core.types import (
     DefineSchemaRequest,
     IngestRequest,
@@ -54,6 +54,11 @@ from grag.core.types import (
     UpsertEdgesRequest,
     UpsertNode,
     UpsertNodesRequest,
+)
+from grag.ingest.document_sync import (
+    prepare_ownership,
+    prune_unreferenced_nodes,
+    replace_owned_edges,
 )
 from grag.ingest.loaders import (
     _chunk_text,
@@ -75,7 +80,11 @@ _DOC_NODE_TABLES = [
         name=DOCUMENT_LABEL,
         primary_key="id",
         searchable=True,
-        properties=[_S(name="title"), _S(name="path"), _S(name="sections", type="INT64")],
+        properties=[
+            _S(name="title"),
+            _S(name="path"),
+            _S(name="sections", type="INT64"),
+        ],
     ),
     NodeTableSpec(
         name=SECTION_LABEL,
@@ -98,7 +107,9 @@ _DOC_NODE_TABLES = [
 
 _DOC_REL_TABLES = [
     RelTableSpec(name="HAS_SECTION", from_label=DOCUMENT_LABEL, to_label=SECTION_LABEL),
-    RelTableSpec(name="SUBSECTION_OF", from_label=SECTION_LABEL, to_label=SECTION_LABEL),
+    RelTableSpec(
+        name="SUBSECTION_OF", from_label=SECTION_LABEL, to_label=SECTION_LABEL
+    ),
     RelTableSpec(name="NEXT_SECTION", from_label=SECTION_LABEL, to_label=SECTION_LABEL),
 ]
 
@@ -247,10 +258,7 @@ def heading_path(sections: list[ParsedSection], idx: int) -> str:
 
 
 def _code_tables(engine: Engine) -> set[str]:
-    try:
-        rows = engine.execute("CALL SHOW_TABLES() RETURN *").rows
-    except GragError:
-        return set()
+    rows = engine.execute("CALL SHOW_TABLES() RETURN *").rows
     names = {str(r[1]) for r in rows if str(r[2]).upper() == "NODE"}
     return names & set(_CODE_LINK_TABLES)
 
@@ -326,18 +334,33 @@ def ingest_markdown(
     engine: Engine, config: GragConfig, req: IngestRequest
 ) -> IngestResponse:
     """Ingest `req.documents` as Document/Section/Chunk graphs (see module doc)."""
+    with engine.serialized_writes():
+        response = _ingest_markdown(engine, config, req)
+    # Embedding may call a model; keep it outside the publication lock/transaction.
+    for label in (req.label, SECTION_LABEL, DOCUMENT_LABEL):
+        _embed_pending(engine, config, label)
+    return response
+
+
+def _ingest_markdown(
+    engine: Engine, config: GragConfig, req: IngestRequest
+) -> IngestResponse:
     chunk_label = req.label
     rel_in_section = chunk_rel_name(chunk_label)
     code_tables = _code_tables(engine)
     rel_tables = [
         *_DOC_REL_TABLES,
-        RelTableSpec(name=rel_in_section, from_label=chunk_label, to_label=SECTION_LABEL),
+        RelTableSpec(
+            name=rel_in_section, from_label=chunk_label, to_label=SECTION_LABEL
+        ),
     ]
+    generated_tables = [table.name for table in rel_tables]
     for label in sorted(code_tables):
         mentions, implements = _CODE_LINK_TABLES[label]
         rel_tables.append(
             RelTableSpec(name=mentions, from_label=SECTION_LABEL, to_label=label)
         )
+        generated_tables.append(mentions)
         if implements:
             rel_tables.append(
                 RelTableSpec(name=implements, from_label=label, to_label=SECTION_LABEL)
@@ -358,11 +381,12 @@ def ingest_markdown(
             rel_tables=rel_tables,
         ),
     )
+    prepare_ownership(engine, generated_tables)
 
     docs: list[UpsertNode] = []
     sections_out: list[UpsertNode] = []
     chunks: list[UpsertNode] = []
-    edges: list[UpsertEdge] = []
+    edges_by_owner: dict[str, list[UpsertEdge]] = {}
     code_links = 0
     identities: dict[str, set[str]] = {}
     seen_identity: dict[str, int] = {}
@@ -373,6 +397,7 @@ def ingest_markdown(
         seen_identity[base_identity] = n + 1
         identity = base_identity if n == 0 else f"{base_identity}~{n:04d}"
         desired = identities.setdefault(identity, set())
+        edges = edges_by_owner.setdefault(identity, [])
 
         title, sections = parse_sections(doc.text)
         _assign_slug_paths(sections)
@@ -502,18 +527,21 @@ def ingest_markdown(
                     )
                     code_links += 1
 
-    for batch in (docs, sections_out, chunks):
-        if batch:
-            upsert_nodes(engine, config, UpsertNodesRequest(nodes=batch))
-    pruned = _prune_document_graph(engine, chunk_label, identities)
-    if edges:
-        by_type: dict[str, list[UpsertEdge]] = {}
-        for e in edges:
-            by_type.setdefault(e.type, []).append(e)
-        for rel in by_type.values():
-            upsert_edges(engine, config, UpsertEdgesRequest(edges=rel))
-    for label in (chunk_label, SECTION_LABEL, DOCUMENT_LABEL):
-        _embed_pending(engine, config, label)
+    warnings: list[str] = []
+    with engine.write_transaction():
+        for batch in (docs, sections_out, chunks):
+            if batch:
+                upsert_nodes(engine, config, UpsertNodesRequest(nodes=batch))
+        replace_owned_edges(engine, generated_tables, list(identities), warnings)
+        for owner, edges in edges_by_owner.items():
+            if edges:
+                _upsert_edges(
+                    engine,
+                    config,
+                    UpsertEdgesRequest(edges=edges),
+                    document_owner=owner,
+                )
+        pruned = _prune_document_graph(engine, chunk_label, identities, warnings)
     return IngestResponse(
         label=chunk_label,
         nodes_created=len(chunks),
@@ -521,11 +549,15 @@ def ingest_markdown(
         documents=len(docs),
         sections=len(sections_out),
         code_links=code_links,
+        warnings=warnings,
     )
 
 
 def _prune_document_graph(
-    engine: Engine, chunk_label: str, identities: dict[str, set[str]]
+    engine: Engine,
+    chunk_label: str,
+    identities: dict[str, set[str]],
+    warnings: list[str],
 ) -> int:
     """Authoritative sync per document identity: drop sections/chunks that
     are no longer produced (including flat-loader chunks of the same file)."""
@@ -533,11 +565,11 @@ def _prune_document_graph(
     for identity, desired in identities.items():
         prefix = f"{identity}#"
         for label in (SECTION_LABEL, chunk_label):
-            res = engine.execute_write(
-                f"MATCH (n:{label}) WHERE n.id STARTS WITH $prefix "
-                "AND NOT n.id IN $keys DETACH DELETE n RETURN count(n)",
+            pruned += prune_unreferenced_nodes(
+                engine,
+                label,
+                "n.id STARTS WITH $prefix AND NOT n.id IN $keys",
                 {"prefix": prefix, "keys": sorted(desired)},
+                warnings,
             )
-            if res.rows:
-                pruned += int(res.rows[0][0])
     return pruned

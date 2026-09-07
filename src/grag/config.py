@@ -39,6 +39,21 @@ def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Properties that never carry retrieval-worthy text: provenance-ish strings,
+# file paths and JSON side-cars. They stay in the FTS index (exact-match
+# lookups on a path are useful) but are kept out of the embedding text, where
+# they only dilute the vector of the prose next to them.
+DEFAULT_EMBED_EXCLUDE_PROPS = (
+    "meta",
+    "path",
+    "heading_path",
+    "language",
+    "git_commit",
+    "git_branch",
+    "ingested_at",
+)
+
+
 class EmbedderConfig(BaseModel):
     """Opt-in embedding provider. Without one, retrieval runs FTS-only."""
 
@@ -47,6 +62,23 @@ class EmbedderConfig(BaseModel):
     dim: int = 384
     base_url: str | None = None  # remote: OpenAI-compatible endpoint
     api_key_env: str | None = None  # remote: env var holding the API key
+    # Which STRING properties form a node's embedding text. `text_props` pins
+    # an explicit list per label ({"Function": ["name", "docstring"]});
+    # otherwise every non-reserved STRING prop minus `exclude_props` is used.
+    text_props: dict[str, list[str]] = Field(default_factory=dict)
+    exclude_props: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_EMBED_EXCLUDE_PROPS)
+    )
+    # Asymmetric-retrieval prefixes. None = pick by model family (bge/arctic:
+    # query instruction only; nomic: search_query/search_document; e5:
+    # query:/passage:); "" = none. Changing either invalidates stored
+    # vectors for automatic rebuilding; `grag reindex` forces an immediate rebuild.
+    query_prefix: str | None = None
+    document_prefix: str | None = None
+    # ONNX intra-op threads for the local embedder. None = min(4, CPU count).
+    # (grag < 0.6.1 forced 1 to dodge a SIGSEGV on macOS arm64 with
+    # onnxruntime 1.28; 1.29+ is clean at 4-8 threads.)
+    threads: int | None = None
 
 
 class GragConfig(BaseModel):
@@ -105,11 +137,16 @@ class GragConfig(BaseModel):
     # Allow a plain-http (non-TLS) remote server_url on a non-loopback host.
     # The bearer token travels in clear text then — for trusted networks only.
     allow_insecure_http: bool = False
-    # Supervised servers (systemd / containers) have no TTY to approve WAL
-    # recovery on; with this set a corrupt WAL is recovered automatically on
-    # open (writes since the last checkpoint are lost, HNSW indexes rebuilt)
-    # instead of crash-looping under the supervisor. Off by default.
+    # Deprecated: retained for configuration compatibility. Normal opens
+    # always use strict WAL replay; `grag recover` preserves inputs and
+    # confines explicitly allowed lossy recovery to a separate copy.
     wal_auto_recover: bool = False
+    # Serving reads trigger background source-content/HEAD verification and
+    # refresh using each root's saved scope/options. Normal checks are throttled
+    # by this interval; wait/require request verification sooner, while failures
+    # respect retry backoff. Off reports disabled and rejects require reads.
+    auto_refresh_code: bool = True
+    auto_refresh_interval_s: float = 30.0
 
     @classmethod
     def from_env(cls) -> GragConfig:
@@ -142,6 +179,10 @@ class GragConfig(BaseModel):
             cfg.allow_insecure_http = _truthy(insecure)
         if recover := os.environ.get("GRAG_WAL_AUTO_RECOVER"):
             cfg.wal_auto_recover = _truthy(recover)
+        if refresh := os.environ.get("GRAG_AUTO_REFRESH_CODE"):
+            cfg.auto_refresh_code = _truthy(refresh)
+        if interval := os.environ.get("GRAG_AUTO_REFRESH_INTERVAL_S"):
+            cfg.auto_refresh_interval_s = float(interval)
         if provider := os.environ.get("GRAG_EMBED_PROVIDER"):
             cfg.embedder = EmbedderConfig(
                 provider=provider,  # type: ignore[arg-type]
@@ -149,5 +190,16 @@ class GragConfig(BaseModel):
                 dim=int(os.environ.get("GRAG_EMBED_DIM", "384")),
                 base_url=os.environ.get("GRAG_EMBED_BASE_URL"),
                 api_key_env=os.environ.get("GRAG_EMBED_API_KEY_ENV"),
+                query_prefix=os.environ.get("GRAG_EMBED_QUERY_PREFIX"),
+                document_prefix=os.environ.get("GRAG_EMBED_DOC_PREFIX"),
+                threads=(
+                    int(os.environ["GRAG_EMBED_THREADS"])
+                    if os.environ.get("GRAG_EMBED_THREADS")
+                    else None
+                ),
             )
+            if excluded := os.environ.get("GRAG_EMBED_EXCLUDE_PROPS"):
+                cfg.embedder.exclude_props = [
+                    p.strip() for p in excluded.split(",") if p.strip()
+                ]
         return cfg

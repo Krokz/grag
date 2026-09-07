@@ -2,15 +2,15 @@
 
 Without a worker, grag embeds lazily on the request thread: an ingest embeds
 its own writes before returning, and a search embeds up to
-``config.max_embed_per_search`` pending nodes before answering. Both hold the
-single write connection for as long as the embedder runs, so a large ingest
-stalls every concurrent search behind the write lock.
+``config.max_embed_per_search`` pending nodes before answering. Inference
+leaves the database writer available, but the calling request waits for it.
 
 A serving process (``grag serve``, ``grag mcp``) attaches one ``EmbedWorker``
 per engine instead. Ingest and upsert paths then only *wake* the worker and
-return immediately; the worker drains ``embedding IS NULL`` nodes in small
+return immediately; the worker drains missing or incompatible vectors in small
 batches on its own thread, taking the write lock for one short statement per
-node so interactive reads and writes interleave freely. Searches never embed
+node so interactive reads and writes interleave freely. A concurrent edit
+discards that result; the next pass retries the current input. Searches never embed
 inline while a worker is attached (they still report ``pending_embeddings``,
 which now shrinks on its own).
 
@@ -64,7 +64,8 @@ class EmbedWorker:
         with self._lock:
             if self._thread is not None:
                 return
-            self._stop.clear()
+            if self._stop.is_set():
+                return  # stopped workers cannot restart during service teardown
             self._thread = threading.Thread(
                 target=self._run, name="grag-embed-worker", daemon=True
             )
@@ -72,15 +73,25 @@ class EmbedWorker:
         # Drain whatever backlog the previous process left behind.
         self.wake()
 
-    def stop(self, timeout: float = 10.0) -> None:
+    def stop(self, timeout: float | None = 10.0) -> bool:
+        """Request stop and report whether the thread actually exited.
+
+        A timeout never discards the live thread handle. The service retains its
+        engine until a later join succeeds; Python cannot kill stuck inference.
+        """
         with self._lock:
             thread = self._thread
-            self._thread = None
+            self._stop.set()
+            self._wake.set()
         if thread is None:
-            return
-        self._stop.set()
-        self._wake.set()
-        thread.join(timeout)
+            return True
+        if thread is not threading.current_thread():
+            thread.join(timeout)
+        stopped = not thread.is_alive()
+        if stopped:
+            with self._lock:
+                self._thread = None
+        return stopped
 
     @property
     def running(self) -> bool:
@@ -89,6 +100,8 @@ class EmbedWorker:
 
     def wake(self, table: str | None = None) -> None:
         """Signal that new un-embedded nodes may exist (any table)."""
+        if self._stop.is_set():
+            return
         self._idle.clear()
         self._wake.set()
 
@@ -99,6 +112,7 @@ class EmbedWorker:
     def status(self) -> dict[str, Any]:
         return {
             "running": self.running,
+            "stopping": self._stop.is_set(),
             "idle": self._idle.is_set(),
             "embedded_total": self.embedded_total,
             "passes": self.passes,
@@ -139,7 +153,11 @@ class EmbedWorker:
         if self.config.embedder is None:
             return 0
         total = 0
+        if self._stop.is_set():
+            return 0
         for table in searchable_node_tables(self.engine, self.config):
+            if self._stop.is_set():
+                break
             while not self._stop.is_set():
                 n = embed_pending_nodes(
                     self.engine,
@@ -164,7 +182,9 @@ class EmbedWorker:
 def attached_worker(engine: Engine) -> EmbedWorker | None:
     """The EmbedWorker serving `engine`, if a serving process attached one."""
     worker = getattr(engine, "embed_worker", None)
-    return worker if isinstance(worker, EmbedWorker) and worker.running else None
+    # Retain the attachment during shutdown: finishing ingests must not fall
+    # back to inline inference just because the background worker stopped.
+    return worker if isinstance(worker, EmbedWorker) and (worker.running or worker._stop.is_set()) else None
 
 
 def notify_embed_worker(engine: Engine, table: str | None = None) -> bool:

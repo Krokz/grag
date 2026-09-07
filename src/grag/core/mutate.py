@@ -10,6 +10,8 @@ idempotent.
 
 from __future__ import annotations
 
+import datetime as dt
+import math
 from typing import Any
 
 from grag.config import GragConfig
@@ -17,6 +19,7 @@ from grag.core.engine import Engine
 from grag.core.errors import NotFoundError, SchemaError
 from grag.core.ident import validate_identifier
 from grag.core.types import (
+    DOCUMENT_OWNER_PROP,
     META_TABLE,
     PROVENANCE_CREATED_AT,
     PROVENANCE_SOURCE,
@@ -102,7 +105,7 @@ def _node_pks(engine: Engine) -> dict[str, str | None]:
     meta = _meta_rows(engine, tables)
     out: dict[str, str | None] = {}
     for name, kind in tables.items():
-        if kind != "NODE" or name == META_TABLE:
+        if kind != "NODE" or name.startswith(RESERVED_PREFIX):
             continue
         m = meta.get(name)
         pk = m["pk"] if m and m["kind"] == "node" else None
@@ -116,7 +119,7 @@ def _rel_endpoints(engine: Engine) -> dict[str, tuple[str, str]]:
     meta = _meta_rows(engine, tables)
     out: dict[str, tuple[str, str]] = {}
     for name, kind in tables.items():
-        if kind != "REL":
+        if kind != "REL" or name.startswith(RESERVED_PREFIX):
             continue
         m = meta.get(name)
         if m and m["kind"] == "rel" and m["from_label"] and m["to_label"]:
@@ -169,6 +172,8 @@ def _validate_request(req: DefineSchemaRequest) -> None:
             f"'{META_TABLE}' is the grag table registry.",
             hint="Choose a different table name.",
         )
+    if any(name.startswith(RESERVED_PREFIX) for name in seen_names):
+        raise SchemaError("Table names starting with '_' are reserved for grag internals.", hint="Choose a public table name without a leading underscore.")
 
 
 def _validate_props(spec: NodeTableSpec | RelTableSpec) -> None:
@@ -235,6 +240,36 @@ def _merge_meta(
 # --- public: define_schema --------------------------------------------------------
 
 
+def _canonical_name(name: str) -> str:
+    """Case-, punctuation- and plural-insensitive form for duplicate checks."""
+    base = "".join(ch for ch in name.casefold() if ch.isalnum())
+    if base.endswith("ies") and len(base) > 4:
+        return base[:-3] + "y"
+    if base.endswith(("ses", "xes", "shes", "ches")) and len(base) > 4:
+        return base[:-2]
+    if base.endswith("s") and not base.endswith("ss") and len(base) > 3:
+        return base[:-1]
+    return base
+
+
+def similar_table(name: str, existing: list[str]) -> str | None:
+    """An existing table name that `name` is a near-duplicate of, if any."""
+    target = _canonical_name(name)
+    for other in existing:
+        if other != name and other != META_TABLE and _canonical_name(other) == target:
+            return other
+    return None
+
+
+def _similar_error(name: str, existing: str, kind: str) -> SchemaError:
+    return SchemaError(
+        f"{kind} table '{name}' looks like a duplicate of existing '{existing}'.",
+        hint=f"Reuse '{existing}' (call describe_schema to see its properties) so the "
+        "graph does not fragment across near-identical labels. If it really is a "
+        "different concept, retry with allow_similar=true.",
+    )
+
+
 def define_schema(
     engine: Engine, config: GragConfig, req: DefineSchemaRequest
 ) -> SchemaDocument:
@@ -256,6 +291,10 @@ def define_schema(
                     hint="Choose a different node table name.",
                 )
             continue
+        if not req.allow_similar:
+            twin = similar_table(spec.name, [n for n, k in tables.items() if k == "NODE"])
+            if twin is not None:
+                raise _similar_error(spec.name, twin, "Node")
         engine.execute_write(_node_ddl(spec))
         tables[spec.name] = "NODE"
 
@@ -270,6 +309,10 @@ def define_schema(
                     hint="Choose a different rel table name.",
                 )
             continue
+        if not req.allow_similar:
+            twin = similar_table(rspec.name, [n for n, k in tables.items() if k == "REL"])
+            if twin is not None:
+                raise _similar_error(rspec.name, twin, "Rel")
         for endpoint in (rspec.from_label, rspec.to_label):
             if tables.get(endpoint) != "NODE":
                 node_tables = sorted(
@@ -327,20 +370,24 @@ def _exists_error(name: str) -> SchemaError:
 def _coerce_value(declared: str, value: Any) -> tuple[bool, Any]:
     """Minimal type check against the declared column type.
 
-    Returns (ok, coerced). Only str -> INT64/DOUBLE is coerced; everything
-    else must already match. DATE/TIMESTAMP and unknown types pass through.
+    Returns (ok, coerced). Numeric strings and ISO date/timestamp strings
+    are accepted; NULL clears a property. Other types must match. Raw-table
+    types outside grag's declared contract are checked by the native engine.
     """
     ctype = declared.upper()
+    if value is None:
+        return True, None
     if ctype == "STRING":
         return (True, value) if isinstance(value, str) else (False, None)
     if ctype == "INT64":
         if isinstance(value, bool):
             return (False, None)
         if isinstance(value, int):
-            return (True, value)
+            return (-2**63 <= value < 2**63, value)
         if isinstance(value, str):
             try:
-                return (True, int(value.strip()))
+                converted = int(value.strip())
+                return (-2**63 <= converted < 2**63, converted)
             except ValueError:
                 return (False, None)
         return (False, None)
@@ -348,15 +395,30 @@ def _coerce_value(declared: str, value: Any) -> tuple[bool, Any]:
         if isinstance(value, bool):
             return (False, None)
         if isinstance(value, (int, float)):
-            return (True, float(value))
+            try:
+                number = float(value)
+                return (math.isfinite(number), number)
+            except OverflowError:
+                return (False, None)
         if isinstance(value, str):
             try:
-                return (True, float(value.strip()))
+                number = float(value.strip())
+                return (math.isfinite(number), number)
             except ValueError:
                 return (False, None)
         return (False, None)
     if ctype == "BOOL":
         return (True, value) if isinstance(value, bool) else (False, None)
+    if ctype in {"DATE", "TIMESTAMP"}:
+        expected = dt.date if ctype == "DATE" else dt.datetime
+        if isinstance(value, expected) and not (ctype == "DATE" and isinstance(value, dt.datetime)):
+            return True, value
+        if isinstance(value, str):
+            try:
+                return True, expected.fromisoformat(value)
+            except ValueError:
+                pass
+        return False, None
     return (True, value)
 
 
@@ -403,6 +465,7 @@ def _sanitize_props(
             )
             continue
         pname = f"p{i}"
+        validate_identifier(name)
         params[pname] = coerced
         accepted[name] = coerced
         sets.append(f"{alias}.{name} = ${pname}")
@@ -432,7 +495,7 @@ def _searchable_text_changed(
     if not text_props:
         return False
     projection = ", ".join(f"n.{name}" for name in text_props)
-    rows = engine.execute(
+    rows = engine.execute_write(
         f"MATCH (n:{label} {{{pk}: $key}}) RETURN {projection}", {"key": key}
     ).rows
     if not rows:
@@ -447,6 +510,14 @@ def _searchable_text_changed(
 
 
 def upsert_nodes(
+    engine: Engine, config: GragConfig, req: UpsertNodesRequest
+) -> MutationSummary:
+    from grag.core.mutations import apply_mutation
+
+    return apply_mutation(engine, config, req)
+
+
+def _upsert_nodes(
     engine: Engine, config: GragConfig, req: UpsertNodesRequest
 ) -> MutationSummary:
     warnings: list[str] = []
@@ -490,6 +561,12 @@ def upsert_nodes(
             match_sets.extend(
                 f"n.{prop} = NULL" for prop in sorted(VECTOR_PROPS) if prop in columns
             )
+        # Ladybug may give newly inserted rows empty/zero defaults for
+        # lazily added columns. Explicit NULL keeps them pending, including
+        # a deleted primary key that an agent subsequently recreates.
+        create_sets.extend(
+            f"n.{prop} = NULL" for prop in sorted(VECTOR_PROPS) if prop in columns
+        )
         if PROVENANCE_CREATED_AT in columns:
             create_sets.append(f"n.{PROVENANCE_CREATED_AT} = current_timestamp()")
         if node.source is not None and PROVENANCE_SOURCE in columns:
@@ -514,6 +591,16 @@ def upsert_nodes(
 def upsert_edges(
     engine: Engine, config: GragConfig, req: UpsertEdgesRequest
 ) -> MutationSummary:
+    from grag.core.mutations import apply_mutation
+
+    return apply_mutation(engine, config, req)
+
+
+def _upsert_edges(
+    engine: Engine, config: GragConfig, req: UpsertEdgesRequest,
+    *, document_owner: str | None = None,
+) -> MutationSummary:
+    """Caller holds serialized_writes; only document ingest supplies an owner."""
     warnings: list[str] = []
     rels = _rel_endpoints(engine)
     pks = _node_pks(engine)
@@ -578,6 +665,18 @@ def upsert_edges(
             params["src"] = edge.source
             create_sets.append(f"r.{PROVENANCE_SOURCE} = $src")
             match_sets.append(f"r.{PROVENANCE_SOURCE} = $src")
+
+        if DOCUMENT_OWNER_PROP in columns:
+            params["doc_owner"] = document_owner or ""
+            create_sets.append(f"r.{DOCUMENT_OWNER_PROP} = $doc_owner")
+            if document_owner is None:
+                # A public upsert adopts the edge as authored, even when its
+                # source is the document itself. Provenance is not ownership.
+                match_sets.append(f"r.{DOCUMENT_OWNER_PROP} = $doc_owner")
+        if document_owner is not None:
+            # Existing authored/legacy relationships retain their properties
+            # and provenance. The loader claims only edges it creates.
+            match_sets = []
 
         cypher = (
             f"MATCH (a:{edge.from_label} {{{pks[edge.from_label]}: $fk}}), "

@@ -19,7 +19,6 @@ Group=grag
 EnvironmentFile=/etc/grag/env
 Environment=GRAG_DB_PATH=/var/lib/grag/grag.lbdb
 Environment=GRAG_EMBED_PROVIDER=fastembed
-Environment=GRAG_WAL_AUTO_RECOVER=1
 Environment=HOME=/var/lib/grag
 StateDirectory=grag
 StateDirectoryMode=0700

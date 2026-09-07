@@ -165,10 +165,20 @@ def test_remote_embedder_payload_and_key(tmp_path, monkeypatch):
 
 
 def test_embedder_cached_per_process(vconfig, fake, monkeypatch):
-    cache: dict = {}
-    monkeypatch.setattr(vectors, "_EMBEDDER_CACHE", cache)
-    cache[("fastembed", "fake", FAKE_DIM, None, None)] = fake
+    monkeypatch.setattr(vectors, "_EMBEDDER_CACHE", {})
+    created = []
+
+    def create(cfg):
+        created.append(cfg.threads)
+        return fake
+
+    monkeypatch.setattr(vectors, "FastembedEmbedder", create)
     assert vectors.get_embedder(vconfig) is fake
+    assert vectors.get_embedder(vconfig) is fake
+    assert created == [None]
+    vconfig.embedder.threads = 1
+    assert vectors.get_embedder(vconfig) is fake
+    assert created == [None, 1]
 
 
 # --- polar split + codecs ------------------------------------------------------

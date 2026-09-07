@@ -14,8 +14,6 @@ ENV PYTHONUNBUFFERED=1 \
     # Semantic search on the server (ONNX, no PyTorch); model cached in /data.
     GRAG_EMBED_PROVIDER=fastembed \
     FASTEMBED_CACHE_PATH=/data/fastembed \
-    # No TTY under a supervisor: recover a corrupt WAL instead of crash-looping.
-    GRAG_WAL_AUTO_RECOVER=1 \
     HOME=/data
 
 WORKDIR /app
