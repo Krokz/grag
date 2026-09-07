@@ -21,13 +21,25 @@ from urllib.request import ProxyHandler, build_opener
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 
+from grag.admin import log_path
 from grag.config import GragConfig, database_identity
 from grag.core.engine import Engine
 from workflow_eval import percentile95
 
 
 def test_two_agents_share_memory_and_restart(tmp_path):
-    asyncio.run(shared_workflow(tmp_path))
+    try:
+        asyncio.run(shared_workflow(tmp_path))
+    except BaseException:
+        # MCP only reports "Connection closed" when its child exits. Preserve
+        # the actual startup/replay error in CI, without dumping registrations
+        # (which contain the shutdown token) or unrelated database logs.
+        for path in (tmp_path / "shared-mcp.stderr.log", log_path(tmp_path / "memory.lbdb")):
+            if path.is_file():
+                with path.open("rb") as handle:
+                    handle.seek(max(0, path.stat().st_size - 16384))
+                    print(f"\n{path.name}:\n{handle.read().decode('utf-8', errors='replace')}")
+        raise
 
 
 async def shared_workflow(root):
