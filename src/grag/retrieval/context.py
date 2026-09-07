@@ -6,16 +6,22 @@ from typing import Any
 
 from grag.config import GragConfig
 from grag.core.engine import Engine, node_record_from_value
-from grag.core.errors import SchemaError
+from grag.core.errors import NotFoundError, SchemaError
 from grag.core.types import (
     ContextRequest,
     ContextResponse,
+    FreshnessReport,
     NodeRecord,
     Subgraph,
     merge_subgraphs,
     split_node_id,
 )
-from grag.retrieval.search import _expand_neighborhood, _pack
+from grag.retrieval.packing import (
+    pack_context_response,
+    pack_text_page,
+    retrieval_budget,
+)
+from grag.retrieval.search import _expand_neighborhood
 from grag.retrieval.vectors import _ident, node_tables, pk_map_with_fallback
 
 
@@ -47,13 +53,13 @@ def _resolve_bare_key(
 
 
 def get_context(
-    engine: Engine, config: GragConfig, req: ContextRequest
+    engine: Engine, config: GragConfig, req: ContextRequest, *, freshness: FreshnessReport | None = None,
 ) -> ContextResponse:
     """Look up req.node_ids ('Label:key'), expand k hops, and pack the result
     into a token budget. Node ids that don't resolve are excluded; unknown
     *labels* are a SchemaError."""
     hops = max(0, min(req.hops, config.max_hops))
-    budget = req.token_budget or config.default_token_budget
+    budget = retrieval_budget(req.token_budget, config.default_token_budget)
     pk = pk_map_with_fallback(engine)
     known = set(node_tables(engine))
 
@@ -107,13 +113,20 @@ def get_context(
         seeds.append(hit[0])
         refs.append((label, hit[1]))
 
-    expanded = _expand_neighborhood(engine, refs, hops, pk)
+    if req.text_property is not None:
+        if not seeds:
+            raise NotFoundError(
+                "Node not found for text paging.",
+                hint="Use a current canonical id from search_knowledge.",
+            )
+        return pack_text_page(seeds[0], req, budget, freshness=freshness)
+
+    expanded, expansion_limited = _expand_neighborhood(engine, refs, hops, pk)
     subgraph = merge_subgraphs(Subgraph(nodes=seeds), expanded)
-    packed = _pack(subgraph, budget, [n.id for n in seeds])
-    return ContextResponse(
-        context=packed.text,
-        token_estimate=packed.token_estimate,
-        included_node_ids=packed.included_node_ids,
-        truncated=packed.truncated,
-        subgraph=subgraph,
+    return pack_context_response(
+        subgraph,
+        budget,
+        [n.id for n in seeds],
+        expansion_limited=expansion_limited,
+        freshness=freshness,
     )
