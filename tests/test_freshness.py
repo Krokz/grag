@@ -9,6 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -266,10 +267,14 @@ def test_size_exclusions_cannot_claim_retained_old_symbols_fresh(
 
 
 def test_backoff_grows_and_is_capped(indexed, monkeypatch):
+    import grag.refresh as refresh
+
     svc, root = indexed
     _write(root, "beta")
     svc.refresher.retry_base = 1.0
     svc.refresher.retry_max = 2.0
+    # Freeze only the refresher's clock; condition waits retain real deadlines.
+    monkeypatch.setattr(refresh, "time", SimpleNamespace(monotonic=lambda: 100.0))
     monkeypatch.setattr(
         svc, "ingest_code", lambda req: (_ for _ in ()).throw(RuntimeError("failed"))
     )
@@ -277,10 +282,14 @@ def test_backoff_grows_and_is_capped(indexed, monkeypatch):
         # Advance only this root's retry clock; avoid slow wall-clock tests.
         with svc.refresher._condition:
             svc.refresher._roots[str(root)].retry_at = 0.0
-        svc.read_freshness(ReadPolicy(freshness="wait", freshness_timeout_ms=50))
+        svc.read_freshness(ReadPolicy(freshness="wait", freshness_timeout_ms=0))
+        with svc.refresher._condition:
+            assert svc.refresher._condition.wait_for(
+                lambda: not svc.refresher._checking, timeout=5
+            )
         state = _root_status(svc, root)
         assert state["failures"] == failures
-        assert expected - 0.15 < state["retry_in_s"] <= expected
+        assert state["retry_in_s"] == expected
 
 
 def test_content_fingerprint_detects_non_newest_and_restored_mtimes(tmp_path):
