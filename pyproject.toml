@@ -56,6 +56,8 @@ packages = ["src/grag"]
 # optional prefix (tolerated when absent); the wheel's force-include above is
 # what *requires* it for distribution builds.
 ignore-vcs = true
+# Keep local UI dependencies out while still including the built web bundle.
+exclude = ["/ui/node_modules"]
 include = [
     "src/grag",
     "src/grag/api/static",
