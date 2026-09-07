@@ -34,7 +34,7 @@ def test_two_agents_share_memory_and_restart(tmp_path):
         # MCP only reports "Connection closed" when its child exits. Preserve
         # the actual startup/replay error in CI, without dumping registrations
         # (which contain the shutdown token) or unrelated database logs.
-        for path in (tmp_path / "shared-mcp.stderr.log", log_path(tmp_path / "memory.lbdb")):
+        for path in (tmp_path / "shared-mcp.stderr.log", tmp_path / "shared-owner.log", log_path(tmp_path / "memory.lbdb")):
             if path.is_file():
                 with path.open("rb") as handle:
                     handle.seek(max(0, path.stat().st_size - 16384))
@@ -67,6 +67,7 @@ async def shared_workflow(root):
         env["TMPDIR"] = os.environ["TMPDIR"]
     http = build_opener(ProxyHandler({}))
     latencies = {}
+    owned_process = None
 
     async def call(session, name, args, *, allow_error=False):
         start = time.perf_counter()
@@ -115,11 +116,35 @@ async def shared_workflow(root):
                     yield session
 
     def stop():
+        nonlocal owned_process
         result = subprocess.run(  # noqa: S603 — command is the selected test runtime
             [*command, "--db", str(db), "stop"], env=env, cwd=root,
             text=True, capture_output=True, timeout=45, check=False,
         )
         assert result.returncode == 0, (result.stdout, result.stderr)
+        if owned_process is not None:
+            assert owned_process.wait(timeout=10) == 0
+            owned_process = None
+
+    def start_windows_owner():
+        # Equivalent to the separate terminal recommended when a Windows
+        # harness forbids detached children. The owner is outside both MCP
+        # clients' kill-on-close jobs; no SDK cleanup policy is modified.
+        nonlocal owned_process
+        with (root / "shared-owner.log").open("ab") as output:
+            owned_process = subprocess.Popen(  # noqa: S603 — selected test runtime
+                [*command, "--db", str(db), "serve", "--with-mcp", "--port", str(port)],
+                env=env, cwd=root, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+            )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            assert owned_process.poll() is None, "External shared owner exited during startup"
+            try:
+                health()
+                return
+            except OSError:
+                time.sleep(0.1)
+        raise AssertionError("External shared owner did not become ready")
 
     def batch(client, number, revision="initial"):
         return {"operation_id": f"{client}:batch:{number}:{revision}", "nodes": [
@@ -134,6 +159,20 @@ async def shared_workflow(root):
             await call(session, "search_knowledge", {"query": "shared project", "labels": ["Memory"], "hops": 0, "top_k": 2})
 
     try:
+        if sys.platform == "win32":
+            # Under the SDK's restricted job, auto-spawn must fail before a
+            # database opens. If a future SDK permits independent children,
+            # require that its daemon really survives client disconnection.
+            try:
+                async with connect():
+                    pass
+            except Exception:  # noqa: BLE001 — MCP wraps child exit in a task-group exception
+                assert not db.exists()
+                assert "Windows denied independent daemon startup" in (root / "shared-mcp.stderr.log").read_text()
+            else:
+                await asyncio.to_thread(health)
+                await asyncio.to_thread(stop)
+            await asyncio.to_thread(start_windows_owner)
         async with connect() as a:
             await call(a, "define_schema", {"node_tables": [{"name": "Memory", "primary_key": "id", "properties": [{"name": "body"}]}], "rel_tables": []})
             await call(a, "upsert_nodes", {"nodes": [{"label": "Memory", "key": "shared", "source": str(docs / "0.md"), "properties": {"body": "initial shared revision"}}]})
@@ -227,7 +266,10 @@ async def shared_workflow(root):
             assert json.loads(await call(a, "cypher_query", {"cypher": "MATCH (n:Memory) RETURN count(n)"}))["rows"] == [[20 * batches + 1]]
             await ready(a)
             first_health = await asyncio.to_thread(health)
+        assert (await asyncio.to_thread(health))["pid"] == first_health["pid"]
         await asyncio.to_thread(stop)
+        if sys.platform == "win32":
+            await asyncio.to_thread(start_windows_owner)
         async with connect() as session:
             assert json.loads(await call(session, "cypher_query", {"cypher": "MATCH (n:Memory) RETURN count(n)"}))["rows"] == [[20 * batches + 1]]
             assert json.loads(await call(session, "cypher_query", {"cypher": "MATCH (n:Document) RETURN count(n)"}))["rows"] == [[doc_count]]

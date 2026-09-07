@@ -892,9 +892,27 @@ def test_spawn_detaches_with_windows_creation_flags(tmp_path, monkeypatch):
     admin._spawn_server_process(tmp_path / "kb.lbdb", 41999)
 
     kwargs = calls[0][1]
-    assert kwargs["creationflags"] == 0x00000208
+    assert kwargs["creationflags"] == 0x01000208
     assert kwargs["stdin"] is admin.subprocess.DEVNULL
     assert "start_new_session" not in kwargs
+
+
+def test_windows_spawn_denial_never_retries_inside_client_job(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(admin.sys, "platform", "win32")
+
+    def denied(*args, **kwargs):
+        calls.append(kwargs)
+        error = OSError("Access is denied")
+        error.winerror = 5
+        raise error
+
+    monkeypatch.setattr(admin.subprocess, "Popen", denied)
+    with pytest.raises(admin.DaemonLifecycleError, match="separate terminal") as error:
+        admin._spawn_server_process(tmp_path / "project space.lbdb", 41999)
+    assert len(calls) == 1 and calls[0]["creationflags"] & 0x01000000
+    assert "serve --host=127.0.0.1 --port=41999 --with-mcp" in str(error.value)
+    assert not (tmp_path / "project space.lbdb").exists()
 
 
 def test_spawn_starts_child_reaper_for_long_lived_proxy_parent(tmp_path, monkeypatch):

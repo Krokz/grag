@@ -142,6 +142,13 @@ into the `ladybug.libs` directory next to the `ladybug` package in your Python
 `site-packages`. Tracked as an upstream ladybug packaging issue; this note goes
 away once their wheel bundles the DLLs.
 
+Some Windows agent harnesses put MCP child processes in a Job Object that kills
+them on disconnect. grag requires permission to start an independent shared
+daemon; if Windows denies it, grag refuses the unsafe startup and prints a
+`grag --db ... serve --with-mcp --port=...` command. Run that command in a separate
+terminal, keep it open, and reconnect your agents. They share that server, and
+disconnecting an agent leaves it running. Use `grag stop` for a clean shutdown.
+
 **From source** (for development). Build the UI **first** — `pip install` needs the
 built bundle at `src/grag/api/static` (the wheel's force-include; see `pyproject.toml`):
 

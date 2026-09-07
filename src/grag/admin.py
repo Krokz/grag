@@ -79,6 +79,9 @@ def open_daemon_log(db_path: Path) -> int:
         log_dir().mkdir(parents=True, exist_ok=True)
         path = log_path(db_path)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        # Windows children inherit the OS handle, not the CRT's O_APPEND
+        # behavior. Start that handle at EOF so a restart preserves old logs.
+        os.lseek(fd, 0, os.SEEK_END)
     except OSError:
         return subprocess.DEVNULL
     return fd
@@ -1072,17 +1075,35 @@ def _spawn_server_process(
     try:
         if sys.platform == "win32":
             # The authenticated HTTP control endpoint provides graceful
-            # shutdown, so the daemon can be fully detached from its console.
+            # shutdown. Console detachment alone does NOT leave a harness's
+            # kill-on-close Job Object: disconnecting its MCP proxy would hard
+            # kill this shared writer. Require breakaway; never retry unsafely
+            # inside the job if the host forbids an independent daemon.
             creationflags = getattr(
                 subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
-            ) | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-            process = subprocess.Popen(  # noqa: S603
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=log_fd,
-                stderr=log_fd,
-                creationflags=creationflags,
+            ) | getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
+                subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000
             )
+            try:
+                process = subprocess.Popen(  # noqa: S603
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_fd,
+                    stderr=log_fd,
+                    creationflags=creationflags,
+                )
+            except OSError as exc:
+                if getattr(exc, "winerror", None) != 5:
+                    raise
+                command = subprocess.list2cmdline(["grag", *argv[3:]])
+                raise DaemonLifecycleError(
+                    "Windows denied independent daemon startup. This harness may "
+                    "keep children in a Job Object that kills them on disconnect; "
+                    "grag will not start a shared database writer inside it. "
+                    f"In a separate terminal, run: {command} . Keep that terminal "
+                    "open, then reconnect the MCP client. An already running "
+                    "shared server can be used by multiple clients."
+                ) from exc
         else:
             process = subprocess.Popen(  # noqa: S603
                 argv,
