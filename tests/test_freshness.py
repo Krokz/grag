@@ -765,7 +765,9 @@ def test_rest_read_policies_and_metadata(tmp_path, path, body):
         svc.ingest_code(CodeIngestRequest(paths=[str(root)]))
         _write(root, "beta")
 
-        def read(mode, timeout=3000):
+        # Verify REST policy/metadata behavior, not native indexing speed on
+        # a busy CI runner. The failure case below keeps its explicit 50 ms.
+        def read(mode, timeout=30_000):
             policy = {"freshness": mode, "freshness_timeout_ms": timeout}
             return (
                 client.get(path, params=policy)
