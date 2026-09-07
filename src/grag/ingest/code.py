@@ -10,8 +10,9 @@ structural questions with cheap Cypher instead of retyping facts (like a
 module's version pin) from memory or a doc that can drift from the source.
 Source bodies stay out of the graph.
 
-Ids are stable and human-readable: a Repo id combines its directory name with
-a hash of its canonical path, a Module id is `<repo-id>:<relative/path>`, and a
+Ids are stable and human-readable: a new Repo id combines its directory name with
+a hash of its canonical path. Registered Repo IDs are reused after explicit
+relocation. A Module id is `<repo-id>:<relative/path>`, and a
 Class/Function id is `<module_id>#<qualname>` (qualname dotted for nesting,
 e.g. `ClassName.method`). Re-ingesting preserves unchanged nodes while pruning
 definitions and generated edges no longer present in successfully parsed or
@@ -43,6 +44,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from grag.code_state import (
+    INDEX_COLUMNS,
+    index_records,
+    record_generations,
+    scope_requests,
+    verify_ingest,
+)
 from grag.config import GragConfig
 from grag.core.engine import Engine
 from grag.core.errors import GragError
@@ -219,7 +227,8 @@ _UNSUPPORTED_CODE_SUFFIXES = frozenset({".m", ".mm", ".pl", ".pm", ".ex", ".exs"
 
 
 def _walk(
-    paths: list[Path], max_file_kb: int, warnings: list[str]
+    paths: list[Path], max_file_kb: int, warnings: list[str], *,
+    excluded: set[str] | None = None, errors: list[str] | None = None,
 ) -> Iterator[tuple[Path, Path]]:
     """Yield (repo_root, file) for every ingestable file under `paths`.
 
@@ -229,28 +238,38 @@ def _walk(
     warning. Traversal order is sorted, so ingestion is deterministic.
     """
     limit = max_file_kb * 1024
+
+    def failed(message: str) -> None:
+        warnings.append(message)
+        if errors is not None:
+            errors.append(message)
+
     for path in paths:
         if path.is_file():
             candidates = [(path.parent, path)]
         elif path.is_dir():
             candidates = []
-            for dirpath, dirnames, filenames in os.walk(path):
+            for dirpath, dirnames, filenames in os.walk(
+                path, onerror=lambda exc: failed(f"skipped directory {exc.filename}: {exc}")
+            ):
                 dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
                 candidates.extend(
                     (path, Path(dirpath) / name) for name in sorted(filenames)
                 )
         else:
-            warnings.append(f"skipped {path}: no such file or directory")
+            failed(f"skipped {path}: no such file or directory")
             continue
         for root, file in candidates:
-            if _skip_file(file.name):
+            if _skip_file(file.name) or file.suffix.lower() not in (*_PARSERS, *_UNSUPPORTED_CODE_SUFFIXES):
                 continue
             try:
                 size = file.stat().st_size
             except OSError as exc:
-                warnings.append(f"skipped {file}: could not stat ({exc})")
+                failed(f"skipped {file}: could not stat ({exc})")
                 continue
             if size > limit:
+                if excluded is not None and file.suffix.lower() in _PARSERS:
+                    excluded.add(str(root.resolve() / file.relative_to(root)))
                 warnings.append(
                     f"skipped {file}: {size // 1024} KB exceeds max_file_kb={max_file_kb}"
                 )
@@ -669,6 +688,10 @@ def _prune_code_edges(
 def _prune_legacy_repos(engine: Engine, repos: dict[str, UpsertNode]) -> int:
     pruned = 0
     for repo_id, repo in repos.items():
+        # A registered legacy index is an identity too. Never re-key its
+        # symbols just because today's default ID format differs.
+        if repo_id == repo.properties["name"]:
+            continue
         repo_root = Path(str(repo.properties["path"])).resolve()
         legacy_prefix = f"{repo.properties['name']}:"
         for label in ("Module", "Class", "Function"):
@@ -717,7 +740,7 @@ def _ensure_repo_staleness_columns(engine: Engine) -> None:
     define_schema never alters an existing table (if_not_exists skips it), so
     databases ingested before these columns existed need an explicit ADD.
     """
-    _ensure_columns(engine, "Repo", _REPO_STALENESS_COLUMNS)
+    _ensure_columns(engine, "Repo", (*_REPO_STALENESS_COLUMNS, *INDEX_COLUMNS))
     _ensure_columns(engine, "Module", (_INGEST_HASH_PROP,))
 
 
@@ -810,7 +833,17 @@ def ingest_code(
     batched upsert_nodes per label and all edges via one upsert_edges per rel
     type. Unreadable/unparseable/oversized files and unsupported code
     extensions are collected as warnings instead of failing the batch.
+    A per-engine lock serializes planning across synchronous and background
+    callers. Graph changes publish in one transaction after parsing, so a
+    failure preserves the previous complete index and is safe to retry.
     """
+    with engine.code_ingest_lock:
+        return _ingest_code(engine, config, req)
+
+
+def _ingest_code(
+    engine: Engine, config: GragConfig, req: CodeIngestRequest
+) -> CodeIngestResponse:
     define_schema(
         engine,
         config,
@@ -821,7 +854,10 @@ def ingest_code(
     _ensure_repo_staleness_columns(engine)
 
     warnings: list[str] = []
-    input_paths = [Path(p) for p in req.paths]
+    input_paths = [Path(p).expanduser() for p in req.paths]
+    from grag.code_state import registered_repo_ids
+
+    persisted_ids = registered_repo_ids(engine)
     roots: dict[str, Path] = {}
     directory_roots: set[Path] = set()
     for path in input_paths:
@@ -832,7 +868,7 @@ def ingest_code(
             root = path.resolve().parent
         else:
             continue
-        roots[_repo_id(root)] = root
+        roots[persisted_ids.get(str(root), _repo_id(root))] = root
     ingested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     repos: dict[str, UpsertNode] = {
         repo_id: UpsertNode(
@@ -848,6 +884,8 @@ def ingest_code(
         )
         for repo_id, root in roots.items()
     }
+    scopes = scope_requests(roots, input_paths, req, index_records(engine))
+    parsed_hashes: dict[str, str] = {}
     parsed_modules: list[_ParsedModule] = []
     successful_sources: set[str] = set()
     # Files whose fingerprint differs from the one recorded at their last
@@ -872,7 +910,7 @@ def ingest_code(
             if suffix in _UNSUPPORTED_CODE_SUFFIXES:
                 unsupported[suffix] = unsupported.get(suffix, 0) + 1
             continue
-        repo = _repo_id(root)
+        repo = persisted_ids.get(str(root), _repo_id(root))
         repo_name = root.name or "repo"
         try:
             raw = file.read_bytes()
@@ -883,6 +921,7 @@ def ingest_code(
             parsed_modules.append(parsed)
             key = str(file)
             successful_sources.add(key)
+            parsed_hashes[key] = hashlib.sha256(raw).hexdigest()
             digest = _ingest_hash(raw, calls=req.calls)
             if not req.incremental or stored_hashes.get(key) != digest:
                 changed_sources.add(key)
@@ -1030,64 +1069,74 @@ def ingest_code(
         "Function": {},
         "TerraformModuleCall": {},
     }
-    for label, nodes in nodes_by_label:
-        counts[label] = len(nodes)
-        to_write = list(nodes.values())
-        if label in desired_by_label_source:
-            for node in nodes.values():
-                source = str(node.source)
-                desired_by_label_source[label].setdefault(source, set()).add(
-                    str(node.key)
-                )
-            to_write = [n for n in to_write if str(n.source) in changed_sources]
-        if to_write:
-            summary = upsert_nodes(engine, config, UpsertNodesRequest(nodes=to_write))
+    verified = verify_ingest(
+        engine, roots, scopes, parsed_hashes,
+        {key: str(node.properties.get("git_commit", "")) for key, node in repos.items()},
+    )
+    for key, (_generation, error) in verified.items():
+        if error:
+            warnings.append(f"index freshness unverified for {roots[key]}: {error}")
+    with engine.write_transaction():
+        for label, nodes in nodes_by_label:
+            counts[label] = len(nodes)
+            to_write = list(nodes.values())
+            if label in desired_by_label_source:
+                for node in nodes.values():
+                    source = str(node.source)
+                    desired_by_label_source[label].setdefault(source, set()).add(
+                        str(node.key)
+                    )
+                to_write = [n for n in to_write if str(n.source) in changed_sources]
+            if to_write:
+                summary = upsert_nodes(engine, config, UpsertNodesRequest(nodes=to_write))
+                warnings.extend(summary.warnings)
+
+        # Pruning and edge writes are scoped to changed + deleted files. An edge
+        # is (re)written when its own file changed OR its target's file changed:
+        # a symbol added to B that an unchanged A already referenced gains its
+        # edge without rewriting all of A.
+        authoritative_sources = changed_sources | _missing_module_sources(
+            engine, directory_roots
+        )
+        module_source = {mid: str(pm.module.source) for mid, pm in by_module.items()}
+
+        def owning_source(key: str) -> str | None:
+            return module_source.get(key.split("#", 1)[0])
+
+        live_edges = [
+            edge
+            for edge in edges.values()
+            if str(edge.source) in changed_sources
+            or owning_source(str(edge.to_key)) in changed_sources
+        ]
+        desired_edges = {
+            (edge.type, str(edge.from_key), str(edge.to_key), str(edge.source))
+            for edge in edges.values()
+        }
+        edges_pruned = _prune_code_edges(
+            engine,
+            authoritative_sources=authoritative_sources,
+            desired=desired_edges,
+        )
+        nodes_pruned = _prune_code_nodes(
+            engine,
+            authoritative_sources=authoritative_sources,
+            desired_by_label_source=desired_by_label_source,
+        )
+        nodes_pruned += _prune_legacy_repos(engine, repos)
+
+        edges_by_type: dict[str, list[UpsertEdge]] = {}
+        for edge in live_edges:
+            edges_by_type.setdefault(edge.type, []).append(edge)
+        edge_count = 0
+        for rel_type in sorted(edges_by_type):
+            batch = edges_by_type[rel_type]
+            edge_count += len(batch)
+            summary = upsert_edges(engine, config, UpsertEdgesRequest(edges=batch))
             warnings.extend(summary.warnings)
-    _record_ingest_hashes(engine, new_hashes)
 
-    # Pruning and edge writes are scoped to changed + deleted files. An edge
-    # is (re)written when its own file changed OR its target's file changed:
-    # a symbol added to B that an unchanged A already referenced gains its
-    # edge without rewriting all of A.
-    authoritative_sources = changed_sources | _missing_module_sources(
-        engine, directory_roots
-    )
-    module_source = {mid: str(pm.module.source) for mid, pm in by_module.items()}
-
-    def owning_source(key: str) -> str | None:
-        return module_source.get(key.split("#", 1)[0])
-
-    live_edges = [
-        edge
-        for edge in edges.values()
-        if str(edge.source) in changed_sources
-        or owning_source(str(edge.to_key)) in changed_sources
-    ]
-    desired_edges = {
-        (edge.type, str(edge.from_key), str(edge.to_key), str(edge.source))
-        for edge in edges.values()
-    }
-    edges_pruned = _prune_code_edges(
-        engine,
-        authoritative_sources=authoritative_sources,
-        desired=desired_edges,
-    )
-    nodes_pruned = _prune_code_nodes(
-        engine,
-        authoritative_sources=authoritative_sources,
-        desired_by_label_source=desired_by_label_source,
-    )
-    nodes_pruned += _prune_legacy_repos(engine, repos)
-
-    edges_by_type: dict[str, list[UpsertEdge]] = {}
-    for edge in live_edges:
-        edges_by_type.setdefault(edge.type, []).append(edge)
-    edge_count = 0
-    for rel_type in sorted(edges_by_type):
-        batch = edges_by_type[rel_type]
-        edge_count += len(batch)
-        summary = upsert_edges(engine, config, UpsertEdgesRequest(edges=batch))
-        warnings.extend(summary.warnings)
+        _record_ingest_hashes(engine, new_hashes)
+        record_generations(engine, scopes, verified)
 
     if config.embedder is not None:
         from grag.embedworker import notify_embed_worker

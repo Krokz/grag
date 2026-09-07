@@ -33,6 +33,8 @@ Verified LadybugDB 0.19.1 behaviors relied on here:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import threading
 import weakref
@@ -46,6 +48,7 @@ from grag.core.errors import ConfigurationError, GragError, SchemaError
 from grag.core.ident import validate_identifier
 from grag.core.types import (
     EMB_CODE_PROP,
+    EMB_FINGERPRINT_PROP,
     EMB_MAGNITUDE_PROP,
     EMB_MODEL_PROP,
     EMBEDDING_PROP,
@@ -226,7 +229,7 @@ def get_embedder(config: GragConfig) -> Embedder | None:
     cfg = config.embedder
     if cfg is None:
         return None
-    key = (cfg.provider, cfg.model, cfg.dim, cfg.base_url, cfg.api_key_env)
+    key = (cfg.provider, cfg.model, cfg.dim, cfg.base_url, cfg.api_key_env, cfg.threads)
     if key not in _EMBEDDER_CACHE:
         if cfg.provider == "fastembed":
             _EMBEDDER_CACHE[key] = FastembedEmbedder(cfg)
@@ -279,7 +282,9 @@ def split_magnitude(v: np.ndarray) -> tuple[float, np.ndarray]:
     return r, v / r
 
 
-def encode_direction(u: np.ndarray, codec: str) -> bytes:
+def encode_direction(
+    u: np.ndarray, codec: str, *, polar_bits: float | None = None
+) -> bytes:
     """Encode a unit direction vector.
 
     Blob layouts:
@@ -310,7 +315,8 @@ def encode_direction(u: np.ndarray, codec: str) -> bytes:
                 f"The 'polar' codec encodes unit directions; got ||u||={norm:.6f}.",
                 hint="Encode split_magnitude(v)[1] (the unit direction), not the raw vector.",
             )
-        return polar.encode(polar.cartesian_to_angles(u), u.size, _polar_bits_per_dim())
+        bits = _polar_bits_per_dim() if polar_bits is None else polar_bits
+        return polar.encode(polar.cartesian_to_angles(u), u.size, bits)
     return np.packbits((u >= 0).astype(np.uint8)).tobytes()
 
 
@@ -340,7 +346,9 @@ def decode_direction(blob: bytes, codec: str, dim: int) -> np.ndarray:
     return v / n if n else v
 
 
-def candidate_scores(codes: list[bytes], codec: str, u_query: np.ndarray) -> np.ndarray:
+def candidate_scores(
+    codes: list[bytes], codec: str, u_query: np.ndarray, *, polar_bits: float | None = None
+) -> np.ndarray:
     """Approximate cosine scores of encoded directions against a unit query,
     without fully decoding: int8 uses an int dot rescaled by the blob header,
     binary uses hamming distance mapped through cos(pi * hamming_ratio),
@@ -364,7 +372,8 @@ def candidate_scores(codes: list[bytes], codec: str, u_query: np.ndarray) -> np.
         return (Q.astype(np.float32) @ uq) * (scales / 127.0)
     if codec == "polar":
         M = polar.reconstruct_many(
-            [bytes(c) for c in codes], dim, _polar_bits_per_dim()
+            [bytes(c) for c in codes], dim,
+            _polar_bits_per_dim() if polar_bits is None else polar_bits,
         )
         return (M @ uq).astype(np.float32)
     nbytes = (dim + 7) // 8
@@ -470,8 +479,8 @@ def candidate_tables(
     (unknown labels skipped) or all searchable tables."""
     if labels:
         existing = set(node_tables(engine))
-        return [lbl for lbl in labels if lbl in existing]
-    return searchable_node_tables(engine, config)
+        return sorted(set(labels) & existing)
+    return sorted(set(searchable_node_tables(engine, config)))
 
 
 def string_props(engine: Engine, table: str) -> list[str]:
@@ -539,8 +548,13 @@ CODE_COLUMN_KINDS: dict[tuple[str, str], str] = {}
 
 
 def ensure_vector_storage(engine: Engine, config: GragConfig, table: str) -> None:
-    """Lazily ALTER TABLE ADD the four vector columns when embeddings are
+    """Lazily ALTER TABLE ADD the vector columns when embeddings are
     configured. Idempotent; no-op when config.embedder is None."""
+    with engine.serialized_writes():
+        _ensure_vector_storage(engine, config, table)
+
+
+def _ensure_vector_storage(engine: Engine, config: GragConfig, table: str) -> None:
     cfg = config.embedder
     if cfg is None:
         return
@@ -576,6 +590,68 @@ def ensure_vector_storage(engine: Engine, config: GragConfig, table: str) -> Non
         CODE_COLUMN_KINDS[(str(config.db_path), table)] = kind
     if EMB_MODEL_PROP not in existing:
         engine.execute_write(f"ALTER TABLE {_ident(table)} ADD {EMB_MODEL_PROP} STRING")
+    if EMB_FINGERPRINT_PROP not in existing:
+        engine.execute_write(f"ALTER TABLE {_ident(table)} ADD {EMB_FINGERPRINT_PROP} STRING")
+
+
+# Accessed under the engine's writer lock. The token fences in-flight work
+# when a table switches configuration (including A -> B -> A) or is reindexed.
+_EMBED_CONFIGS: weakref.WeakKeyDictionary[Engine, dict[str, tuple[str, object]]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _embedding_fingerprint(
+    config: GragConfig, table: str, props: dict[str, str], *, polar_bits: float | None = None
+) -> str:
+    cfg = config.embedder
+    if cfg is None:
+        return ""
+    identity = {
+        "version": 1,
+        "provider": cfg.provider,
+        "model": cfg.model,
+        "dim": cfg.dim,
+        "base_url": (cfg.base_url or "").rstrip("/"),
+        "api_key_env": cfg.api_key_env,
+        "prefixes": resolve_prefixes(cfg),
+        "text_props": embed_text_props(cfg, table, props),
+        "codec": config.vector_codec,
+        "polar_bits": (
+            _polar_bits_per_dim() if polar_bits is None else polar_bits
+        ) if config.vector_codec == "polar" else None,
+    }
+    # No secret values or input text in durable metadata.
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def _pending_predicate() -> str:
+    return (
+        f"(n.{EMBEDDING_PROP} IS NULL OR n.{EMB_FINGERPRINT_PROP} IS NULL "
+        f"OR n.{EMB_FINGERPRINT_PROP} <> $fingerprint)"
+    )
+
+
+def _prepare_embeddings(
+    engine: Engine, config: GragConfig, table: str, *, polar_bits: float | None = None
+) -> tuple[dict[str, str], str, object]:
+    with engine.serialized_writes():
+        ensure_vector_storage(engine, config, table)
+        props = table_properties(engine, table)
+        fingerprint = _embedding_fingerprint(config, table, props, polar_bits=polar_bits)
+        states = _EMBED_CONFIGS.setdefault(engine, {})
+        state = states.get(table)
+        if state is None or state[0] != fingerprint:
+            # Legacy vectors have no fingerprint and must be rebuilt too.
+            # Clear incompatible vectors before HNSW/codec candidate selection.
+            sets = ", ".join(f"n.{p} = NULL" for p in sorted(VECTOR_PROPS))
+            engine.execute_write(
+                f"MATCH (n:{_ident(table)}) WHERE {_pending_predicate()} SET {sets}",
+                {"fingerprint": fingerprint},
+            )
+            state = (fingerprint, object())
+            states[table] = state
+        return props, fingerprint, state[1]
 
 
 def embed_pending_nodes(
@@ -585,28 +661,33 @@ def embed_pending_nodes(
     batch_size: int = 128,
     max_nodes: int | None = None,
 ) -> int:
-    """Embed nodes in `table` whose embedding is NULL.
+    """Embed missing or incompatible vectors, committing only unchanged inputs.
 
     Embed text is the concatenation of the node's STRING properties
     (excluding reserved/vector columns). Each node gets the full fp32 vector,
     its polar magnitude, the encoded direction (config.vector_codec) and the
-    embedder model id. Returns the number of nodes embedded.
+    embedder model id and configuration fingerprint. Returns successful
+    commits only. Inference never holds the database writer lock.
 
-    max_nodes caps the total embedded in this call (the search path uses it
-    to bound request latency); None drains the whole backlog (ingest paths).
+    max_nodes caps attempted nodes (including discarded results). A batch
+    with conflicts ends this pass so a continuously edited row cannot spin
+    forever; a later worker pass/search retries the remaining backlog.
     """
     if max_nodes is not None and max_nodes <= 0:
         return 0
-    cfg = config.embedder
+    snapshot = config.model_copy(deep=True)
+    cfg = snapshot.embedder
     if cfg is None:
         return 0
-    embedder = get_embedder(config)
+    embedder = get_embedder(snapshot)
     if embedder is None:
         return 0
-    _check_codec(config.vector_codec)
+    _check_codec(snapshot.vector_codec)
     _ident(table)
-    ensure_vector_storage(engine, config, table)
-    props = table_properties(engine, table)
+    polar_bits = _polar_bits_per_dim() if snapshot.vector_codec == "polar" else None
+    props, fingerprint, generation = _prepare_embeddings(
+        engine, snapshot, table, polar_bits=polar_bits
+    )
     pk = pk_map_with_fallback(engine).get(table)
     if not pk:
         raise SchemaError(
@@ -626,8 +707,9 @@ def embed_pending_nodes(
         if max_nodes is not None:
             limit = min(limit, max_nodes - total)
         res = engine.execute(
-            f"MATCH (n:{_ident(table)}) WHERE n.{EMBEDDING_PROP} IS NULL "
-            f"RETURN {projection} LIMIT {limit}"
+            f"MATCH (n:{_ident(table)}) WHERE {_pending_predicate()} "
+            f"RETURN {projection} LIMIT {limit}",
+            {"fingerprint": fingerprint},
         )
         if not res.rows:
             return total
@@ -642,7 +724,8 @@ def embed_pending_nodes(
                 f"Embedder returned {len(vectors)} vectors for {len(keys)} texts.",
                 hint="Embedder.embed must return one vector per input text.",
             )
-        for key, vec in zip(keys, vectors, strict=True):
+        committed = 0
+        for row, key, vec in zip(res.rows, keys, vectors, strict=True):
             v = np.asarray(vec, dtype=np.float32).ravel()
             if v.size != cfg.dim:
                 raise ConfigurationError(
@@ -650,23 +733,40 @@ def embed_pending_nodes(
                     hint="Set GRAG_EMBED_DIM to the model's output dimension.",
                 )
             r, u = split_magnitude(v)
-            blob = encode_direction(u, config.vector_codec)
+            blob = encode_direction(u, snapshot.vector_codec, polar_bits=polar_bits)
             code_param: Any = (
                 [int(b) for b in blob] if code_kind.startswith("UINT8") else bytes(blob)
             )
-            engine.execute_write(
-                f"MATCH (n:{_ident(table)} {{{_ident(pk)}: $key}}) SET "
-                f"n.{EMBEDDING_PROP} = $emb, n.{EMB_MAGNITUDE_PROP} = $r, "
-                f"n.{EMB_CODE_PROP} = $code, n.{EMB_MODEL_PROP} = $model",
-                {
-                    "key": key,
-                    "emb": [float(x) for x in v],
-                    "r": float(r),
-                    "code": code_param,
-                    "model": embedder.model_id,
-                },
-            )
-        total += len(keys)
+            params: dict[str, Any] = {
+                "key": key, "emb": [float(x) for x in v], "r": float(r),
+                "code": code_param, "model": embedder.model_id, "fingerprint": fingerprint,
+            }
+            checks = [_pending_predicate()]
+            for i, (prop, value) in enumerate(zip(text_props, row[1:], strict=True)):
+                if value is None:
+                    checks.append(f"n.{_ident(prop)} IS NULL")
+                else:
+                    checks.append(f"n.{_ident(prop)} = $input{i}")
+                    params[f"input{i}"] = value
+            with engine.serialized_writes():
+                # A newer configuration/reindex or a schema/input policy edit
+                # invalidates this batch, even if its inference just succeeded.
+                state = _EMBED_CONFIGS.get(engine, {}).get(table)
+                current = _embedding_fingerprint(config, table, table_properties(engine, table))
+                if state != (fingerprint, generation) or current != fingerprint:
+                    return total + committed
+                written = engine.execute_write(
+                    f"MATCH (n:{_ident(table)} {{{_ident(pk)}: $key}}) "
+                    f"WHERE {' AND '.join(checks)} SET "
+                    f"n.{EMBEDDING_PROP} = $emb, n.{EMB_MAGNITUDE_PROP} = $r, "
+                    f"n.{EMB_CODE_PROP} = $code, n.{EMB_MODEL_PROP} = $model, "
+                    f"n.{EMB_FINGERPRINT_PROP} = $fingerprint RETURN n.{_ident(pk)}",
+                    params,
+                )
+                committed += len(written.rows)
+        total += committed
+        if committed < len(keys):
+            return total
         if max_nodes is not None and total >= max_nodes:
             return total
 
@@ -676,10 +776,14 @@ def pending_embedding_count(engine: Engine, config: GragConfig, table: str) -> i
     configured or the table has no vector columns yet."""
     if config.embedder is None:
         return 0
-    if EMBEDDING_PROP not in table_properties(engine, table):
+    props = table_properties(engine, table)
+    if EMBEDDING_PROP not in props:
         return 0
+    predicate = _pending_predicate() if EMB_FINGERPRINT_PROP in props else "true"
     res = engine.execute(
-        f"MATCH (n:{_ident(table)}) WHERE n.{EMBEDDING_PROP} IS NULL RETURN count(n)"
+        f"MATCH (n:{_ident(table)}) WHERE {predicate} RETURN count(n)",
+        {"fingerprint": _embedding_fingerprint(config, table, props)}
+        if EMB_FINGERPRINT_PROP in props else None,
     )
     return int(res.rows[0][0]) if res.rows else 0
 
@@ -726,12 +830,14 @@ def reindex_embeddings(
     props = table_properties(engine, table)
     to_clear = [
         p
-        for p in (EMBEDDING_PROP, EMB_MAGNITUDE_PROP, EMB_CODE_PROP, EMB_MODEL_PROP)
+        for p in sorted(VECTOR_PROPS)
         if p in props
     ]
     if to_clear:
         sets = ", ".join(f"n.{_ident(p)} = NULL" for p in to_clear)
-        engine.execute_write(f"MATCH (n:{_ident(table)}) SET {sets}")
+        with engine.serialized_writes():
+            _EMBED_CONFIGS.get(engine, {}).pop(table, None)
+            engine.execute_write(f"MATCH (n:{_ident(table)}) SET {sets}")
     n = embed_pending_nodes(
         engine, config, table, batch_size=batch_size, max_nodes=None
     )
@@ -751,17 +857,24 @@ def vector_candidates(
     query_text: str,
     labels: list[str] | None,
     top_k: int,
+    *,
+    per_table: bool = False,
 ) -> list[ScoredNode]:
     """Cosine-similarity candidates for query_text. Returns [] when no
     embedder is configured (FTS-only mode). Lazily provisions vector columns
     and embeds pending nodes on candidate tables — capped at
     config.max_embed_per_search per call so a first query after a large
     ingest doesn't embed the whole table on the request thread (the backlog
-    drains over subsequent searches; see SearchResponse.pending_embeddings)."""
-    cfg = config.embedder
+    drains over subsequent searches; see SearchResponse.pending_embeddings).
+
+    per_table keeps each table's shortlist for later fusion/diversity instead
+    of trimming away underrepresented labels at the global top_k boundary.
+    """
+    snapshot = config.model_copy(deep=True)
+    cfg = snapshot.embedder
     if cfg is None:
         return []
-    embedder = get_embedder(config)
+    embedder = get_embedder(snapshot)
     if embedder is None:
         return []
     top_k = max(1, int(top_k))
@@ -771,8 +884,12 @@ def vector_candidates(
     from grag.embedworker import attached_worker
 
     worker = attached_worker(engine)
+    polar_bits = _polar_bits_per_dim() if snapshot.vector_codec == "polar" else None
+    fingerprints: dict[str, str] = {}
     for table in tables:
-        ensure_vector_storage(engine, config, table)
+        _, fingerprints[table], _ = _prepare_embeddings(
+            engine, snapshot, table, polar_bits=polar_bits
+        )
         if worker is None:
             embed_pending_nodes(
                 engine, config, table, max_nodes=config.max_embed_per_search
@@ -793,18 +910,32 @@ def vector_candidates(
     r_q, u_q = split_magnitude(q)
     if r_q == 0.0:
         return []
+    if any(
+        _embedding_fingerprint(config, table, table_properties(engine, table)) != fingerprints[table]
+        for table in tables
+    ):
+        return []
     pk = pk_map_with_fallback(engine)
     results: list[ScoredNode] = []
     for table in tables:
-        if config.vector_codec == "fp32":
-            results.extend(_fp32_candidates(engine, table, q, top_k, pk))
+        fingerprint = fingerprints[table]
+        if snapshot.vector_codec == "fp32":
+            results.extend(_fp32_candidates(engine, table, q, top_k, pk, fingerprint))
         else:
-            _check_codec(config.vector_codec)
+            _check_codec(snapshot.vector_codec)
             results.extend(
-                _codec_candidates(engine, table, config.vector_codec, u_q, q, top_k, pk)
+                _codec_candidates(
+                    engine, table, snapshot.vector_codec, u_q, q, top_k, pk, fingerprint,
+                    polar_bits=polar_bits,
+                )
             )
-    results.sort(key=lambda s: s.score, reverse=True)
-    return results[:top_k]
+    if any(
+        _embedding_fingerprint(config, table, table_properties(engine, table)) != fingerprints[table]
+        for table in tables
+    ):
+        return []  # query inference used a configuration that has since changed
+    results.sort(key=lambda s: (-s.score, s.node.id))
+    return results if per_table else results[:top_k]
 
 
 def _cosine_scores(E: np.ndarray, q: np.ndarray) -> np.ndarray:
@@ -830,7 +961,7 @@ def _query_vector_index(
 
 
 def _fp32_candidates(
-    engine: Engine, table: str, q: np.ndarray, top_k: int, pk: dict[str, str]
+    engine: Engine, table: str, q: np.ndarray, top_k: int, pk: dict[str, str], fingerprint: str
 ) -> list[ScoredNode]:
     try:
         _ensure_extension(engine, "VECTOR")
@@ -842,9 +973,14 @@ def _fp32_candidates(
             # reader may hold a stale catalog; the write connection is authoritative
             res = _query_vector_index(engine, table, index, q, top_k, write=True)
     except GragError:
-        return _exact_scan(engine, table, q, top_k, pk)
+        return _exact_scan(engine, table, q, top_k, pk, fingerprint)
     out = []
     for node_val, dist in res.rows:
+        if node_val.get(EMB_FINGERPRINT_PROP) != fingerprint:
+            # Another configuration may have committed during query inference.
+            # Filter before ranking so incompatible HNSW hits cannot crowd out
+            # the still-current subset of a partially rebuilt table.
+            return _exact_scan(engine, table, q, top_k, pk, fingerprint)
         score = max(-1.0, min(1.0, 1.0 - float(dist)))
         out.append(
             ScoredNode(
@@ -855,20 +991,22 @@ def _fp32_candidates(
 
 
 def _fetch_nodes_by_keys(
-    engine: Engine, table: str, pk_prop: str, keys: list[Any]
+    engine: Engine, table: str, pk_prop: str, keys: list[Any], fingerprint: str
 ) -> list[dict]:
     """Full node rows for a primary-key shortlist (the exact-rescore pass)."""
     if not keys:
         return []
     res = engine.execute(
-        f"MATCH (n:{_ident(table)}) WHERE n.{_ident(pk_prop)} IN $keys RETURN n",
-        {"keys": list(keys)},
+        f"MATCH (n:{_ident(table)}) WHERE n.{_ident(pk_prop)} IN $keys "
+        f"AND n.{EMB_FINGERPRINT_PROP} = $fingerprint "
+        f"AND n.{EMBEDDING_PROP} IS NOT NULL RETURN n",
+        {"keys": list(keys), "fingerprint": fingerprint},
     )
     return [row[0] for row in res.rows]
 
 
 def _exact_scan(
-    engine: Engine, table: str, q: np.ndarray, top_k: int, pk: dict[str, str]
+    engine: Engine, table: str, q: np.ndarray, top_k: int, pk: dict[str, str], fingerprint: str
 ) -> list[ScoredNode]:
     """HNSW-unavailable fallback: exact cosine over the table, two-phase.
 
@@ -881,7 +1019,9 @@ def _exact_scan(
         return []
     res = engine.execute(
         f"MATCH (n:{_ident(table)}) WHERE n.{EMBEDDING_PROP} IS NOT NULL "
-        f"RETURN n.{_ident(pk_prop)}, n.{EMBEDDING_PROP}"
+        f"AND n.{EMB_FINGERPRINT_PROP} = $fingerprint "
+        f"RETURN n.{_ident(pk_prop)}, n.{EMBEDDING_PROP}",
+        {"fingerprint": fingerprint},
     )
     keys, vecs = [], []
     for key, emb in res.rows:
@@ -893,22 +1033,16 @@ def _exact_scan(
         return []
     scores = _cosine_scores(np.stack(vecs), q)
     order = np.argsort(-scores)[:top_k]
-    by_key = {
-        nv.get(pk_prop): nv
-        for nv in _fetch_nodes_by_keys(engine, table, pk_prop, [keys[i] for i in order])
-    }
-    out = []
-    for i in order:
-        nv = by_key.get(keys[i])
-        if nv is not None:
-            out.append(
-                ScoredNode(
-                    node=node_record_from_value(nv, pk),
-                    score=float(scores[i]),
-                    match="vector",
-                )
-            )
-    return out
+    nodes = _fetch_nodes_by_keys(engine, table, pk_prop, [keys[i] for i in order], fingerprint)
+    if not nodes:
+        return []
+    # The shortlist may have been edited/re-embedded since the first scan.
+    # Score the same row version whose text will be returned to the caller.
+    exact = _cosine_scores(np.asarray([nv[EMBEDDING_PROP] for nv in nodes]), q)
+    return [
+        ScoredNode(node=node_record_from_value(nodes[i], pk), score=float(exact[i]), match="vector")
+        for i in np.argsort(-exact)
+    ]
 
 
 def _codec_candidates(
@@ -919,6 +1053,9 @@ def _codec_candidates(
     q: np.ndarray,
     top_k: int,
     pk: dict[str, str],
+    fingerprint: str,
+    *,
+    polar_bits: float | None = None,
 ) -> list[ScoredNode]:
     """Approximate scoring over stored direction codes, then exact rescore of
     the top 4*top_k against the fp32 embeddings.
@@ -932,7 +1069,9 @@ def _codec_candidates(
         return []  # see _exact_scan
     res = engine.execute(
         f"MATCH (n:{_ident(table)}) WHERE n.{EMB_CODE_PROP} IS NOT NULL "
-        f"RETURN n.{_ident(pk_prop)}, n.{EMB_CODE_PROP}"
+        f"AND n.{EMB_FINGERPRINT_PROP} = $fingerprint "
+        f"RETURN n.{_ident(pk_prop)}, n.{EMB_CODE_PROP}",
+        {"fingerprint": fingerprint},
     )
     keys, codes = [], []
     for key, raw_code in res.rows:
@@ -942,10 +1081,10 @@ def _codec_candidates(
         codes.append(bytes(raw_code))
     if not codes:
         return []
-    approx = candidate_scores(codes, codec, u_q)
+    approx = candidate_scores(codes, codec, u_q, polar_bits=polar_bits)
     pre = np.argsort(-approx)[: 4 * top_k]
     nodes, vecs = [], []
-    for nv in _fetch_nodes_by_keys(engine, table, pk_prop, [keys[i] for i in pre]):
+    for nv in _fetch_nodes_by_keys(engine, table, pk_prop, [keys[i] for i in pre], fingerprint):
         emb = nv.get(EMBEDDING_PROP)
         if emb is None:
             continue
