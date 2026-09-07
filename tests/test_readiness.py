@@ -127,7 +127,7 @@ def test_preparation_requires_the_real_parser_path_not_a_download_counter(monkey
     def parser(name):
         calls.append(name)
         raise RuntimeError("grammar download did not produce a usable parser")
-    fake = SimpleNamespace(download=lambda names: len(names), get_parser=parser,
+    fake = SimpleNamespace(download=len, get_parser=parser,
                            downloaded_languages=lambda: [], cache_dir=lambda: "/fixture-cache")
     monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", fake)
     result = readiness._worker({"kind": "grammar:.rs", "prepare": True})
