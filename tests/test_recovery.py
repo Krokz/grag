@@ -162,8 +162,17 @@ def test_explicit_partial_replay_uses_fresh_copy_and_records_uncertain_loss(cfg,
     assert (bundle / "strict" / "recovered.lbdb").exists()  # retained failed attempt
     assert _files(cfg) == before
     _check_snapshot(bundle, before)
-    expected = ["base", "late", "other"] if damage == "after_commits" else ["base", "other"]
-    assert [key for key, _ in _contents(report["recovered_db"])] == expected
+    contents = dict(_contents(report["recovered_db"]))
+    checkpointed = {"base": "checkpointed decision", "other": "supporting evidence"}
+    committed = {**checkpointed, "late": "late committed decision"}
+    if damage == "after_commits":
+        assert contents == committed
+    else:
+        # A damaged prefix does not guarantee a particular amount of loss:
+        # native partial replay can still retain the later committed row.
+        # Keep checking checkpointed data, exact values and no invented rows;
+        # the manifest must report uncertainty even when every row survived.
+        assert checkpointed.items() <= contents.items() <= committed.items()
 
 
 def test_snapshot_can_be_restored_independently(cfg, tmp_path):

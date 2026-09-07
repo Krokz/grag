@@ -75,14 +75,22 @@ def test_failed_generation_stays_pending_then_retries_without_another_edit(
     _write(root, "beta")
     real = svc.ingest_code
     attempts = []
-    svc.refresher.retry_base = svc.refresher.retry_max = 0.2
+    # Control retry eligibility explicitly. A loaded CI runner need not finish
+    # the first native scan inside the old 80 ms failure-observation window.
+    svc.refresher.retry_base = svc.refresher.retry_max = 60
 
     def fail(req):
         attempts.append(req)
         raise GragError("temporary disk failure")
 
     monkeypatch.setattr(svc, "ingest_code", fail)
-    report = svc.read_freshness(ReadPolicy(freshness="wait", freshness_timeout_ms=80))
+    svc.read_freshness(ReadPolicy(freshness="wait", freshness_timeout_ms=0))
+    with svc.refresher._condition:
+        assert svc.refresher._condition.wait_for(
+            lambda: not svc.refresher._checking and svc.refresher.last_error is not None,
+            timeout=5,
+        )
+    report = svc.read_freshness(ReadPolicy(freshness="wait", freshness_timeout_ms=0))
     assert report.status == "error" and report.timed_out
     state = _root_status(svc, root)
     assert state["successful_generation"] == before
@@ -93,6 +101,8 @@ def test_failed_generation_stays_pending_then_retries_without_another_edit(
     assert len(attempts) == 1
     assert _names(svc) == {"alpha"}
     monkeypatch.setattr(svc, "ingest_code", real)
+    with svc.refresher._condition:
+        svc.refresher._roots[str(root)].retry_at = 0.0
     assert _fresh(svc).status == "fresh"
     state = _root_status(svc, root)
     assert state["successful_generation"] == state["observed_generation"] != before
