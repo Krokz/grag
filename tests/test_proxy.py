@@ -260,6 +260,58 @@ def test_auto_serve_attaches_to_matching_concurrent_start(
     assert "another process is starting" in capsys.readouterr().err
 
 
+def test_auto_serve_reports_child_exit_without_waiting_for_timeout(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    db = tmp_path / "broken.lbdb"
+    probes = []
+
+    async def probe(url):
+        probes.append(url)
+        return False, None, None, None
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(proxy, "_probe_server", probe)
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        admin, "_spawn_server_process",
+        lambda *args, **kwargs: SimpleNamespace(poll=lambda: 1, returncode=1),
+    )
+    with pytest.raises(SystemExit, match="exited during startup") as error:
+        asyncio.run(proxy._ensure_server(db, 8471, "http://127.0.0.1:8471/api/health"))
+    assert str(admin.log_path(db)) in str(error.value)
+    assert len(probes) == 2
+
+
+def test_auto_serve_waits_for_concurrent_winner_after_child_exit(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(admin, "GRAG_HOME", tmp_path / ".grag")
+    db = tmp_path / "project.lbdb"
+    assert admin.write_pidfile(db, 8471, with_mcp=True)
+    probes = iter([
+        (False, None, None, None),
+        (False, None, None, None),
+        (True, database_identity(db), True, "/mcp"),
+    ])
+
+    async def probe(_url):
+        return next(probes)
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(proxy, "_probe_server", probe)
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        admin, "_spawn_server_process",
+        lambda *args, **kwargs: SimpleNamespace(poll=lambda: 1, returncode=1),
+    )
+    assert asyncio.run(proxy._ensure_server(db, 8471, "http://127.0.0.1:8471/api/health")) == "/mcp"
+
+
 def test_cli_passes_api_token_to_auto_serve(monkeypatch):
     calls = []
 

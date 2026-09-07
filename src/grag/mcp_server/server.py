@@ -807,9 +807,13 @@ def create_server(
     # Handles for lifecycle management (run closes the registry) and for
     # tests. grag_service is the default service for back-compat; in multi-db
     # mode with no determinable default there isn't one, so it is None.
+    # Single-db clients must not complete initialization over a broken database.
     try:
         server.grag_service = registry.get()  # type: ignore[attr-defined]
     except GragError:
+        if config.db_dir is None:
+            registry.close()
+            raise
         server.grag_service = None  # type: ignore[attr-defined]
     server.grag_registry = registry  # type: ignore[attr-defined]
     return server
