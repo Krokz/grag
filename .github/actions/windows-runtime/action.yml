@@ -1,0 +1,23 @@
+name: Build owned Windows runtime
+description: Compile the OpenSSL runtime included in grag's Windows wheel
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      id: runtime
+      with:
+        path: src/grag/_runtime
+        key: openssl-win-x64-${{ hashFiles('scripts/build_windows_runtime.py') }}
+    - if: steps.runtime.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw 'MSVC x64 tools not found' }
+        $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+        cmd /c "`"$vcvars`" >nul && set" | ForEach-Object {
+          if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') }
+        }
+        $env:PATH = "C:\Strawberry\perl\bin;$env:PATH"
+        python scripts/build_windows_runtime.py
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

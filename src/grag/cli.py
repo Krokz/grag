@@ -104,6 +104,13 @@ def _config(args: argparse.Namespace) -> GragConfig:
 def main(argv: list[str] | None = None) -> int:
     import grag
 
+    # Human output should remain usable on legacy Windows/redirected streams.
+    # Keep the selected encoding and escape only unrepresentable characters.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(errors="backslashreplace")
+
     parser = argparse.ArgumentParser(
         prog="grag", description="LLM-first graph knowledgebase"
     )
@@ -285,10 +292,13 @@ def main(argv: list[str] | None = None) -> int:
         help="also signal live legacy/unverified pidfile entries (unsafe; use only "
         "when you have independently confirmed the recorded PID)",
     )
-    sub.add_parser(
+    doctor = sub.add_parser(
         "doctor",
-        help="diagnose the install: extras, embedder, server, code-index staleness",
+        help="check actual offline install readiness and server status",
     )
+    doctor.add_argument("--prepare", action="store_true", help="allow missing extension/model/grammar downloads; never opens the project DB")
+    doctor.add_argument("--json", action="store_true", help="machine-readable install checks (exit 1 if required capabilities fail)")
+    doctor.add_argument("--timeout", type=float, help="seconds per isolated probe (default 30; 300 with --prepare)")
 
     export = sub.add_parser(
         "export", help="dump the database as portable JSONL (schema + nodes + edges)"
@@ -619,10 +629,26 @@ def main(argv: list[str] | None = None) -> int:
         if not outcome.stopped:
             return 1
     elif args.cmd == "doctor":
-        from grag.admin import doctor_lines
+        import json
+        import math
 
-        print("\n".join(doctor_lines(cfg)))
+        from grag.admin import doctor_lines
+        from grag.readiness import check_install, install_ready
+
+        if args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout <= 0):
+            parser.error("doctor --timeout must be a finite positive number")
+        checks = check_install(cfg, prepare=args.prepare, timeout=args.timeout)
+        ready = install_ready(checks)
+        if args.json:
+            print(json.dumps({"ready": ready, "checks": checks}))
+        else:
+            print("\n".join(doctor_lines(cfg, checks=checks)))
+        return 0 if ready else 1
     elif args.cmd == "export":
+        # JSONL is a portable UTF-8 data stream, including supplementary Unicode.
+        reconfigure = getattr(sys.stdout, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
         from grag.admin import find_server
         from grag.core.engine import Engine
         from grag.transfer import export_to

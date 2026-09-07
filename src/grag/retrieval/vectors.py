@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import threading
 import weakref
@@ -70,7 +71,7 @@ class Embedder(Protocol):
 class FastembedEmbedder:
     """Local embeddings via fastembed (optional dependency grag[embed-local])."""
 
-    def __init__(self, cfg: EmbedderConfig):
+    def __init__(self, cfg: EmbedderConfig, *, local_files_only: bool = False):
         try:
             from fastembed import TextEmbedding
         except ImportError as exc:
@@ -85,11 +86,32 @@ class FastembedEmbedder:
         # the conservative setting. enable_cpu_mem_arena=False: the arena
         # allocator was another source of instability on macOS.
         threads = cfg.threads if cfg.threads and cfg.threads > 0 else min(4, os.cpu_count() or 1)
-        self._model = TextEmbedding(
-            model_name=cfg.model,
-            threads=threads,
-            enable_cpu_mem_arena=False,
-        )
+        options: dict[str, Any] = {"model_name": cfg.model, "threads": threads, "enable_cpu_mem_arena": False}
+        offline = local_files_only or os.environ.get("HF_HUB_OFFLINE", "").upper() in {"1", "TRUE", "YES", "ON"}
+        try:
+            # A cached model must work without contacting a model hub. Missing
+            # files are distinguished from a usable cache by an actual load.
+            self._model = TextEmbedding(**options, local_files_only=True)
+        except Exception as exc:
+            if offline:
+                raise ConfigurationError(
+                    f"Local embedding model '{cfg.model}' is not usable offline: {exc}",
+                    hint="Run grag doctor --prepare while online with the same model/cache settings. "
+                    "Check FASTEMBED_CACHE_PATH permissions; an existing directory is not proof of a complete model.",
+                ) from exc
+            logging.getLogger("grag").warning(
+                "Preparing local embedding model %s: cached load failed; downloading missing assets "
+                "may take minutes. Cache: %s. FTS remains available without embeddings.",
+                cfg.model, os.environ.get("FASTEMBED_CACHE_PATH", "FastEmbed default temp cache"),
+            )
+            try:
+                self._model = TextEmbedding(**options)
+            except Exception as download_exc:
+                raise ConfigurationError(
+                    f"Could not prepare local embedding model '{cfg.model}': {download_exc}",
+                    hint="Check network access to the model host and FASTEMBED_CACHE_PATH permissions; "
+                    "run grag doctor --prepare to verify loading and inference. Disable GRAG_EMBED_PROVIDER for FTS-only use.",
+                ) from download_exc
         self.dim = cfg.dim
         self.model_id = cfg.model
         # Serialize Python-level calls: one inference at a time per process

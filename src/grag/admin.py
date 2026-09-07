@@ -1323,37 +1323,17 @@ def _repo_rows_http(
         return None
 
 
-def doctor_lines(config: GragConfig) -> list[str]:
+def doctor_lines(config: GragConfig, *, checks: list[dict] | None = None) -> list[str]:
     """Full install/runtime health report."""
     import grag
 
     lines = [f"grag {grag.__version__} — python {sys.version.split()[0]} on {sys.platform}"]
     lines.append("")
-    lines.append("install:")
-    lines.append(
-        _check(
-            "core engine (ladybug)",
-            _module_available("ladybug"),
-            "installed",
-            "MISSING — reinstall gragdb",
-        )
-    )
-    lines.append(
-        _check(
-            "local embeddings (fastembed)",
-            _module_available("fastembed"),
-            "installed — semantic search available",
-            "not installed — pip install 'gragdb[embed-local]' for semantic search",
-        )
-    )
-    lines.append(
-        _check(
-            "tree-sitter code parsing",
-            _module_available("tree_sitter"),
-            "installed — ts/js/cs/tf/go parsing available",
-            "not installed — pip install 'gragdb[code]' for non-Python repos",
-        )
-    )
+    from grag.readiness import check_install
+
+    lines.append("install readiness (isolated probes; no user database opened):")
+    for check in check_install(config) if checks is None else checks:
+        lines.append(f"  [{check['status']}] {check['label']}: {check['detail']}")
     env = {k: v for k, v in os.environ.items() if k.startswith("GRAG_")}
     if env:
         lines.append("")
@@ -1365,17 +1345,12 @@ def doctor_lines(config: GragConfig) -> list[str]:
     lines.extend(status_lines(config))
 
     # Code-index staleness: prefer the running server (no lock contention);
-    # fall back to opening the db directly only when no server holds it.
+    # Offline diagnostics must never replay/checkpoint a user's database, even
+    # read-only native opens may replay a WAL or crash on corrupt files.
     repo_rows: list[dict] | None = None
     info = find_server(server_target(config))
     if info is not None:
         repo_rows = _repo_rows_http(info.port, info.host, config.api_token)
-    elif (
-        config.db_dir is None
-        and str(config.db_path) != ":memory:"
-        and config.db_path.resolve().exists()
-    ):
-        repo_rows = _repo_rows_engine(config)
     if repo_rows:
         lines.append("")
         lines.append("code index:")

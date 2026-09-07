@@ -10,6 +10,7 @@ build/
 node_modules/
 ui/dist/
 src/grag/api/static/
+src/grag/_runtime/
 .pytest_cache/
 site/
 

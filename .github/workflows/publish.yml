@@ -10,6 +10,9 @@ permissions:
   contents: read
 
 jobs:
+  clean-wheels:
+    uses: ./.github/workflows/wheels.yml
+
   build-ui:
     name: Build web UI
     runs-on: ubuntu-latest
@@ -198,7 +201,7 @@ jobs:
   publish:
     name: Publish to PyPI (OIDC)
     runs-on: ubuntu-latest
-    needs: [build-dist]
+    needs: [build-dist, clean-wheels]
     environment:
       name: pypi
       url: https://pypi.org/p/gragdb
@@ -209,6 +212,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: grag-dist
+          path: dist/
+
+      - name: Download verified Windows wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: grag-wheel-windows-latest
           path: dist/
 
       - name: Publish to PyPI

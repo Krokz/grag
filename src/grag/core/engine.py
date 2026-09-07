@@ -42,6 +42,7 @@ from grag.core.types import (
     Subgraph,
     make_node_id,
 )
+from grag.native import prepare_native_runtime
 
 logger = logging.getLogger("grag")
 
@@ -129,6 +130,7 @@ class Engine:
         """Strict replay on normal opens; lossy replay is confined to recovery copies."""
         from grag.recovery import is_replay_error
 
+        prepare_native_runtime()
         kwargs: dict[str, Any] = {"buffer_pool_size": config.buffer_pool_size}
         if self.read_only:
             kwargs["read_only"] = True
@@ -552,16 +554,23 @@ class Engine:
     # -- extensions --------------------------------------------------------------
 
     def load_extension(self, name: str) -> None:
-        """INSTALL (best effort) + LOAD an extension such as FTS or VECTOR."""
-        with suppress(CypherError):
-            # already installed, or a build with bundled extensions
-            self.execute_write(f"INSTALL {name}")
+        """Use a cached extension first; preserve first-use installation errors."""
+        validate_identifier(name)
         try:
+            self.execute_write(f"LOAD EXTENSION {name}")
+            return
+        except CypherError:
+            pass
+        logger.warning("Preparing %s extension: first use may download from extension.ladybugdb.com to ~/.lbdb/extension.", name)
+        try:
+            self.execute_write(f"INSTALL {name}")
             self.execute_write(f"LOAD EXTENSION {name}")
         except CypherError as exc:
             raise GragError(
                 f"Extension '{name}' is unavailable: {exc.message}",
-                hint="First INSTALL requires network access; subsequent runs load from disk.",
+                hint="First INSTALL requires network access to extension.ladybugdb.com and "
+                "a writable ~/.lbdb/extension cache. Run grag doctor --prepare while online, "
+                "then grag doctor to verify cached assets. Keep the database and sidecars.",
             ) from exc
 
     # -- internals -----------------------------------------------------------------

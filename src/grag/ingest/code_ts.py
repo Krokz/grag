@@ -32,6 +32,7 @@ struct/interface Class node by that type name (see `_walk_go`).
 from __future__ import annotations
 
 import importlib
+import logging
 import posixpath
 import re
 from collections.abc import Iterator
@@ -98,13 +99,29 @@ def _build_parser(suffix: str) -> Any:
     mod_name, factory, _ = _SUFFIX_LANGUAGES[suffix]
     if mod_name == "pack":
         try:
-            from tree_sitter_language_pack import get_parser
+            from tree_sitter_language_pack import (
+                cache_dir,
+                downloaded_languages,
+                get_parser,
+            )
         except ImportError as exc:
             raise ConfigurationError(
                 f"cannot parse '{suffix}' files: the tree-sitter code extra is not installed",
                 hint=_INSTALL_HINT,
             ) from exc
-        return get_parser(factory)  # type: ignore[arg-type]
+        try:
+            if factory not in downloaded_languages():
+                logging.getLogger("grag").warning(
+                    "Preparing %s code grammar: first use may download to %s.", factory, cache_dir(),
+                )
+            return get_parser(factory)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise ConfigurationError(
+                f"Cannot load '{factory}' grammar for '{suffix}' files: {exc}",
+                hint="Check the tree-sitter-language-pack cache permissions and network access. "
+                "Run grag doctor --prepare while online, then grag doctor to verify offline parsing. "
+                "A cached library can still be incompatible or damaged.",
+            ) from exc
     try:
         from tree_sitter import Language, Parser
 

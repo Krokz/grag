@@ -38,6 +38,10 @@ grag = "grag.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/grag"]
+exclude = ["src/grag/_runtime"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 # The built web UI lives in src/grag/api/static but is gitignored (it's a build
 # artifact of ui/), so the default wheel omits it. Force-include it so a
@@ -57,7 +61,7 @@ packages = ["src/grag"]
 # what *requires* it for distribution builds.
 ignore-vcs = true
 # Keep local UI dependencies out while still including the built web bundle.
-exclude = ["/ui/node_modules"]
+exclude = ["/ui/node_modules", "/src/grag/_runtime"]
 include = [
     "src/grag",
     "src/grag/api/static",
@@ -65,6 +69,8 @@ include = [
     "README.md",
     "LICENSE",
     "pyproject.toml",
+    "hatch_build.py",
+    "scripts/build_windows_runtime.py",
 ]
 
 [tool.pytest.ini_options]
