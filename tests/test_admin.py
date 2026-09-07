@@ -501,6 +501,24 @@ def test_start_daemon_reports_child_exit_without_waiting_for_timeout(tmp_path, m
     assert waits == [0.5]
 
 
+def test_start_daemon_waits_for_concurrent_winner_after_child_exit(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    cfg = GragConfig(db_path=tmp_path / "project.lbdb")
+    responses = iter([
+        None, None, admin.ServerInfo(port=42000, version="0.7.1", matches_db=True, pid=os.getpid()),
+    ])
+
+    def spawn(*args, **kwargs):
+        assert admin.write_pidfile(cfg.db_path, 42000, with_mcp=True)
+        return SimpleNamespace(poll=lambda: 1, returncode=1)
+
+    monkeypatch.setattr(admin, "find_server", lambda target: next(responses))
+    monkeypatch.setattr(admin, "_spawn_server_process", spawn)
+    monkeypatch.setattr(admin.time, "sleep", lambda seconds: None)
+    assert "Started server" in admin.start_daemon(cfg, port=42000)
+
+
 def test_list_servers_lists_live_and_reaps_stale(tmp_path, monkeypatch):
     live = tmp_path / "live.lbdb"
     dead = tmp_path / "dead.lbdb"

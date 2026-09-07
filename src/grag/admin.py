@@ -991,6 +991,26 @@ def _prepare_server_target(target: Path) -> None:
         )
 
 
+def _matching_live_registration(target: Path, port: int) -> bool:
+    """Whether another process is already starting this exact server target."""
+    registration = read_pidfile(target)
+    if registration is None:
+        return False
+    expected = ":memory:" if str(target) == ":memory:" else str(target.resolve())
+    pid = registration.get("pid")
+    registered_port = registration.get("port")
+    return (
+        registration.get("db") == expected
+        and isinstance(pid, int)
+        and not isinstance(pid, bool)
+        and pid > 0
+        and isinstance(registered_port, int)
+        and not isinstance(registered_port, bool)
+        and registered_port == port
+        and _pid_alive(pid)
+    )
+
+
 def _start_process_reaper(process: object) -> None:
     """Reap a spawned daemon if this parent stays alive (notably MCP proxy).
 
@@ -1127,6 +1147,10 @@ def start_daemon(
                 f"  log: {log_path(target)}"
             )
         if process is not None and process.poll() is not None:
+            # A concurrent launcher may win the registration after both
+            # parents spawn. Keep waiting for that matching live server.
+            if _matching_live_registration(target, port):
+                continue
             raise DaemonLifecycleError(
                 f"Server exited during startup (exit code {process.returncode}). "
                 f"Check the log for the database or configuration error: {log_path(target)}"

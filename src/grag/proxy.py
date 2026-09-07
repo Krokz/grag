@@ -41,6 +41,7 @@ from urllib.parse import urlsplit
 
 import anyio
 
+from grag.admin import _matching_live_registration
 from grag.config import database_identity
 
 _MCP_DEFAULT_TIMEOUT = 30.0
@@ -153,28 +154,6 @@ def _validated_mcp_path(
     return mcp_path.rstrip("/")
 
 
-def _matching_live_registration(db_path: Path, port: int) -> bool:
-    """Whether another process is already starting this exact proxy target."""
-    from grag.admin import _pid_alive, read_pidfile
-
-    registration = read_pidfile(db_path)
-    if registration is None:
-        return False
-    expected_db = ":memory:" if str(db_path) == ":memory:" else str(db_path.resolve())
-    pid = registration.get("pid")
-    registered_port = registration.get("port")
-    return (
-        registration.get("db") == expected_db
-        and isinstance(pid, int)
-        and not isinstance(pid, bool)
-        and pid > 0
-        and isinstance(registered_port, int)
-        and not isinstance(registered_port, bool)
-        and registered_port == port
-        and _pid_alive(pid)
-    )
-
-
 def _handle_probe(
     *,
     reachable: bool,
@@ -246,6 +225,8 @@ async def _ensure_server(db_path: Path, port: int, url: str) -> str:
         if ready_path is not None:
             return ready_path
         if process is not None and process.poll() is not None:
+            if _matching_live_registration(db_path, port):
+                continue
             sys.exit(
                 f"grag proxy: server exited during startup (exit code {process.returncode}). "
                 f"Check the log for the database or configuration error: {log_path(db_path)}"
