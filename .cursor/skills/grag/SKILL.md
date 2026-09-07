@@ -60,12 +60,32 @@ hallucination.
   `Decision`/`Concept` `-[:DOCUMENTS|MENTIONS]->` a `Function`/`Module`), so retrieval
   returns docs *and* the implementation in one cited subgraph.
 
-**The code graph stays fresh on its own.** A serving grag fingerprints every indexed
-checkout (HEAD plus dirty/untracked files) and re-ingests it incrementally in the
-background when something moved, so you do **not** re-run `ingest_code` after each
-edit or commit. When a `search_knowledge` footer says `"index":"refreshing"`, the
-answer reflects the graph from before the latest change — ask again in a moment for
-anything that depends on it. `ingest_code` is for repos that were never indexed.
+**Check code freshness before relying on recent edits.** Serving reads trigger
+background verification of registered source contents and Git HEAD when present;
+plain folders also work. Saved paths, `calls`, `max_file_kb`, and `incremental`
+options survive refreshes and restarts. You usually do not need to re-ingest after
+each edit, but a later read is not guaranteed to be fresh: failures stay visible
+and retry with backoff on reads; an idle server does not poll.
+
+All four graph-read MCP tools accept `freshness` and `freshness_timeout_ms`:
+
+- `allow_stale` (default) reads the current graph without waiting for verification.
+- `wait` waits up to the deadline, then permits unverified evidence with
+  `freshness.timed_out: true`.
+- `require` rejects the read unless verification succeeds. Use it when an answer
+  depends on current code. The default deadline is 5000 ms; the range is 0–60000.
+
+Inspect `freshness.status` in the response/footer. Only `fresh` verifies the
+registered code scope at `checked_at`; `checking`, `refreshing`, `stale`, `error`,
+`unknown`, and `disabled` do not. This does not certify authored memories,
+embeddings, or source edits made after the check. A timeout bounds the verification
+wait, not graph-query execution. Inspect `GET /api/index/status` for root errors,
+saved options, generations, and retry delays. Legacy indexes report `unknown`
+until an explicit `ingest_code` with the intended paths/options enrolls them;
+never guess that a file-only scope meant its entire parent directory. Missing or
+moved paths require diagnosis and reconciliation, not deletion of the database.
+Direct Python services must call `enable_auto_refresh()` to enable verification;
+`require` fails if checking is disabled.
 
 If grag is genuinely unavailable (no server, no DB), say so and proceed without it —
 don't stall.
@@ -87,11 +107,39 @@ don't stall.
 
 ## How to talk to it
 
+**Use the checkout's saved database.** Local `grag init` records its selection in
+Git-ignored `.grag/project.json`. CLI commands discover it from subdirectories;
+new worktrees/checkouts get separate databases even when folder names match.
+Explicit `--db`/`--db-dir` wins over environment selectors, which win over the
+mapping. Without a mapping, unambiguous project Claude/Cursor registrations are
+respected, then the resolved project root's `knowledge.lbdb` is the fallback.
+Python `GragConfig` still takes an explicit path/environment selection.
+To share memory intentionally, use `grag --db /path/to/shared.lbdb init` in each
+checkout and connect to one server. Do not copy the mapping between worktrees.
+
+**After moving a checkout**, stop its server and disconnect auto-starting clients,
+then use `grag relocate /old/root /new/root --dry-run` to inspect the changes and
+the same command without `--dry-run` to apply. Older installations can select the
+existing database with global `--db`. Relocation changes roots, provenance paths,
+saved code scope, and local Claude/Cursor launch configuration while retaining
+graph IDs, memory text, and relationships. It never moves or creates a database.
+If no database is present, only a matching checkout mapping can be reconciled;
+the missing database is reported. A copied folder uses `init` for a new identity.
+
+Graph updates are transactional; client files use init's checked writes/backups.
+If publication fails after graph commit, rerun the same relocation to finish
+configuration. Restart clients afterward and verify code freshness. Legacy code
+indexes still need explicit indexing options if none were recorded. User-scope
+registrations need `init --client <client>`; arbitrary installation discovery and
+linked skill repair are separate. Existing documents remain available, but later
+document re-ingestion can produce new IDs after a move; document synchronization
+does not yet preserve their identity across relocation.
+
 Pick the first surface that is available, in this order:
 
 1. **MCP tools** — if the `grag` MCP server is configured, the 10 tools appear directly.
 2. **REST** — if `grag serve` is running (default `http://127.0.0.1:8471`):
-   `POST /api/{query,search,context,ingest,ingest/code}`, `GET /api/{schema,graph/sample,health}`,
+   `POST /api/{query,search,context,ingest,ingest/code}`, `GET /api/{schema,graph/sample,index/status,health}`,
    `POST /api/{schema/define,nodes/upsert,edges/upsert}`.
 3. **Python** — `from grag.service import GragService` with `GragConfig(db_path=...)`.
    Methods mirror the tools exactly.
@@ -100,37 +148,41 @@ If none are running and a `.lbdb` exists, start one:
 `GRAG_EMBED_PROVIDER=fastembed grag --db <file> serve --with-mcp` (UI + REST + MCP, with semantic search)
 or `grag --db <file> serve` (UI + REST only, FTS-only search).
 
-## If grag stops responding (it heals itself — just retry)
+## If grag stops responding
 
-A tool error like "connection refused" or "did not become ready" means the
-server crashed or was never started — **not** that your query was wrong. The
-MCP proxy supervises the server: it detects a dead upstream, restarts the
-daemon, and rebuilds the session in-band. **Wait a few seconds and retry the
-same tool call once** — that is the entire recovery procedure for the common
-case. A crash never loses committed data (the WAL rolls back to the last
-checkpoint at worst). If the server was stopped **on purpose** (`grag stop`),
-the proxy respects that and exits instead of restarting it — reconnect the
-MCP server or `grag --db <file> start` to resume.
+A connection or readiness error does not establish the cause. If the MCP proxy
+reports a dead upstream, wait a few seconds and retry the tool once. If the server
+was deliberately stopped, reconnect MCP or use `grag --db <file> start` to resume.
 
-Only if retries keep failing for more than ~30 seconds, recover with the CLI
-using the same `--db` path that `grag init` wrote into the MCP config:
+For repeated failure, use the exact database path in the client MCP registration:
 
-1. `grag --db <file> status` — is a server registered, is its pid alive, which port?
-2. `grag --db <file> restart` — detached daemon; then retry the tool once.
-3. Still failing? Read the daemon log `~/.grag/logs/<name>-<id>.log` (its path
-   is also printed by `grag start`) and act on the actual error:
-   - "Could not set lock" → another process owns the `.lbdb` (single-writer).
-     Use the running server; never start a second writer.
-   - "Corrupted wal file" → the previous process was killed mid-write. Delete
-     `<file>.wal` (rolls back to the last checkpoint — committed data is safe)
-     and start again.
-   - "port ... serving a different database" → `grag stop` that server, or pick
-     another `--port`.
-4. If the server is healthy but the MCP session stays broken, fall back to REST
-   with curl (`POST http://127.0.0.1:<port>/api/search` etc. mirror the tools)
-   and ask the user to reconnect the MCP server in their client.
-5. Only if all of that fails: tell the user what you tried and show the log
-   excerpt. Never silently retry-loop.
+1. Run `grag --db <file> status` and inspect the reported daemon log. Confirm the
+   database, process, and port before restarting anything.
+2. Act on the actual error:
+   - A lock error means another process owns the database. Use that server or
+     stop the correct owner before opening the file elsewhere.
+   - A missing path after a folder move calls for checking the launch command,
+     indexed checkout roots, and database location. Do not recreate or delete
+     an unfamiliar database merely because the working directory changed.
+   - A WAL/shadow replay error requires offline recovery. Stop clients/servers
+     and pause any supervisor that would reopen this database. Run
+     `grag --db <file> recover`. This preserves the database and its sidecars
+     with checksums, attempts strict replay on a copy, and prints a manifest
+     plus the verified copy's path. The original remains in place.
+   - If strict replay fails, `recover --allow-data-loss` permits partial replay
+     on a fresh copy. Committed writes may be lost; the amount is unknown.
+     Use this option only when the user has authorized potentially lossy
+     recovery. Review important memories before adopting the recovered path.
+     Keep the preserved files even if recovery fails. Never delete a WAL or
+     shadow file as a repair step: committed data may depend on it.
+   - A port serving another database calls for correcting this client's target
+     or choosing an unused port; do not stop an unrelated server.
+3. When the database opens normally, `grag reindex` can rebuild embeddings.
+   It cannot repair a database that fails to open. Ordinary starts never
+   perform lossy recovery, including with legacy `GRAG_WAL_AUTO_RECOVER=1`.
+4. If the server is healthy but the MCP session is broken, REST can provide
+   access while the user reconnects MCP. For unresolved failures, report the
+   exact error and attempted steps; do not silently retry-loop.
 
 ## The 10 tools
 
@@ -138,13 +190,71 @@ using the same `--db` path that `grag init` wrote into the MCP config:
 |---|---|
 | `describe_schema` | **Call first**, before writing any Cypher. Returns tables, properties, row counts, sample keys as prompt-shaped text. Prevents hallucinated labels. |
 | `define_schema` | Create node/rel tables. Design the graph for the domain — but reuse first: near-duplicate names (case/plural/punctuation of an existing table) are refused with the existing name in the hint; `allow_similar=true` only for a genuinely different concept. |
-| `upsert_nodes` / `upsert_edges` | Idempotent MERGE writes; `_source`/`_created_at` added automatically. |
+| `upsert_nodes` / `upsert_edges` | Atomic MERGE batches; `upsert_nodes` can include `edges`. Optional retry IDs and revision guards; provenance is automatic. |
 | `cypher_query` | Read-only Cypher. Write keywords (CREATE/MERGE/SET/DELETE/...) are rejected — use the upsert tools for writes. |
 | `search_knowledge` | Hybrid BM25 + vector seeds, RRF fusion, **per-label diversity cap**, k-hop expansion, token-budgeted cited context. The main RAG entry point. |
-| `get_context` | Re-pack chosen node ids (from a prior search) into a fresh token budget. |
+| `get_context` | Re-pack chosen node ids; page a long STRING with `text_property`. |
 | `ingest_code` | Index a repo's code STRUCTURE (Python, TS/JS/Vue, C#, Terraform, Go, Bash, Java, Kotlin, Rust, C/C++, Ruby, PHP, Swift, Lua, Scala, SQL): Repo/Module/Class/Function/TerraformModuleCall nodes + CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Structure only — never source bodies. |
 | `ingest_docs` | Index Markdown/text files on the server as a graph: `Document -> Section` from the heading hierarchy (`SUBSECTION_OF`, `NEXT_SECTION`), body chunks `IN_SECTION`, and `MENTIONS_FUNCTION/CLASS/MODULE` edges for backtick-mentioned code symbols. Run `ingest_code` first so those resolve. Use for specs and design docs. |
 | `job_status` | Poll a background ingest (`ingest_code` / `ingest_docs` with `background=true`) by id — use background mode for large trees so the call returns immediately. |
+
+**Save related nodes and edges in one `upsert_nodes(nodes, edges=...)` call.**
+Both upsert tools are atomic; an error saves none of that call's graph changes.
+Edge endpoints can be existing nodes or nodes included in the combined call.
+Schema definition stays separate. Always check `warnings`: undeclared, reserved,
+or mismatched properties are skipped; invalid keys or unknown request fields are
+errors. Put primary keys in `key`, never `properties`. `null` clears a property.
+
+For a write whose response might be lost, supply a unique `operation_id` (1-128
+characters). Retry the exact same payload and ID. A committed retry returns its
+original result with `replayed=true` and does not undo later edits. A changed
+payload with the same ID conflicts; a new intended edit needs a new ID. Receipts
+survive restarts in this database file and do not expire automatically. JSONL
+export/import does not preserve receipts; treat an imported graph as a new retry
+target. Operation IDs are optional for ordinary writes.
+
+Before a competing edit, use `cypher_query` to return the whole node (`RETURN n`)
+or relationship (`RETURN a,r,b`), then pass its `_revision` as `expected_revision`
+on the upsert item. Use `expected_revision="absent"` for create-only writes.
+All guards check the state before the batch writes; any conflict rejects it all.
+REST returns 409 and a conflict code; MCP includes `CODE: revision_conflict` or
+`CODE: operation_id_conflict`. Read current evidence and reconcile before retrying.
+Guarded/retryable writes include a `revisions` map; replayed revisions describe
+the original commit. These are content/provenance tokens, not history counters;
+identical content can produce the same token again. `_revision` is computed in
+whole-entity query results, not a stored Cypher column. Search output stays compact.
+
+Re-ingesting documents replaces their generated links atomically. Relationships
+you create or update with `upsert_edges` remain authored and are preserved.
+Check ingestion `warnings`: obsolete sections/chunks with remaining authored or
+unknown links are retained and may describe an earlier revision. Legacy links
+without ownership metadata are preserved for explicit review; do not assume
+re-ingestion removed them. New ingests track ownership automatically.
+
+## Read complete evidence
+
+`search_knowledge` and `get_context` both return a JSON footer after `---` in MCP.
+Check `truncated`, `omitted_nodes`, `omitted_edges`, `omitted_properties`, and
+`expansion_limited` before treating the context as complete. Packing retains
+whole values; a missing property may simply have exceeded the budget. The
+structured graph and seeds contain only packed records/properties. Expand the
+budget, reduce hops, or retrieve a specific value before drawing a conclusion
+that depends on missing evidence. Search still covers only its requested seeds,
+hops, and candidate limits, even when `truncated` is false.
+
+For a long STRING, call `get_context` with exactly one canonical node id,
+`text_property="body"` (or the actual STRING property from `describe_schema`),
+and `text_offset=0`. Page mode skips graph expansion. Read the exact property
+slice and the `text_page` footer; continue with `text_offset=next_offset` and
+`text_sha256=sha256` until `next_offset` is null. If the text changed, discard
+earlier slices and restart at offset 0 without a hash. The last page may still
+say `truncated=true` because it is only a suffix of the value.
+
+`token_budget` is at least 256 (default 2000). It bounds the larger of the
+complete compact JSON response and the MCP context plus footer, using
+`ceil(UTF-8 bytes / 4)` as an estimate, not a model-specific tokenizer count.
+`response_token_estimate` measures that payload; `token_estimate` measures only
+the context text. Protocol envelopes and client-added formatting are excluded.
 
 ## Session memory: what to record, and how to pick it up next time
 
@@ -177,7 +287,8 @@ duplicates. **Session end:** mark finished Tasks done, leave open Questions open
 
 1. **Index first**: call `ingest_code` on the repo path(s) BEFORE reading files.
    Re-running is incremental (only changed files are rewritten) and prunes removed
-   files/symbols/edges; a serving grag does this by itself when the checkout moves.
+   files/symbols/edges; a serving grag refreshes registered paths after source edits.
+   Folder moves require explicit relocation as described above.
 2. **Ask structural questions with `cypher_query`** over the code tables:
    - what imports X: `MATCH (m:Module)-[:IMPORTS]->(x:Module) WHERE x.path = '<path>' RETURN m.id`
    - what calls Y: `MATCH (f:Function)-[:CALLS]->(y:Function) WHERE y.path = '<path>' AND y.name = '<name>' RETURN f.id`
@@ -242,6 +353,13 @@ states verbatim, `ingest_code` the repo and `cypher_query` it instead.
   mounts the MCP endpoint (`/mcp`) on the REST/UI server — UI + REST + MCP share one
   registry and one write conn, so the UI sees writes as they land. Otherwise use
   separate files.
+- **Shutdown:** new work is refused and queued jobs become `cancelled`; active
+  ingests, verification, requests and embedding drain before the database closes.
+  The server gives them a 10-second grace period, then reports any pending drain
+  and retains the engine until that work exits. A stuck Python/native call can
+  keep the process alive. If stop reports that it has not exited, inspect the
+  daemon log and retained registration; a timeout does not mean it stopped.
+  Resubmit cancelled jobs after restart. Job records are process-local.
 - **FTS index is built lazily** on first search of a table (a write-path cost). Warm it
   with one search before timing latency.
 - **Extensions are preloaded at engine startup.** A table with an FTS or HNSW index
@@ -294,7 +412,10 @@ GRAG_EMBED_PROVIDER=fastembed grag --db knowledge.lbdb serve
   once; `pending_embeddings` in the search footer shrinks on its own). The embedding
   text is the node's prose STRING props — `meta`, `path`, `heading_path`, `language`
   and git fields are left out — and queries/documents get the model family's retrieval
-  prefixes automatically. After changing model or text policy: `grag reindex`.
+  prefixes automatically. Model, prefix, text-policy, endpoint, and codec changes
+  make old vectors pending for automatic rebuilding; legacy vectors rebuild once.
+  `grag reindex` forces a rebuild (also use it when a model changes behind the same
+  name/endpoint). A dimension mismatch requires explicit storage migration.
 - Alternative: `GRAG_EMBED_PROVIDER=remote` + `GRAG_EMBED_BASE_URL` (+`GRAG_EMBED_API_KEY_ENV`)
   for any OpenAI-compatible endpoint — but that sends data off-box. Not the default.
 - Do **not** reach for PyTorch/sentence-transformers (2.5GB, against the lightness

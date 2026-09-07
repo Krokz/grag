@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useResizable } from './hooks';
 import { api, hasToken, setDb, setToken, setUnauthorizedHandler, toFailure } from './api';
 import type {
@@ -21,11 +21,17 @@ import {
 import { Console, type ApplyMode, type ResultView } from './components/Console';
 import { SearchBar, SearchPanel } from './components/SearchBar';
 import { Inspector } from './components/Inspector';
+import { setFreshnessMode } from './api';
+import type { FreshnessMode, FreshnessReport } from './types';
 
 const EMPTY_GRAPH: Subgraph = { nodes: [], edges: [] };
 
 export default function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [readMode, setReadMode] = useState<FreshnessMode>('allow_stale');
+  const [lastFreshness, setLastFreshness] = useState<FreshnessReport | null>(null);
+  const [readNotice, setReadNotice] = useState('');
+  const readEpoch = useRef(0);
   const [dbs, setDbs] = useState<string[]>([]);
   const [db, setDbState] = useState<string | null>(null);
   const [dbsLoaded, setDbsLoaded] = useState(false);
@@ -62,38 +68,58 @@ export default function App() {
   const [consoleHeight, consoleHandleDown] = useResizable(260, 100, 560, 'y', true);
 
   const loadSchema = useCallback(async () => {
+    const epoch = readEpoch.current;
     setSchemaLoading(true);
     try {
-      setSchema(await api.schema());
-    } catch {
+      const doc = await api.schema();
+      if (epoch !== readEpoch.current) return;
+      setSchema(doc);
+      setLastFreshness(doc.freshness);
+      setReadNotice('');
+    } catch (e) {
+      if (epoch !== readEpoch.current) return;
       setSchema(null);
+      setLastFreshness(null);
+      setReadNotice(toFailure(e).message);
     } finally {
-      setSchemaLoading(false);
+      if (epoch === readEpoch.current) setSchemaLoading(false);
     }
   }, []);
 
   const loadSample = useCallback(async () => {
+    const epoch = readEpoch.current;
     try {
       const sample = await api.sample(200);
+      if (epoch !== readEpoch.current) return;
+      setLastFreshness(sample.freshness);
+      setReadNotice('');
       setStats(sample.stats);
       setGraph((g) => mergeSubgraphs(g, sample.subgraph));
-    } catch {
-      // health banner already signals connectivity problems
+    } catch (e) {
+      if (epoch !== readEpoch.current) return;
+      setLastFreshness(null);
+      setReadNotice(toFailure(e).message);
     }
   }, []);
 
   // Reset to the initial unfiltered overview: fresh sample, replacing the canvas.
   const resetView = useCallback(async () => {
+    const epoch = readEpoch.current;
     setLabelFilter(null);
     setFilter('');
     setSelectedId(null);
     setFocusRequest(null);
     try {
       const sample = await api.sample(200);
+      if (epoch !== readEpoch.current) return;
+      setLastFreshness(sample.freshness);
+      setReadNotice('');
       setStats(sample.stats);
       setGraph(sample.subgraph); // replace, not merge — back to the start view
-    } catch {
-      // connectivity already surfaced via the health banner
+    } catch (e) {
+      if (epoch !== readEpoch.current) return;
+      setLastFreshness(null);
+      setReadNotice(toFailure(e).message);
     }
   }, []);
 
@@ -123,9 +149,12 @@ export default function App() {
     setDbState(name);
   }, []);
 
-  // (Re)load everything db-scoped; on a db switch the old canvas is stale.
+  // Discard in-flight reads from the previous database or freshness policy.
   useEffect(() => {
     if (!dbsLoaded) return;
+    readEpoch.current += 1;
+    setRunning(false);
+    setSearching(false);
     setGraph(EMPTY_GRAPH);
     setStats(null);
     setSeeds(new Map());
@@ -135,19 +164,25 @@ export default function App() {
     setQueryError(null);
     setSearchResult(null);
     setSearchError(null);
+    setLastFreshness(null);
+    setReadNotice('');
     setLabelFilter(null);
     setFilter('');
     loadSchema();
     loadSample();
-  }, [dbsLoaded, db, loadSchema, loadSample]);
+  }, [dbsLoaded, db, readMode, loadSchema, loadSample]);
 
   const runQuery = useCallback(
     async (cypher: string, mode?: ApplyMode) => {
+      const epoch = readEpoch.current;
       const m = mode ?? applyMode;
       setRunning(true);
       setQueryError(null);
       try {
         const res = await api.query(cypher);
+        if (epoch !== readEpoch.current) return;
+        setLastFreshness(res.freshness);
+        setReadNotice('');
         setResult(res);
         if (res.subgraph.nodes.length > 0) {
           setGraph((g) => (m === 'replace' ? res.subgraph : mergeSubgraphs(g, res.subgraph)));
@@ -158,10 +193,13 @@ export default function App() {
           setView('table');
         }
       } catch (e) {
+        if (epoch !== readEpoch.current) return;
+        setLastFreshness(null);
+        setReadNotice(toFailure(e).message);
         setResult(null);
         setQueryError(toFailure(e));
       } finally {
-        setRunning(false);
+        if (epoch === readEpoch.current) setRunning(false);
       }
     },
     [applyMode],
@@ -197,18 +235,25 @@ export default function App() {
   );
 
   const runSearch = useCallback(async (q: string) => {
+    const epoch = readEpoch.current;
     setSearching(true);
     setSearchError(null);
     try {
       const res = await api.search(q);
+      if (epoch !== readEpoch.current) return;
+      setLastFreshness(res.freshness);
+      setReadNotice('');
       setSearchResult(res);
       setGraph((g) => mergeSubgraphs(g, res.subgraph));
       setSeeds(new Map(res.seeds.map((s) => [s.node.id, { score: s.score, match: s.match }])));
     } catch (e) {
+      if (epoch !== readEpoch.current) return;
+      setLastFreshness(null);
+      setReadNotice(toFailure(e).message);
       setSearchResult(null);
       setSearchError(toFailure(e));
     } finally {
-      setSearching(false);
+      if (epoch === readEpoch.current) setSearching(false);
     }
   }, []);
 
@@ -238,6 +283,26 @@ export default function App() {
           g<span>rag</span> · graph explorer
         </span>
         <SearchBar searching={searching} onSearch={runSearch} />
+        <select
+          className="db-select"
+          aria-label="Code index freshness policy"
+          title="Wait modes allow up to five seconds to verify indexed code."
+          value={readMode}
+          onChange={(e) => {
+            const mode = e.target.value as FreshnessMode;
+            setFreshnessMode(mode);
+            setReadMode(mode);
+          }}
+        >
+          <option value="allow_stale">Allow stale code</option>
+          <option value="wait">Wait, allow stale</option>
+          <option value="require">Require fresh code</option>
+        </select>
+        {(lastFreshness || readNotice) && (
+          <span className="health" title={readNotice || `Last read: code index ${lastFreshness?.status}; checked ${lastFreshness?.checked_at ?? 'not yet'}.`}>
+            {lastFreshness ? `index: ${lastFreshness.status}${lastFreshness.timed_out ? ' (wait expired)' : ''}` : 'index not verified'}
+          </span>
+        )}
         {dbs.length > 1 && db != null && (
           <select
             className="db-select"

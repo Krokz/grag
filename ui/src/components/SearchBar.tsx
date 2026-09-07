@@ -71,6 +71,18 @@ export function SearchPanel({ result, error, selectedId, onSelectNode, onClose }
       )}
       {result && (
         <>
+          <p className="hint-text" role="status">
+            Code index at this read: {result.freshness.status}.
+            {result.freshness.timed_out && ' The verification wait expired; this result may be stale.'}
+          </p>
+          {result.truncated && (
+            <p className="hint-text" role="status">
+              Partial context: {result.omitted_nodes} nodes, {result.omitted_edges} relationships,
+              {' '}{result.omitted_properties} properties omitted.
+              {result.expansion_limited && ' The neighborhood traversal also reached its limit.'}
+              {' '}Use a more focused search or retrieve a selected node for more detail.
+            </p>
+          )}
           <div className="seed-list">
             {result.seeds.map((s) => (
               <button
@@ -88,7 +100,11 @@ export function SearchPanel({ result, error, selectedId, onSelectNode, onClose }
                 <span className="seed-jump" aria-hidden="true">⌖</span>
               </button>
             ))}
-            {result.seeds.length === 0 && <div className="hint-text">no matching nodes</div>}
+            {result.seeds.length === 0 && (
+              <div className="hint-text">
+                {result.omitted_nodes ? 'No seed nodes fit in this response.' : 'no matching nodes'}
+              </div>
+            )}
           </div>
           {result.context && <pre className="raw context-text">{result.context}</pre>}
         </>

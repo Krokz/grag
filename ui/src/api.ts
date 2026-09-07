@@ -1,6 +1,7 @@
 import type {
   ApiFailure,
   DbsResponse,
+  FreshnessMode,
   GraphSample,
   HealthResponse,
   QueryResponse,
@@ -22,6 +23,15 @@ export class ApiError extends Error implements ApiFailure {
 // Selected database for multi-db servers; null means "server default".
 // App sets this once /api/dbs has been fetched and on every selector change.
 let currentDb: string | null = null;
+let readMode: FreshnessMode = 'allow_stale';
+
+export function setFreshnessMode(mode: FreshnessMode): void {
+  readMode = mode;
+}
+
+function withReadPolicy(path: string): string {
+  return `${path}${path.includes('?') ? '&' : '?'}freshness=${readMode}&freshness_timeout_ms=5000`;
+}
 
 export function setDb(name: string | null): void {
   currentDb = name;
@@ -95,25 +105,25 @@ export const api = {
 
   dbs: () => request<DbsResponse>('/api/dbs'),
 
-  schema: () => request<SchemaDocument>('/api/schema'),
+  schema: () => request<SchemaDocument>(withReadPolicy('/api/schema')),
 
   sample: (limit = 200, label?: string) =>
     request<GraphSample>(
-      `/api/graph/sample?limit=${limit}${label ? `&label=${encodeURIComponent(label)}` : ''}`,
+      withReadPolicy(`/api/graph/sample?limit=${limit}${label ? `&label=${encodeURIComponent(label)}` : ''}`),
     ),
 
   // Every user node and edge, unclamped — feeds the whole-database SVG export.
-  full: () => request<GraphSample>('/api/graph/full'),
+  full: () => request<GraphSample>(withReadPolicy('/api/graph/full')),
 
   query: (cypher: string, limit?: number) =>
     request<QueryResponse>('/api/query', {
       method: 'POST',
-      body: JSON.stringify(limit != null ? { cypher, limit } : { cypher }),
+      body: JSON.stringify({ cypher, limit, freshness: readMode, freshness_timeout_ms: 5000 }),
     }),
 
   search: (query: string, topK = 8, hops = 1) =>
     request<SearchResponse>('/api/search', {
       method: 'POST',
-      body: JSON.stringify({ query, top_k: topK, hops }),
+      body: JSON.stringify({ query, top_k: topK, hops, freshness: readMode, freshness_timeout_ms: 5000 }),
     }),
 };
