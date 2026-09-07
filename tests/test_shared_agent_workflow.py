@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import get_default_environment, stdio_client
 
 from grag.config import GragConfig, database_identity
 from grag.core.engine import Engine
@@ -44,7 +44,9 @@ async def shared_workflow(root):
         port = sock.getsockname()[1]
     launcher = os.environ.get("GRAG_TEST_COMMAND")
     command = [launcher] if launcher else [sys.executable, "-m", "grag.cli"]
-    env = {"HOME": str(Path.home()), "PATH": os.environ.get("PATH", ""),
+    # Match the MCP SDK environment for plain CLI subprocesses too; Windows
+    # needs SYSTEMROOT to initialize asyncio/Winsock during stop/restart.
+    env = {**get_default_environment(), "HOME": str(Path.home()), "PATH": os.environ.get("PATH", ""),
            "GRAG_EMBED_PROVIDER": "fastembed" if embeddings else "", "GRAG_AUTO_REFRESH_CODE": "0",
            "HF_HUB_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1", "GRAG_BUFFER_POOL_MB": "128"}
     if not launcher:

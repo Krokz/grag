@@ -97,8 +97,9 @@ def test_queue_rejects_before_record_or_callable_and_recovers():
         with pytest.raises(ResourceLimitError, match="pending_jobs"):
             manager.submit("test", lambda: pytest.fail("rejected job ran"), {})
         assert len(manager.list()) == 2
+        future = manager._futures[first.id]
         release.set()
-        manager._futures[first.id].result(timeout=10)
+        future.result(timeout=10)
     finally:
         release.set()
         manager.shutdown(wait=True)
