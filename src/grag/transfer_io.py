@@ -200,7 +200,9 @@ def restore_file(
                 raise _error(
                     "Restored copy still needs replay sidecars after checkpoint; refusing publication"
                 )
-            with staged.open("rb") as file:
+            # Windows' file-buffer flush requires a writable handle. This is
+            # our verified staging copy; r+b neither truncates nor changes it.
+            with staged.open("r+b") as file:
                 os.fsync(file.fileno())
             if any(os.path.lexists(str(target) + suffix) for suffix in _SIDECARS):
                 raise _error(
