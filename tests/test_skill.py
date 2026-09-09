@@ -79,11 +79,12 @@ def test_init_installs_and_upgrades_the_whole_bundle(tmp_path, monkeypatch, newl
     apply_ops(plan_skill_ops(["claude"], tmp_path))
     for source in PACKAGED_TEMPLATE.parent.rglob("*.md"):
         target = root / source.relative_to(PACKAGED_TEMPLATE.parent)
-        assert target.read_bytes() == source.read_bytes()
+        # New files use canonical LF even when Git checked out CRLF templates.
+        assert target.read_bytes() == source.read_text(encoding="utf-8").encode("utf-8")
     reference = root / "references/memory.md"
     reference.write_bytes(("<!-- grag-managed skill reference: memory -->\nold\n").replace("\n", newline).encode())
     apply_ops(plan_skill_ops(["claude"], tmp_path))
-    assert reference.read_bytes() == (PACKAGED_TEMPLATE.parent / "references/memory.md").read_text().replace("\n", newline).encode()
+    assert reference.read_bytes() == (PACKAGED_TEMPLATE.parent / "references/memory.md").read_text(encoding="utf-8").replace("\n", newline).encode("utf-8")
     assert plan_skill_ops(["claude"], tmp_path) == []
     apply_ops(plan_skill_removal_ops(["claude"], tmp_path))
     assert list(root.rglob("*.md")) == []

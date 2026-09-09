@@ -93,7 +93,8 @@ def _signed(records):
 
 def _backup(engine, tmp_path):
     backup = tmp_path / "snapshot.jsonl"
-    backup.write_text("\n".join(export_lines(engine)) + "\n", encoding="utf-8")
+    # A valid fixture must preserve the export's checksummed UTF-8/LF bytes.
+    backup.write_bytes(("\n".join(export_lines(engine)) + "\n").encode("utf-8"))
     return backup
 
 
@@ -472,7 +473,13 @@ def test_restore_never_publishes_before_verification_or_clobbers_target(
                 raise GragError("reopen verification failure")
 
         monkeypatch.setattr(transfer_io, "verify_contents", verify)
-    with pytest.raises(GragError):
+    expected = {
+        "checkpoint": "checkpoint failure",
+        "reopen": "reopen verification failure",
+        "race": "Restore destination appeared",
+        "sidecar": "Restore destination or sidecar already exists",
+    }
+    with pytest.raises(GragError, match=expected[fault]):
         restore_file(cfg, str(source))
     if fault == "race":
         assert target.read_text() == "racing owner"

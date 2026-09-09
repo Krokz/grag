@@ -440,4 +440,5 @@ def test_init_verifies_actual_corrupt_database_and_keeps_original_files(cfg, tmp
     assert "Client verification failed" in error and "recover" in error
     assert "Traceback" not in error
     assert _files(cfg) == before
-    assert str(cfg.db_path) in (tmp_path / ".mcp.json").read_text()
+    registration = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+    assert str(cfg.db_path) in registration["mcpServers"]["grag"]["args"]
