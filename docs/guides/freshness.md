@@ -30,8 +30,9 @@ Read responses include `freshness: {status, checked_at, timed_out}` in JSON or t
 MCP/text footer; JSONL export carries it in the `X-Grag-Freshness` header. Status is
 `fresh`, `checking`, `refreshing`, `stale`, `error`, `unknown`, or `disabled`.
 Only `fresh` means the registered code scope was verified at that check. It does
-not certify agent-authored memories, embeddings, or edits made after verification,
-and it does not provide a transactionally consistent export snapshot. Inspect
+not certify agent-authored memories, embeddings, or edits made after verification.
+Export separately captures a consistent committed graph state; source freshness
+does not imply that source files and graph capture form one atomic snapshot. Inspect
 `GET /api/index/status` for each root's observed, pending, and last successful
 generation, saved options, error, and retry delay. It uses the selected database
 and normal authentication; anonymous `/api/health` exposes only the default

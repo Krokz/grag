@@ -41,7 +41,11 @@ markdown_extensions:
       permalink: true
   - pymdownx.highlight:
       anchor_linenums: true
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
 
 validation:
   links:
@@ -54,6 +58,7 @@ extra_css:
 
 nav:
   - Overview: index.md
+  - Architecture: architecture.md
   - Start here:
       - First session: getting-started.md
       - Installation and Windows: installation.md

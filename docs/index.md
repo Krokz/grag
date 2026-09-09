@@ -9,6 +9,9 @@ learns for the next session.
 [Start with your project](getting-started.md){ .md-button .md-button--primary }
 [Browse the tool reference](reference/mcp.md){ .md-button }
 
+For the component boundaries, database ownership and data flows, see
+[Architecture](architecture.md).
+
 ## One graph, three useful kinds of context
 
 | Context | What grag stores | What you can ask |

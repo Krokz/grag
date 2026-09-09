@@ -1,5 +1,8 @@
 # Development and evaluation
 
+Start with [Architecture](architecture.md) for component responsibilities,
+database ownership, request flows and persistence boundaries.
+
 **From source** (for development). Build the UI **first** — `pip install` needs the
 built bundle at `src/grag/api/static` (the wheel's force-include; see `pyproject.toml`):
 
@@ -7,7 +10,7 @@ built bundle at `src/grag/api/static` (the wheel's force-include; see `pyproject
 cd ui && npm ci && npm run build && cd ..   # builds the UI into src/grag/api/static/
 pip install -e .            # core: engine, REST, MCP, FTS — no torch, no GPU stack
 pip install -e ".[dev]"     # tests
-pip install -e ".[code]"          # optional: tree-sitter code parsing (ts/js/cs/tf)
+pip install -e ".[code]"          # optional: tree-sitter parsers; see language coverage
 pip install -e ".[embed-local]"   # optional: local embeddings (fastembed/ONNX, still no torch)
 pip install -e ".[embed-remote]"  # optional: OpenAI-compatible remote embeddings
 ```
@@ -155,8 +158,17 @@ that label and its one-hop relationships. **Export SVG view** saves the currentl
 loaded, filtered view; **Export full SVG** requests the full graph and lays it out
 in the browser, subject to server response limits and available browser resources.
 
-**One process, one live file.** LadybugDB is single-writer, so `serve` and `mcp` can't share a `.lbdb` as separate processes. `serve --with-mcp` mounts the MCP endpoint *inside* the REST/UI server, so UI + REST + MCP share one registry and one write connection — the UI watches the AI's writes land live instead of reading a stale copy. Use `--mcp-path` to change the MCP mount path (default `/mcp`).
+**One owning process per file.** Direct `grag mcp` opens the database and cannot
+run alongside another owner. `mcp --auto-serve` is a thin proxy and can share the
+existing owner with other clients. `serve --with-mcp` mounts MCP inside the
+REST/UI process, so UI requests read the same committed graph that MCP updates.
+Use `--mcp-path` to change the mount path (default `/mcp`).
 
 ## Performance measurements
 
-Measured — `tests/test_perf.py` guards cold start (< 2s), search latency, and RSS; `grag bench` reports recall + p50/p95 + RSS per codec. Design rules: no heavy deps in the default install, one process for API+UI, lazy embedder loading, default `LIMIT`s, hop caps, statement timeouts, token budgets everywhere.
+`tests/test_perf.py` checks small-fixture cold start, warm search latency and RSS
+with CI headroom. It is not a large-project performance guarantee. `grag bench`
+reports synthetic recall@10, mean query/encoding time, peak-RSS growth and code
+bytes per codec. The workflow evaluator separately reports end-to-end latency,
+packed evidence and token cost. Keep optional models lazy and preserve query,
+work and response limits when changing these paths.

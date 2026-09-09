@@ -40,14 +40,14 @@ Restart your MCP client, then ask:
 installs agent guidance, and configures a shared server that starts on first use.
 `grag status` shows its address and log; `grag stop` shuts it down cleanly.
 
-For a simple tree without nested worktrees or unwanted generated code,
-`grag init --ingest` also indexes immediately. Scanning does not yet honor
-`.gitignore`; see [scope and language coverage](https://krokz.github.io/grag/guides/code/).
+`grag init --ingest` also indexes immediately. Scanning honors `.gitignore` and
+`.gragignore`, and skips nested repositories/worktrees and symlinks. Choose the
+intended roots; see [scope and language coverage](https://krokz.github.io/grag/guides/code/).
 
-**Windows:** the current native engine wheel may need OpenSSL DLLs installed
-separately. Some agent harnesses also require starting the shared server in a
-separate terminal. Read the [Windows installation notes](https://krokz.github.io/grag/installation/)
-before your first ingest.
+**Windows:** grag 0.9.0 Windows x64 wheels include the required OpenSSL DLLs.
+Some agent harnesses require starting the shared server in a separate terminal.
+The [Windows installation notes](https://krokz.github.io/grag/installation/) cover
+that case, source builds and offline readiness checks.
 
 ## What it helps with
 
@@ -85,6 +85,7 @@ The optional remote provider sends embedding input to its configured endpoint.
 
 | Task | Guide |
 |---|---|
+| Understand the components and data flow | [Architecture](https://krokz.github.io/grag/architecture/) |
 | Install and verify a first session | [Getting started](https://krokz.github.io/grag/getting-started/) |
 | Index code or documents | [Code](https://krokz.github.io/grag/guides/code/) · [Documents](https://krokz.github.io/grag/guides/documents/) |
 | Save, revise and retrieve evidence | [Memory](https://krokz.github.io/grag/guides/memory/) · [Retrieval](https://krokz.github.io/grag/guides/retrieval/) |
@@ -94,7 +95,8 @@ The optional remote provider sends embedding input to its configured endpoint.
 | Develop and measure grag | [Development](https://krokz.github.io/grag/development/) · [Contributing](https://github.com/Krokz/grag/blob/main/CONTRIBUTING.md) |
 
 The maintained documentation lives in [`docs/`](https://github.com/Krokz/grag/tree/main/docs)
-and publishes to GitHub Pages. DeepWiki is a supplementary, generated architecture
+and publishes to GitHub Pages, including the maintained architecture guide.
+DeepWiki is a supplementary, generated architecture
 guide; check its displayed source commit and indexing date before relying on it.
 
 [MIT license](https://github.com/Krokz/grag/blob/main/LICENSE).

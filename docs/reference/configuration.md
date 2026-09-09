@@ -18,17 +18,17 @@ unless you call `GragConfig.from_env()`.
 | `GRAG_VECTOR_CODEC` | `fp32`, `int8`, `binary`, `polar` | `fp32` | Storage/candidate-generation codec. `fp32` uses exact cosine scanning; compressed codecs scan compact codes and exactly rescore shortlisted fp32 vectors. Changes make existing vectors pending for automatic rebuilding. |
 | `GRAG_POLAR_BITS_PER_DIM` | Float in `(0, 8]` | `1.0` | Approximate angular bits per vector dimension when `GRAG_VECTOR_CODEC=polar`. Higher values improve reconstruction at the cost of larger codes. Read directly by the polar codec. |
 | `GRAG_MAX_EMBED_PER_SEARCH` | Non-negative integer | `256` | Maximum pending nodes embedded synchronously by one search when no background worker is running (`GRAG_EMBED_BACKGROUND=0`, or library use without a serving process). Remaining work is reported as `pending_embeddings`. |
-| `GRAG_EMBED_BACKGROUND` | `1`/`0` | `1` | Serving processes run a background embedding worker per database, so ingests and searches never embed on the request thread. `0` restores inline embedding (search embeds up to `GRAG_MAX_EMBED_PER_SEARCH`; ingest embeds its own writes). |
-| `GRAG_SERVER_URL` | `https://host[:port]` | unset | Remote-server mode: `grag mcp` proxies stdio to this already-running grag server instead of auto-serving a local daemon, and `grag export` streams `GET /api/export` from it. The proxy never opens a `.lbdb`; it reconnects and replays the MCP handshake when the server restarts. |
+| `GRAG_EMBED_BACKGROUND` | `1`/`0` | `1` | Serving processes embed stored-node text on a background worker per database. Query embedding remains part of semantic search. `0` makes node embedding inline too (search handles up to `GRAG_MAX_EMBED_PER_SEARCH`; ingest embeds its own writes). |
+| `GRAG_SERVER_URL` | `https://host[:port]` | unset | Selects an already-running remote server for MCP, export and CLI graph commands (`remember`, `search`, `context`, `ingest`, `ingest-code`). MCP proxies stdio and replays its handshake after reconnecting; these clients do not open the remote `.lbdb` or start a local owner. |
 | `GRAG_SERVER_DB` | Database name | unset | With `GRAG_SERVER_URL`: the `x-grag-db` header for a multi-db (`--db-dir`) server. |
 | `GRAG_ALLOW_INSECURE_HTTP` | `1`/`0` | `0` | Permit a plain-`http://` `GRAG_SERVER_URL` to a non-loopback host (the bearer token then travels unencrypted). |
 | `GRAG_WAL_AUTO_RECOVER` | `1`/`0` | `0` | Deprecated compatibility setting; no longer enables lossy recovery on startup. Use offline `grag --db <file> recover`, optionally with explicit `--allow-data-loss`. |
 | `GRAG_EMBED_PROVIDER` | `fastembed` or `remote` | unset | Enables vector search. Unset means BM25/FTS-only retrieval. `fastembed` is local; `remote` sends embedding input to the configured OpenAI-compatible service. |
-| `GRAG_AUTO_REFRESH_CODE` | `1`/`0` | `1` | Serving processes re-ingest an indexed checkout automatically when its git state moved (incremental, on the job thread). |
+| `GRAG_AUTO_REFRESH_CODE` | `1`/`0` | `1` | Serving reads schedule source-content/Git verification for registered code scopes and refresh changed scopes on the job thread. Plain folders work too; idle servers do not poll. |
 | `GRAG_AUTO_REFRESH_INTERVAL_S` | Seconds | `30` | Minimum time between drift checks. |
 | `GRAG_EMBED_THREADS` | Integer | `min(4, cores)` | ONNX Runtime threads for the local embedder. `1` restores the conservative setting from before onnxruntime 1.29. |
 | `GRAG_EMBED_QUERY_PREFIX` / `GRAG_EMBED_DOC_PREFIX` | String | by model family | Retrieval prefixes prepended to queries / node texts before embedding. Unset picks the family default (bge, nomic, e5, arctic, mxbai); empty string disables. Changes trigger automatic rebuilding. |
-| `GRAG_EMBED_EXCLUDE_PROPS` | Comma list | `meta,path,heading_path,language,git_commit,git_branch,ingested_at` | STRING properties left out of the embedding text (they stay in the FTS index). Reindex after changing. |
+| `GRAG_EMBED_EXCLUDE_PROPS` | Comma list | `meta,path,heading_path,code_coverage,language,git_commit,git_branch,ingested_at` | STRING properties left out of embedding text (they stay in the FTS index). Changes invalidate affected vectors for rebuilding. |
 | `GRAG_EMBED_MODEL` | Provider model name | `BAAI/bge-small-en-v1.5` | Embedding model identifier, used only when `GRAG_EMBED_PROVIDER` is set. Changing it invalidates/rebuilds affected embeddings lazily. |
 | `GRAG_EMBED_DIM` | Positive integer | `384` | Embedding vector width. It must match the selected model's actual output dimension and the stored vector column. |
 | `GRAG_EMBED_BASE_URL` | URL | unset | OpenAI-compatible endpoint root for the `remote` provider; required when using a remote embedding service. |
@@ -63,9 +63,14 @@ The remaining `GragConfig` fields map directly to the environment table:
 `db_path`, `db_dir`, `buffer_pool_size` (bytes rather than MiB),
 `default_token_budget`, `statement_timeout_ms`, `search_label_cap`, `vector_codec`, `embedder`,
 `api_token`, `cors_origins`, `max_embed_per_search`, `embed_in_background`, `server_url`,
-`server_db`, `allow_insecure_http`, and `wal_auto_recover`. `EmbedderConfig` contains
+`server_db`, `allow_insecure_http`, `auto_refresh_code`, `auto_refresh_interval_s`,
+and `wal_auto_recover`. `EmbedderConfig` contains
 `provider`, `model`, `dim`, `base_url`, and `api_key_env`, with the same meanings and
 defaults listed above.
+
+For Python embedding configuration, `text_props` can pin a list of STRING
+properties per label. `exclude_props`, `query_prefix`, `document_prefix` and
+`threads` correspond to the embedding text/prefix/thread environment settings.
 
 Native timeout checks are cooperative: compilation, allocation and some operators
 can run past the configured interval before checking it. This is not a hard wall-clock
@@ -111,7 +116,9 @@ The configuration-affecting options are:
 | `restart --with-mcp` / `--no-mcp` | preserve current | Enables or disables mounted MCP while restarting. |
 | `restart --mcp-path PATH` | preserve current | Overrides the mounted MCP path while restarting. |
 | `restart --force` | off | Allows one-time migration of a live legacy registration after independently verifying its PID. |
-| `ingest-code --no-calls` | off | Skips Python `CALLS` edge extraction. |
+| `ingest-code --no-calls` | off | Disables `CALLS` extraction for supported Python, JS/TS and Go analysis; retains structure, imports and other supported relationships. |
+| `ingest-code --root PATH` | inferred | Enclosing source root for selected paths; retains stable module IDs and scope boundaries. |
+| `ingest-code --replace-scope` | off | With `--root`, replaces its saved paths; no paths unregisters that code scope. Authored evidence is preserved during reconciliation. |
 | `ingest-code --max-file-kb N` | `1024` | Skips source files larger than this many KiB. |
 | `bench --codec CODEC` | all codecs | Benchmarks only the named codec; without it, the benchmark runs `fp32`, `int8`, `binary`, and `polar`. |
 | `reindex --batch-size N` | `128` | Number of nodes embedded per reindex batch. |
@@ -135,9 +142,28 @@ The configuration-affecting options are:
 | `init --server-url URL` | unset | Registers a remote grag server instead of a local database: MCP config runs `grag mcp --server-url` (or, with `--url`, points at the server's `/mcp/` with a bearer header), referencing `${GRAG_API_TOKEN}` rather than storing it; CLAUDE.md documents the shared graph. `--server-db` selects a multi-db database. |
 | `init --no-mcp` | off | Skips MCP client configuration. |
 | `init --no-claude-md` | off | Skips the `CLAUDE.md` guidance block. |
+| `init --no-verify` | off | Writes configuration without the MCP tool-list/write/read verification; explicitly leaves connection readiness unverified. |
 | `init --dry-run` | off | Shows actual file diffs, including removal, without creating files or backups. |
 | `relocate OLD_ROOT NEW_ROOT` | — | Reconciles a moved checkout's existing database and local registrations. Retains graph IDs and saved relationships; never moves or creates a database. |
 | `relocate ... --dry-run` | off | Previews graph path/settings changes and client-file diffs without writing. |
+
+### Everyday memory and retrieval
+
+These commands use the same database resolution and owner routing as ingestion:
+
+| Command/option | Default | Behavior |
+|---|---|---|
+| `remember TEXT` | `Memory` label | Saves text in a compatible `id,text` memory table. `--id` reuses a key; omitted IDs get a UUID. |
+| `remember --label NAME` / `--source SOURCE` | `Memory` / `grag remember` | Selects the table and provenance. |
+| `remember --expected-revision TOKEN` | unset | Guards an edit against the revision returned by an earlier read. |
+| `search QUERY --label NAME` | all searchable labels | Searches the selected graph; repeat `--label` to narrow it to several labels. |
+| `context Label:key [...]` | — | Fetches context for the supplied canonical node IDs. |
+| `search/context --tokens N` | `2000` | Estimated retrieval budget; this CLI default overrides `GRAG_TOKEN_BUDGET` for these commands. |
+| `search/context --hops N` | `1` | Graph-expansion depth. |
+| `search/context --freshness MODE` | `allow_stale` | `allow_stale`, `wait` or `require`; uses the request's default freshness timeout. |
+| `remember/search/context --json` | off | Emits machine-readable JSON instead of the human summary. |
+
+### Database selection
 
 Local CLI database selection is: an explicit `--db`/`--db-dir`, then environment
 selectors, then `.grag/project.json`, then an unambiguous project-scoped legacy

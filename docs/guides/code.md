@@ -3,8 +3,9 @@
 Grag 0.9.0 adds shared-owner CLI routing, source selection,
 Python/JS/TS/Go navigation and Java/C# overload identities described below.
 
-Both MCP and CLI ingestion use an existing registered server safely; without one,
-the CLI opens the local database. [Server ownership](../operations/server.md)
+Init-configured MCP clients share the owning server. CLI ingestion uses an existing
+registered server; without one, the CLI opens the local database. A direct stdio
+MCP process owns its database. [Server ownership](../operations/server.md)
 explains how multiple harnesses share one database.
 
 Point `ingest_code` at a repo and structural questions become cheap Cypher instead of file-reading spelunking. Two entry points, same engine:
@@ -29,6 +30,7 @@ ingest_code(paths=["src/"], calls=true, max_file_kb=1024)
 | Function | CALLS (Python; static JS/TS and Go bindings) | Function |
 | Module | CONTAINS_MODULE_CONSTANT (Go) | Constant |
 | Class | IMPLEMENTS_INTERFACE (supported Go method sets) | Class |
+| Module | CONTAINS_MODULE_MODULECALL (Terraform) | TerraformModuleCall |
 
 Nodes carry path, line range, signature and docstring — **structure only, no source bodies** — with ids like `Module:repo-<canonical-path-sha256>:src/a.py` and `Function:repo-<canonical-path-sha256>:src/a.py#Class.method`. Java/C# functions append an overload signature digest (see below). The path-derived repo component prevents same-named checkouts from colliding. Re-ingesting is incremental: every file is parsed for cross-file resolution, while content, parser or dependency-derived changes determine which files are rewritten. Pruning is scoped to those files and removed sources. Three recipes:
 
@@ -42,7 +44,7 @@ MATCH (r1:Repo)-[:CONTAINS_REPO_MODULE]->(a:Module)-[:IMPORTS]->(b:Module)<-[:CO
 WHERE r1.id <> r2.id RETURN a.id, b.id
 ```
 
-Python parses via stdlib `ast` in every install. Everything else parses via tree-sitter and needs `pip install "gragdb[code]"`: TypeScript/JavaScript (`.ts .tsx .js .jsx .mjs .cjs .mts .cts`, plus supported scripts in `.vue .svelte .astro`), C#, Terraform, Go, and — through `tree-sitter-language-pack` — Bash, Java, Kotlin, Rust, C, C++, Ruby, PHP, Swift, Lua, Scala and SQL (tables as `Class`, views/functions/procedures as `Function`). Without the extra those files raise a hint-carrying error. Every language yields Module/Class/Function nodes with signature, doc comment and line range; Python, JS/TS and Go have the relationship coverage below; other IMPORTS resolution is best-effort (path/package-based). For the language-pack languages a construct the grammar does not know costs one symbol, not the file.
+Python parses via stdlib `ast` in every install. Other supported languages use tree-sitter and need `pip install "gragdb[code]"`: TypeScript/JavaScript (`.ts .tsx .js .jsx .mjs .cjs .mts .cts`, plus supported scripts in `.vue .svelte .astro`), C#, Terraform, Go, and — through `tree-sitter-language-pack` — Bash, Java, Kotlin, Rust, C, C++, Ruby, PHP, Swift, Lua, Scala and SQL (tables as `Class`, views/functions/procedures as `Function`). Without the extra those files raise a hint-carrying error. Parsers emit supported Module/Class/Function and language-specific nodes where applicable, with available signatures, doc comments and line ranges. Python, JS/TS and Go have the relationship coverage below; other IMPORTS resolution is best-effort (path/package-based). Unsupported constructs can be omitted; inspect coverage and warnings before drawing conclusions from missing symbols.
 
 ## Language coverage
 

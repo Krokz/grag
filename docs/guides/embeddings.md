@@ -38,7 +38,8 @@ settings, then `grag doctor`, to verify actual offline inference. A present cach
 directory is not sufficient. See [installation](../installation.md).
 
 An initialized serving process (`serve`, `mcp`) runs a
-background embedding worker. Health reports counters under `embedding`; searches
+background worker for stored-node embeddings. Query embedding still runs as part
+of each semantic search and can contribute to its latency. Health reports counters under `embedding`; searches
 report `pending_embeddings` while it drains. `GRAG_EMBED_BACKGROUND=0` enables
 inline work. **One-shot CLI ingests still embed synchronously** and can take much
 longer with embeddings enabled.
@@ -48,8 +49,8 @@ useful answers against BM25 and file search before enabling embeddings everywher
 
 ## Embedding inputs and invalidation
 
-A node's embedding text is its STRING properties minus
-side-cars that only dilute the vector (`meta`, `path`, `heading_path`, `language`, git
+A node's embedding text is its non-internal STRING properties minus
+side-cars that only dilute the vector (`meta`, `path`, `heading_path`, `code_coverage`, `language`, git
 fields — `GRAG_EMBED_EXCLUDE_PROPS` overrides the list; `EmbedderConfig.text_props`
 pins an explicit list per label). Queries and documents get the retrieval prefixes the
 model family expects (bge/arctic/mxbai: query instruction; nomic: `search_query:` /
@@ -76,16 +77,23 @@ GRAG_EMBED_PROVIDER=fastembed grag --db knowledge.lbdb serve
 
 ## Vector codecs and crash safety
 
-Codec ladder (`grag bench` reproduces these numbers on a synthetic 1500-doc corpus):
+Example `grag bench` run with grag 0.9.0 / LadybugDB 0.20.3 on macOS arm64:
+1,500 synthetic documents, 64 dimensions, seed 7 and 50 queries. This measures
+vector-neighbor recall against exact fp32 ground truth, not answer quality.
 
-| codec | bytes/vec (dim 64) | recall@10 | note |
+| codec | candidate bytes/vec (dim 64) | recall@10 | note |
 |---|---|---|---|
 | `fp32` | 256 | 1.000 | baseline; full-precision cosine scoring |
-| `int8` | 68 | 0.998 | 4x smaller, near-zero loss |
-| `binary` | 8 | 0.476 | 32x, hamming scan + rescore |
-| `polar` | 14 | 0.766 | experimental PolarQuant-style angular codes (sine-power-law bit allocation, training-free) |
+| `int8` | 68 | 0.998 | compact code scan + fp32 rescore |
+| `binary` | 8 | 0.474 | hamming scan + fp32 rescore |
+| `polar` | 14 | 0.762 | experimental PolarQuant-style angular codes (sine-power-law bit allocation, training-free) |
 
 Select with `GRAG_VECTOR_CODEC` / `GragConfig.vector_codec`. `fp32` is the default. Compressed codecs are opt-in; evaluate their recall on your data.
+
+The byte column describes candidate codes, not total database storage. Compressed
+codecs retain full-precision vectors for rescoring. Run the benchmark on your
+runtime for current results; these synthetic scores do not establish real-project
+retrieval quality or a memory/latency guarantee.
 
 Two honest costs of the codec path: candidate generation for non-fp32 codecs is an O(rows) approximate scan (only pk + code bytes cross the wire; fp32 nodes are fetched for the 4·top_k rescore shortlist only) — that's the property `grag bench` measures, so no ANN index is involved. Without a background worker, searches embed lazily: at most `GRAG_MAX_EMBED_PER_SEARCH` (default 256) nodes per search call, with the remainder reported as `pending_embeddings` on the search response so agents know vector recall is still improving.
 

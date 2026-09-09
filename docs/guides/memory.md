@@ -24,7 +24,7 @@ a decision with its reason and a source. For example:
 On the next session, ask it to retrieve that decision and its evidence. grag
 provides storage and retrieval; the harness decides when to read or write.
 
- `define_schema` refuses a new table whose name only differs from an existing one by case, plural or punctuation (`Decisions` vs `Decision`, `todo_item` vs `TodoItem`) and names the existing table in the hint; `allow_similar=true` creates it anyway. The packaged skill adds a suggested session-memory vocabulary (`Task`, `Decision`, `Insight`, `Question`) and the reuse-before-invent rule, without shipping a fixed schema.
+`define_schema` refuses a new table whose name only differs from an existing one by case, plural or punctuation (`Decisions` vs `Decision`, `todo_item` vs `TodoItem`) and names the existing table in the hint; `allow_similar=true` creates it anyway. The packaged skill asks agents to reuse existing labels and properties. Names such as `Task`, `Decision`, `Insight` and `Question` are choices for a project, not a required built-in schema.
 
 
 ## Atomic writes and retries
@@ -104,8 +104,9 @@ is null. Use `revision=<sequence>` to retrieve a snapshot, optionally with
 `text_property` paging. These modes use one node and skip expansion: historical
 relationship topology is not recorded. History starts at adoption; it cannot
 recover earlier overwritten text. Raw writes, relocation, and import do not
-create authored review events. JSONL export/import currently omits internal
-history; retain the original database for historical evidence. Ordinary nodes
+create authored review events. Format-2 JSONL snapshots preserve authored history;
+legacy v1 exports did not. See [backup and restore](../operations/recovery.md)
+for snapshot-point continuity and legacy import limits. Ordinary nodes
 need no history setup, preset schema, additional service or model.
 
 Primary keys belong in `key`, never `properties`; invalid keys and unknown
@@ -115,7 +116,9 @@ the existing skip-and-warn behavior, checked before writes; read `warnings`.
 same transaction when their source text changes.
 
 Retry receipts live in the `.lbdb` file and are retained without automatic expiry.
-JSONL export/import does not carry these internal receipts; treat an imported graph
-as a new retry target. A direct Engine caller can join upserts to an existing
+Format-2 JSONL export/import preserves receipts and their exact replay, including
+original revision tokens. Requests committed after the snapshot are absent from
+the restored graph. Legacy v1 imports have no receipt continuity. A direct Engine
+caller can join upserts to an existing
 transaction, whose commit determines success; operation IDs require a top-level
 upsert. A failed joined upsert invalidates that enclosing transaction.

@@ -31,7 +31,7 @@ Any MCP client gets these 10 tools:
 | `cypher_query` | read-only Cypher; errors come back with correction hints |
 | `search_knowledge` | hybrid BM25 + vector seeds → RRF fusion → per-label diversity cap → k-hop expansion → cited, token-budgeted context |
 | `get_context` | re-pack chosen node ids; page long STRING values with `text_property` |
-| `ingest_code` | index a repo's code STRUCTURE (Repo/Module/Class/Function + CONTAINS/IMPORTS/CALLS/INHERITS) — never source bodies; incremental on re-run, `background=true` returns a job id |
+| `ingest_code` | index code structure, including Repo/Module/Class/Function, Go Constant and TerraformModuleCall nodes, with language-specific relationships and coverage diagnostics; incremental graph updates, `background=true` returns a job id |
 | `ingest_docs` | index Markdown/text files on the server as `Document → Section → Chunk` graphs with `MENTIONS_*` links into the code graph (`sections=false` for flat chunks) |
 | `job_status` | poll a background ingest by id |
 
