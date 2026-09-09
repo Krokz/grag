@@ -518,7 +518,13 @@ def main(argv: list[str] | None = None) -> int:
         try:
             app = create_app(cfg)
             server = uvicorn.Server(
-                uvicorn.Config(app, host=args.host, port=args.port, workers=1)
+                uvicorn.Config(
+                    app, host=args.host, port=args.port, workers=1,
+                    # A reset Windows socket can leave asyncio's listener
+                    # waiting for a transport that never detaches. Bound HTTP
+                    # draining so lifespan still closes the database safely.
+                    timeout_graceful_shutdown=10,
+                )
             )
             app.state.shutdown_token = shutdown_token
             app.state.request_shutdown = lambda: setattr(server, "should_exit", True)

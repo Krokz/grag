@@ -406,6 +406,71 @@ def test_daemon_registration_is_retained_until_engines_close(
         assert "keeping the server registration" in capsys.readouterr().err
 
 
+def test_cli_closes_database_when_transport_never_detaches(tmp_path, monkeypatch):
+    """A reset Proactor socket must not prevent the application lifespan exit."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import uvicorn
+
+    from grag import admin, cli
+    from grag.core.engine import Engine
+
+    db = tmp_path / "transport.lbdb"
+    monkeypatch.setattr(admin, "GRAG_HOME", tmp_path / "home")
+    events = []
+    entered, release = threading.Event(), threading.Event()
+
+    async def wait_closed():
+        events.append("waiting")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            events.append("cancelled")
+            release.set()
+
+    class StuckTransportServer(uvicorn.Server):
+        def run(self):
+            # Exercise CLI wiring and Uvicorn's actual shutdown implementation.
+            # Shorten only this test's backstop; the production wait is bounded.
+            timeout = self.config.timeout_graceful_shutdown
+            assert timeout is not None and 0 < timeout < 30
+            self.config.timeout_graceful_shutdown = 0.01
+            self.config.load()
+            self.lifespan = self.config.lifespan_class(self.config)
+            self.servers = [SimpleNamespace(
+                close=lambda: events.append("closed"), wait_closed=wait_closed,
+            )]
+
+            async def exercise():
+                await self.lifespan.startup()
+                service = self.config.app.state.service
+                engine = service.engine
+                engine.execute_write("CREATE NODE TABLE Note(id STRING PRIMARY KEY)")
+
+                def accepted_write():
+                    entered.set()
+                    assert release.wait(30)
+                    engine.execute_write("CREATE (:Note {id:'saved'})")
+                    return {}
+
+                job = service.jobs.submit("write", accepted_write, {})
+                assert await asyncio.to_thread(entered.wait, 30)
+                await asyncio.wait_for(self.shutdown(), timeout=30)
+                assert not self.lifespan.shutdown_failed
+                assert all(result["engine_closed"] for result in self.config.app.state.shutdown_results.values())
+                assert service.get_job(job.id).status == "done"
+
+            asyncio.run(exercise())
+
+    monkeypatch.setattr(uvicorn, "Server", StuckTransportServer)
+    assert cli.main(["--db", str(db), "serve"]) == 0
+    assert events == ["closed", "waiting", "cancelled"]
+    assert not admin.pidfile_path(db).exists()
+    with Engine(GragConfig(db_path=db), read_only=True) as reopened:
+        assert reopened.execute("MATCH (n:Note) RETURN n.id").rows == [["saved"]]
+
+
 def test_process_exit_waits_for_a_late_embedding_worker(tmp_path):
     import os
     import subprocess
