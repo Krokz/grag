@@ -119,6 +119,7 @@ jobs:
         run: >-
           python -m pytest -x -q
           tests/test_shared_agent_workflow.py
+          tests/test_shutdown.py
           tests/test_document_relationships.py
           tests/test_freshness.py::test_exception_after_commit_rechecks_without_repeating_ingest
           tests/test_freshness.py::test_size_exclusions_reconcile_generated_symbols_before_reporting_fresh

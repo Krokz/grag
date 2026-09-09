@@ -90,7 +90,7 @@ def test_failed_generation_stays_pending_then_retries_without_another_edit(
     with svc.refresher._condition:
         assert svc.refresher._condition.wait_for(
             lambda: not svc.refresher._checking and svc.refresher.last_error is not None,
-            timeout=5,
+            timeout=30,
         )
     report = svc.read_freshness(ReadPolicy(freshness="wait", freshness_timeout_ms=0))
     assert report.status == "error" and report.timed_out
@@ -227,13 +227,13 @@ def test_new_scope_registered_during_check_must_also_be_verified(indexed, monkey
         result = real(*args)
         if not entered.is_set():
             entered.set()
-            assert release.wait(5)
+            assert release.wait(30)
         return result
 
     monkeypatch.setattr(refresh, "scan_sources", scan)
     svc.read_freshness(ReadPolicy(freshness="wait", freshness_timeout_ms=0))
     try:
-        assert entered.wait(5)
+        assert entered.wait(30)
         other = root.with_name("new_scope")
         _write(other, "invalid").write_text("def invalid(:\n")
         svc.ingest_code(CodeIngestRequest(paths=[str(other)]))
@@ -241,7 +241,7 @@ def test_new_scope_registered_during_check_must_also_be_verified(indexed, monkey
         release.set()
     with svc.refresher._condition:
         assert svc.refresher._condition.wait_for(
-            lambda: not svc.refresher._checking, timeout=5
+            lambda: not svc.refresher._checking, timeout=30
         )
         # A completed check of the old catalog cannot certify the new scope.
         assert svc.refresher._report().status != "fresh"
@@ -249,7 +249,7 @@ def test_new_scope_registered_during_check_must_also_be_verified(indexed, monkey
         _fresh(svc, timeout=0)
     with svc.refresher._condition:
         assert svc.refresher._condition.wait_for(
-            lambda: not svc.refresher._checking, timeout=5
+            lambda: not svc.refresher._checking, timeout=30
         )
     assert svc.refresh_status(detail=True)["tracked"] == 2
 
@@ -305,7 +305,7 @@ def test_backoff_grows_and_is_capped(indexed, monkeypatch):
         svc.read_freshness(ReadPolicy(freshness="wait", freshness_timeout_ms=0))
         with svc.refresher._condition:
             assert svc.refresher._condition.wait_for(
-                lambda: not svc.refresher._checking, timeout=5
+                lambda: not svc.refresher._checking, timeout=30
             )
         state = _root_status(svc, root)
         assert state["failures"] == failures
@@ -478,10 +478,10 @@ def test_one_failed_root_does_not_block_another(indexed, tmp_path, monkeypatch):
 
     monkeypatch.setattr(svc, "ingest_code", ingest)
     svc.read_freshness(ReadPolicy(freshness="wait", freshness_timeout_ms=0))
-    assert healthy_done.wait(3)
+    assert healthy_done.wait(30)
     with svc.refresher._condition:
         assert svc.refresher._condition.wait_for(
-            lambda: not svc.refresher._checking, timeout=3
+            lambda: not svc.refresher._checking, timeout=30
         )
     assert svc.refresh_status()["freshness"]["status"] == "error"
     assert _names(svc) == {"alpha", "other_after"}
@@ -525,7 +525,7 @@ def test_wait_deadline_covers_slow_checks_and_require_does_not_query(
 
     def scan(*args):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         return real(*args)
 
     def tracked(query, *args, **kwargs):
@@ -542,7 +542,7 @@ def test_wait_deadline_covers_slow_checks_and_require_does_not_query(
         )
         assert report.timed_out and report.status == "checking"
         assert time.monotonic() - started < 0.5
-        assert entered.wait(1)
+        assert entered.wait(30)
         with pytest.raises(FreshnessError):
             svc.cypher_query(
                 QueryRequest(
@@ -568,14 +568,14 @@ def test_concurrent_readers_share_one_check(indexed, monkeypatch):
     def scan(*args):
         calls.append(args)
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         return real(*args)
 
     monkeypatch.setattr(refresh, "scan_sources", scan)
     with ThreadPoolExecutor(max_workers=8) as pool:
         try:
             first = pool.submit(_fresh, svc)
-            assert entered.wait(1)
+            assert entered.wait(30)
             others = [
                 pool.submit(
                     svc.read_freshness,
@@ -587,7 +587,7 @@ def test_concurrent_readers_share_one_check(indexed, monkeypatch):
             assert len(calls) == 1
         finally:
             release.set()
-        assert first.result(timeout=3).status == "fresh"
+        assert first.result(timeout=30).status == "fresh"
 
 
 def test_disabled_require_fails_without_reading_graph(tmp_path):
@@ -619,12 +619,12 @@ def test_explicit_policy_change_wins_over_a_queued_refresh(indexed, monkeypatch)
             with svc.refresher._condition:
                 assert svc.refresher._condition.wait_for(
                     lambda: svc.refresher._running_root is not None,
-                    timeout=2,
+                    timeout=30,
                 )
             svc.ingest_code(
                 CodeIngestRequest(paths=[str(root)], calls=False, max_file_kb=8)
             )
-        assert future.result(timeout=3).status == "fresh"
+        assert future.result(timeout=30).status == "fresh"
     assert calls == [False]
     assert (
         json.loads(index_records(svc.engine)[str(root)]["_index_options"])["calls"]
@@ -641,13 +641,13 @@ def test_close_drains_owned_verification_before_closing_engine(indexed, monkeypa
 
     def scan(*args):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         return real(*args)
 
     monkeypatch.setattr(refresh, "scan_sources", scan)
     svc.refresher.invalidate()
     svc.read_freshness()
-    assert entered.wait(2)
+    assert entered.wait(30)
     closer = threading.Thread(target=lambda: (svc.close(), closed.set()))
     closer.start()
     try:
@@ -655,7 +655,7 @@ def test_close_drains_owned_verification_before_closing_engine(indexed, monkeypa
         assert svc.engine.execute("RETURN 1").rows == [[1]]
     finally:
         release.set()
-        closer.join(timeout=3)
+        closer.join(timeout=30)
     assert closed.is_set()
 
 

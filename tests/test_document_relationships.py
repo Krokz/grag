@@ -377,14 +377,14 @@ def test_public_upsert_waits_for_reconciliation_and_remains_authored(code, monke
         result = real(query, *args, **kwargs)
         if "DELETE r" in query and not entered.is_set():
             entered.set()
-            assert release.wait(5)
+            assert release.wait(30)
         return result
 
     monkeypatch.setattr(code, "execute_write", execute)
     with ThreadPoolExecutor(max_workers=2) as pool:
         sync = pool.submit(_ingest, code, "# Guide\n\nNo reference.")
         try:
-            assert entered.wait(2)
+            assert entered.wait(30)
             assert _snapshot(code) == before  # readers see the previous committed graph
             authored = pool.submit(
                 upsert_edges, code, code.config, UpsertEdgesRequest(edges=[edge])
@@ -392,8 +392,8 @@ def test_public_upsert_waits_for_reconciliation_and_remains_authored(code, monke
             assert not authored.done()
         finally:
             release.set()
-        sync.result(timeout=3)
-        authored.result(timeout=3)
+        sync.result(timeout=30)
+        authored.result(timeout=30)
     _ingest(code, "# Guide\n\nStill no reference.")
     assert _rows(code, "MATCH ()-[r:MENTIONS_FUNCTION]->() RETURN r._source") == [
         ["agent"]
@@ -465,7 +465,7 @@ def test_embedding_runs_after_publication_lock_is_released(
                 return True
 
         with ThreadPoolExecutor(max_workers=1) as pool:
-            assert pool.submit(acquire).result(timeout=2)
+            assert pool.submit(acquire).result(timeout=30)
         calls.append(label)
 
     monkeypatch.setattr(markdown if sections else loaders, "_embed_pending", embed)
@@ -551,7 +551,7 @@ def test_ingest_warnings_reach_rest_mcp_and_cli(tmp_path):
         assert any("unknown ownership" in w for w in output["warnings"])
         assert any("file not found" in w for w in output["warnings"])
         queued = json.loads(mcp.ingest_docs(svc, [str(path)], background=True))
-        svc.jobs._pool.submit(lambda: None).result(timeout=3)
+        svc.jobs._pool.submit(lambda: None).result(timeout=30)
         finished = json.loads(mcp.job_status(svc, queued["id"]))
         assert finished["status"] == "done"
         assert any("unknown ownership" in w for w in finished["result"]["warnings"])

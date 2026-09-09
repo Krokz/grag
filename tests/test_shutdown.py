@@ -1,4 +1,8 @@
-"""Shutdown drills with live native databases, blocked work and concurrent callers."""
+"""Shutdown drills with live native databases, blocked work and concurrent callers.
+
+Completion waits allow loaded native runners time to finish. Explicit short
+deadlines still verify prompt timeout responses while work remains blocked.
+"""
 
 from __future__ import annotations
 
@@ -29,7 +33,7 @@ def svc(tmp_path):
         )
     )
     yield service
-    assert service.close(timeout=5)["engine_closed"]
+    assert service.close(timeout=30)["engine_closed"]
 
 
 def test_queued_jobs_cancel_and_active_work_commits_before_close(svc):
@@ -38,12 +42,12 @@ def test_queued_jobs_cancel_and_active_work_commits_before_close(svc):
 
     def work():
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         svc.engine.execute_write("CREATE (:Note {id:'saved'})")
         return {"saved": True}
 
     active = svc.jobs.submit("probe", work, {})
-    assert entered.wait(2)
+    assert entered.wait(30)
     queued = svc.jobs.submit("must-cancel", lambda: pytest.fail("queued work ran"), {})
     try:
         start = time.monotonic()
@@ -61,7 +65,7 @@ def test_queued_jobs_cancel_and_active_work_commits_before_close(svc):
             svc.cypher_query(QueryRequest(cypher="RETURN 1"))
     finally:
         release.set()
-    assert svc.close(timeout=3)["engine_closed"]
+    assert svc.close(timeout=30)["engine_closed"]
     assert svc.get_job(active.id).status == "done"
     reopened = GragService(svc.config)
     try:
@@ -82,18 +86,18 @@ def test_real_ingest_finishes_after_shutdown_timeout(svc, tmp_path, monkeypatch)
 
     def paused(*args, **kwargs):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         return parse(*args, **kwargs)
 
     monkeypatch.setitem(code._PARSERS, ".py", paused)
     job = svc.submit_ingest_code(CodeIngestRequest(paths=[str(source)]))
-    assert entered.wait(2)
     try:
+        assert entered.wait(30)
         result = svc.close(timeout=0.03)
         assert result["active_operations"] == 1 and not result["engine_closed"]
     finally:
         release.set()
-    assert svc.close(timeout=3)["engine_closed"]
+    assert svc.close(timeout=30)["engine_closed"]
     done = svc.get_job(job.id)
     assert done.status == "done" and done.result["functions"] == 1
     reopened = GragService(svc.config)
@@ -117,13 +121,13 @@ def test_stuck_embedding_retains_live_handle_and_database(svc, monkeypatch):
     class SlowEmbedder(FakeEmbedder):
         def embed(self, texts):
             entered.set()
-            assert release.wait(5)
+            assert release.wait(30)
             return super().embed(texts)
 
     monkeypatch.setattr(vectors, "get_embedder", lambda config: SlowEmbedder())
     svc.start_background_embedding()
     worker = svc.embed_worker
-    assert entered.wait(2)
+    assert entered.wait(30)
     try:
         assert worker.stop(timeout=0.01) is False
         assert worker.running and worker.status()["stopping"]
@@ -134,7 +138,7 @@ def test_stuck_embedding_retains_live_handle_and_database(svc, monkeypatch):
         assert svc.engine.execute("MATCH (n:Doc) RETURN count(n)").rows == [[3]]
     finally:
         release.set()
-    assert svc.close(timeout=3)["engine_closed"]
+    assert svc.close(timeout=30)["engine_closed"]
     assert not worker.running and worker.last_error is None
     assert worker.stop(timeout=0) is True
 
@@ -157,19 +161,19 @@ def test_active_read_keeps_engine_until_native_result_returns(svc, monkeypatch):
     def paused(cypher, *args, **kwargs):
         if cypher.startswith("RETURN 42"):
             entered.set()
-            assert release.wait(5)
+            assert release.wait(30)
         return execute(cypher, *args, **kwargs)
 
     monkeypatch.setattr(svc.engine, "execute", paused)
     with ThreadPoolExecutor(max_workers=1) as pool:
         read = pool.submit(svc.cypher_query, QueryRequest(cypher="RETURN 42"))
-        assert entered.wait(2)
+        assert entered.wait(30)
         try:
             assert not svc.close(timeout=0.03)["engine_closed"]
         finally:
             release.set()
-        assert read.result(timeout=3).rows == [[42]]
-    assert svc.close(timeout=3)["engine_closed"]
+        assert read.result(timeout=30).rows == [[42]]
+    assert svc.close(timeout=30)["engine_closed"]
 
 
 def test_nested_operation_can_complete_but_new_calls_are_refused(svc):
@@ -177,7 +181,7 @@ def test_nested_operation_can_complete_but_new_calls_are_refused(svc):
         report = svc.close(timeout=0)
         assert report["active_operations"] == 1
         assert svc.cypher_query(QueryRequest(cypher="RETURN 1")).rows == [[1]]
-    assert svc.close(timeout=3)["engine_closed"]
+    assert svc.close(timeout=30)["engine_closed"]
     for call in (
         svc.describe_schema,
         svc.start_background_embedding,
@@ -195,16 +199,16 @@ def test_concurrent_close_finalizes_engine_once(svc, monkeypatch):
     def paused():
         calls.append(1)
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         real_close()
 
     monkeypatch.setattr(svc.engine, "close", paused)
     with ThreadPoolExecutor(max_workers=3) as pool:
-        first = pool.submit(svc.close, 3)
-        assert entered.wait(2)
-        others = [pool.submit(svc.close, 3) for _ in range(2)]
+        first = pool.submit(svc.close, 30)
+        assert entered.wait(30)
+        others = [pool.submit(svc.close, 30) for _ in range(2)]
         release.set()
-        assert all(f.result(timeout=4)["engine_closed"] for f in [first, *others])
+        assert all(f.result(timeout=30)["engine_closed"] for f in [first, *others])
     assert calls == [1]
     assert svc.close(timeout=0)["state"] == "closed"
 
@@ -216,7 +220,7 @@ def test_shutdown_failure_is_reported(tmp_path, monkeypatch):
         svc.engine, "close", lambda: (_ for _ in ()).throw(RuntimeError("close failed"))
     )
     try:
-        result = svc.close(timeout=3)
+        result = svc.close(timeout=30)
         assert result["state"] == "error" and not result["engine_closed"]
         assert result["error"] == "RuntimeError: close failed"
         assert not result["timed_out"]
@@ -238,18 +242,18 @@ def test_submit_and_shutdown_have_no_orphaned_records(monkeypatch):
 
     def paused(*args, **kwargs):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         return submit(*args, **kwargs)
 
     monkeypatch.setattr(manager._pool, "submit", paused)
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             submission = pool.submit(manager.submit, "race", lambda: {}, {})
-            assert entered.wait(2)
+            assert entered.wait(30)
             shutdown = pool.submit(manager.shutdown, True)
             release.set()
-            job = submission.result(timeout=3)
-            shutdown.result(timeout=3)
+            job = submission.result(timeout=30)
+            shutdown.result(timeout=30)
         assert manager.get(job.id).status in ("done", "cancelled")
         assert manager.shutdown_status()["active"] == []
         with pytest.raises(ShutdownError):
@@ -287,7 +291,7 @@ def test_base_exception_cannot_leave_job_running():
 
     try:
         job = manager.submit("failure", fail, {})
-        assert entered.wait(2)
+        assert entered.wait(30)
         manager.shutdown(wait=True)
         result = manager.get(job.id)
         assert (
@@ -310,11 +314,11 @@ def test_registry_uses_one_deadline_and_cannot_reopen_during_drain(tmp_path):
 
         def hold(event=event):
             event.set()
-            assert release.wait(5)
+            assert release.wait(30)
             return {}
 
         service.jobs.submit("hold", hold, {})
-    assert all(event.wait(2) for event in started)
+    assert all(event.wait(30) for event in started)
     try:
         start = time.monotonic()
         reports = registry.close(timeout=0.05)
@@ -327,7 +331,7 @@ def test_registry_uses_one_deadline_and_cannot_reopen_during_drain(tmp_path):
         )
     finally:
         release.set()
-        assert all(r["engine_closed"] for r in registry.close(timeout=3).values())
+        assert all(r["engine_closed"] for r in registry.close(timeout=30).values())
 
 
 def test_verification_cancels_and_wakes_required_readers(svc, tmp_path, monkeypatch):
@@ -342,17 +346,17 @@ def test_verification_cancels_and_wakes_required_readers(svc, tmp_path, monkeypa
 
     def paused(*args):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         return scan(*args)
 
     monkeypatch.setattr(refresh, "scan_sources", paused)
     svc.read_freshness()
-    assert entered.wait(2)
+    assert entered.wait(30)
     try:
         assert not svc.close(timeout=0.03)["engine_closed"]
     finally:
         release.set()
-    assert svc.close(timeout=3)["engine_closed"]
+    assert svc.close(timeout=30)["engine_closed"]
     assert svc.list_jobs()[0].status == "cancelled"
     assert svc.refresh_status()["running"] is False
     assert svc.refresher.read(ReadPolicy(freshness="wait")).status == "disabled"
@@ -431,7 +435,7 @@ def test_process_exit_waits_for_a_late_embedding_worker(tmp_path):
         worker.drain_once = blocked
         svc.embed_worker = worker
         worker.start()
-        assert entered.wait(3)
+        assert entered.wait(30)
         assert svc.close(timeout=0.03)["state"] == "draining"
         print("main returned while draining", flush=True)
     """)
@@ -452,14 +456,14 @@ def test_process_exit_waits_for_a_late_embedding_worker(tmp_path):
         with pytest.raises(subprocess.TimeoutExpired):
             process.wait(timeout=0.15)
         (tmp_path / "release").touch()
-        _, err = process.communicate(timeout=5)
+        _, err = process.communicate(timeout=30)
         assert process.returncode == 0, err
         assert (tmp_path / "worker-finished").read_text() == "ok"
     finally:
         (tmp_path / "release").touch()
         if process.poll() is None:
             process.kill()
-        process.communicate(timeout=5)
+        process.communicate(timeout=30)
 
 
 def test_captured_export_finishes_without_native_reads_after_shutdown(tmp_path, monkeypatch):
@@ -480,7 +484,7 @@ def test_captured_export_finishes_without_native_reads_after_shutdown(tmp_path, 
         response = endpoint(request, ReadPolicy())
         first = await response.body_iterator.__anext__()
         assert '"type": "grag_export"' in first
-        assert svc.close(timeout=3)["engine_closed"]
+        assert svc.close(timeout=30)["engine_closed"]
         monkeypatch.setattr(
             svc.engine, "execute", lambda *a: pytest.fail("native read after close")
         )
@@ -499,11 +503,11 @@ def test_cancelled_queued_verification_is_not_reported_running(svc):
 
     def hold():
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         return {}
 
     svc.jobs.submit("hold", hold, {})
-    assert entered.wait(2)
+    assert entered.wait(30)
     svc.enable_auto_refresh()
     svc.read_freshness()
     job_id = svc.refresh_status()["job_id"]
@@ -514,4 +518,4 @@ def test_cancelled_queued_verification_is_not_reported_running(svc):
         assert svc.refresh_status()["running"] is False
     finally:
         release.set()
-    assert svc.close(timeout=3)["engine_closed"]
+    assert svc.close(timeout=30)["engine_closed"]
