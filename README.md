@@ -60,9 +60,12 @@ before your first ingest.
   citations and explicit truncation. Budgets use a byte-based token estimate.
 - **Share across harnesses:** Claude Code and Cursor can use one database through
   one owning server. New worktrees get separate databases by default.
+- **Preserve continuity:** consistent backups retain authored history and retry
+  receipts, with verified restore into a separate database.
 
-Code coverage varies: `CALLS` and `INHERITS` are currently Python-only; Svelte and
-Astro script blocks are not indexed. An absent edge does not prove no relationship
+Code coverage varies. Python, JS/TS and Go support conservative static relationships;
+framework scripts and Java/C# overload identities also have explicit coverage.
+See [language coverage](https://krokz.github.io/grag/guides/code/#language-coverage). An absent edge does not prove no relationship
 exists. grag complements source search; useful answers and token savings depend on
 the question, graph and harness.
 

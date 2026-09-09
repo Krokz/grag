@@ -7,7 +7,7 @@ ingest_docs(paths=["/absolute/project/docs"], sections=true, background=true)
 ```
 
 Paths are on the server's filesystem. Poll the returned job with `job_status`.
-For offline CLI use, with no server or client holding the selected database:
+The CLI also routes through the selected graph owner:
 
 ```bash
 grag ingest --sections docs/
@@ -30,10 +30,17 @@ ownership metadata are also preserved with a warning for explicit review.
 New ingests track ownership automatically, with no additional setup or flags.
 Check ingestion `warnings` (or the background job result); the CLI prints them.
 
-## Current scope limits
+## Synchronize a source collection
 
-Document directories are not automatically synchronized like registered code
-scopes. Re-ingest deliberately after edits. Deletions, shrinking batches with the
-same source, changing chunk labels/modes, and source moves need care: full document
-sync and stable document identities across moves are unfinished. Keep the original
-graph when testing a new scope and inspect generated and authored evidence.
+The development version (after 0.8.0) uses the same ignore and boundary policy as
+[code indexing](code.md). Re-ingesting a directory synchronizes successfully scanned
+sources, including deleted files and shrinking JSON/JSONL batches. It also reconciles
+switches between sections/flat mode and chunk labels. A failed or unreadable scan
+preserves omitted sources and reports that deletion synchronization was skipped.
+Documents are not automatically refreshed; rerun ingestion after edits.
+
+Only loader-owned data is reconciled. Authored and legacy unknown relationships
+retain their obsolete endpoints. Stable source identities survive `grag relocate`
+and subsequent re-ingestion. Raw Python/REST ingestion can supply `sync_paths` and
+`IngestDocument.source_file` for an authoritative file collection; ordinary
+`documents=[...]` calls synchronize only their named sources.

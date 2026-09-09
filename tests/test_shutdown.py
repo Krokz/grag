@@ -462,7 +462,7 @@ def test_process_exit_waits_for_a_late_embedding_worker(tmp_path):
         process.communicate(timeout=5)
 
 
-def test_streaming_export_refuses_native_reads_after_shutdown(tmp_path, monkeypatch):
+def test_captured_export_finishes_without_native_reads_after_shutdown(tmp_path, monkeypatch):
     import asyncio
 
     from starlette.requests import Request
@@ -484,8 +484,9 @@ def test_streaming_export_refuses_native_reads_after_shutdown(tmp_path, monkeypa
         monkeypatch.setattr(
             svc.engine, "execute", lambda *a: pytest.fail("native read after close")
         )
-        with pytest.raises(ShutdownError):
-            await response.body_iterator.__anext__()
+        remainder = "".join([chunk async for chunk in response.body_iterator])
+        assert '"type": "complete"' in first + remainder
+        response.close()
 
     try:
         asyncio.run(stream())

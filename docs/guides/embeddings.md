@@ -30,7 +30,7 @@ grag serve --with-mcp
 
 The default model is `BAAI/bge-small-en-v1.5`. First use downloads model assets;
 size and startup time depend on the model/cache. It runs locally through ONNX
-Runtime, without PyTorch. The M16 development build tries a cached load first;
+Runtime, without PyTorch. grag tries a cached load first;
 when missing assets require preparation it logs that step and reports download
 or cache-permission errors. With `HF_HUB_OFFLINE=1`, a failed cached load never
 falls back to a download. Use `grag doctor --prepare` with the same embedding
@@ -90,9 +90,11 @@ Select with `GRAG_VECTOR_CODEC` / `GragConfig.vector_codec`. `fp32` is the defau
 Two honest costs of the codec path: candidate generation for non-fp32 codecs is an O(rows) approximate scan (only pk + code bytes cross the wire; fp32 nodes are fetched for the 4·top_k rescore shortlist only) — that's the property `grag bench` measures, so no ANN index is involved. Without a background worker, searches embed lazily: at most `GRAG_MAX_EMBED_PER_SEARCH` (default 256) nodes per search call, with the remainder reported as `pending_embeddings` on the search response so agents know vector recall is still improving.
 
 Full-precision (`fp32`) retrieval uses an exact cosine scan, also O(rows × dimensions),
-with full records fetched only for the shortlist. Native HNSW acceleration is
-disabled because LadybugDB 0.20.2 can crash when text edits invalidate and refill
-indexed embeddings. On writable open, grag removes its legacy `grag_vec__*`
+with full records fetched only for the shortlist. Native HNSW acceleration remains
+disabled after the LadybugDB 0.20.2 indexed-embedding crash. The 0.20.3 engine
+includes upstream index fixes; grag retains exact cosine and its existing safety
+policy while broader acceleration validation remains separate. On writable open,
+grag removes its legacy `grag_vec__*`
 indexes, checkpoints and reopens before serving; graph data and stored vectors
 are preserved. This also applies when embeddings are disabled. Read-only
 inspection leaves indexes intact; externally managed HNSW indexes require their

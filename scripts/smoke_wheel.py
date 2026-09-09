@@ -2,17 +2,24 @@
 
 No developer extras, manually copied DLLs, or prewarmed extension/model caches.
 PATH excludes other apps during execution (particularly Git/Strawberry/OpenSSL).
+The subsequent timeout gate installs pytest and a verified C-API test fixture.
 """
+
+# This is a CI test driver with fixed commands/artifacts and assertion checks.
+# ruff: noqa: S101, S603, PLW1510
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 import venv
 import zipfile
 from pathlib import Path
@@ -52,6 +59,38 @@ print('wheel: native write/reopen/query, UI asset, real stdio MCP handshake/read
 '''
 
 
+def timeout_gate(python: Path, root: Path, env: dict[str, str]) -> None:
+    """Exercise the installed wheel, including Windows' real C-API fallback.
+
+    pytest is installed only after the ordinary clean-install probes pass.
+    The shared library is a verified test fixture, never a shipped dependency.
+    """
+    checks = root / "timeout-tests"
+    checks.mkdir()
+    for name in ("conftest.py", "test_native_timeouts.py"):
+        shutil.copyfile(ROOT / "tests" / name, checks / name)
+    subprocess.run([str(python), "-m", "pip", "install", "pytest>=8.0"], check=True, cwd=root, env=env)
+    backends = ["pybind"]
+    if os.name == "nt":
+        url = "https://github.com/LadybugDB/ladybug/releases/download/v0.20.3/liblbug-windows-x86_64.zip"
+        with urllib.request.urlopen(url, timeout=120) as response:
+            data = response.read()
+        assert hashlib.sha256(data).hexdigest() == "723ab361d12dc6d79cb57f58d6a34456006c98065cb5036c5b0f446fe768d83d"
+        archive = root / "capi.zip"
+        archive.write_bytes(data)
+        with zipfile.ZipFile(archive) as contents:
+            candidates = [name for name in contents.namelist() if Path(name).name in {"lbug_shared.dll", "lbug.dll"}]
+            assert len(candidates) == 1, candidates
+            library = root / Path(candidates[0]).name
+            library.write_bytes(contents.read(candidates[0]))
+        env = {**env, "LBUG_C_API_LIB_PATH": str(library)}
+        backends.append("capi")
+    for backend in backends:
+        subprocess.run([str(python), "-m", "pytest", "-q", str(checks)], check=True, cwd=root,
+                       env={**env, "LBUG_PYTHON_BACKEND": backend}, timeout=180)
+        print(f"wheel: {backend} native deadlines, commit, rollback, receipt replay and strict reopen passed")
+
+
 def main() -> None:
     arguments = [arg for arg in sys.argv[1:] if arg != "--code"]
     wheels = [Path(arguments[0]).resolve()] if arguments else list((ROOT / "dist").glob("*.whl"))
@@ -77,7 +116,7 @@ def main() -> None:
         home = root / "home"
         home.mkdir()
         # Keep OS bootstrapping variables; exclude project/provider/cache settings.
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("GRAG_", "PYTHON", "HF_", "FASTEMBED", "TREE_SITTER"))}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("GRAG_", "PYTHON", "HF_", "FASTEMBED", "TREE_SITTER", "LBUG_"))}
         system = str(Path(env.get("SystemRoot", "C:/Windows")) / "System32") if os.name == "nt" else "/usr/bin:/bin"
         env.update(HOME=str(home), USERPROFILE=str(home), XDG_CACHE_HOME=str(home / "cache"),
                    LOCALAPPDATA=str(home / "local"), APPDATA=str(home / "roaming"),
@@ -103,6 +142,7 @@ def main() -> None:
         result = subprocess.run([*command, "doctor", "--json"], cwd=root, env=env, capture_output=True, timeout=90)
         assert result.returncode == 0 and json.loads(result.stdout)["ready"], result.stderr
         print("wheel: explicit first-use extension preparation and offline FTS search passed")
+        timeout_gate(python, root, env)
         if "--code" in sys.argv[1:]:
             subprocess.run([str(python), "-m", "pip", "install", f"{wheel}[code]"], check=True, cwd=root, env=env)
             for attempt in range(3):

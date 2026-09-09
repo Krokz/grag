@@ -97,12 +97,14 @@ def test_health(client):
     assert res.json() == {
         "status": "ok",
         "version": grag.__version__,
+        "capabilities": {"ingestion_scope": 2, "snapshot_format": 2},
         "database_id": database_identity(client.app.state.service.config.db_path),
         "server_id": database_identity(client.app.state.service.config.db_path),
         "pid": os.getpid(),
         "mcp_enabled": False,
         "mcp_path": None,
         "embedding": None,
+        "engine": client.app.state.service.engine.runtime_info(),
         "shutdown": {
             "state": "open", "engine_closed": False, "active_operations": 0,
             "jobs": {"active": [], "cancelled": [], "failed": []},
@@ -978,40 +980,25 @@ def test_export_endpoint_requires_token(token_client):
     assert token_client.get("/api/export").status_code == 401
 
 
-def test_export_from_server_streams_to_file(tmp_path, monkeypatch):
-    import io
+def test_export_from_server_streams_to_file(tmp_path, monkeypatch, client):
+    import httpx2
 
     from grag.transfer import export_from_server
 
+    snapshot = client.get("/api/export").text
     seen = {}
+    real_client = httpx2.Client
 
-    class Resp(io.BytesIO):
-        status = 200
+    def respond(request):
+        if request.url.path == "/api/health":
+            return httpx2.Response(200, json={"status": "ok", "database_id": "selected",
+                                              "capabilities": {"snapshot_format": 2}})
+        seen.update(url=str(request.url), auth=request.headers["Authorization"], db=request.headers["X-grag-db"])
+        return httpx2.Response(200, content=snapshot.encode())
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return None
-
-    def fake_urlopen(req, timeout):
-        seen["url"] = req.full_url
-        seen["auth"] = req.get_header("Authorization")
-        seen["db"] = req.get_header("X-grag-db")
-        return Resp(b'{"type":"grag_export"}\n{"type":"schema"}\n')
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("grag.client.httpx2.Client", lambda **kw: real_client(transport=httpx2.MockTransport(respond), **kw))
     out = tmp_path / "backup.jsonl"
-    n = export_from_server(
-        "https://grag.example.com/",
-        str(out),
-        api_token="secret",  # noqa: S106 — test fixture
-        db_name="algo4",
-    )
-    assert n == 2
-    assert seen == {
-        "url": "https://grag.example.com/api/export",
-        "auth": "Bearer secret",
-        "db": "algo4",
-    }
-    assert out.read_text().count("\n") == 2
+    n = export_from_server("https://grag.example.com/", str(out), api_token="secret", db_name="algo4")  # noqa: S106
+    assert n == len(snapshot.splitlines())
+    assert seen == {"url": "https://grag.example.com/api/export", "auth": "Bearer secret", "db": "algo4"}
+    assert out.read_text() == snapshot

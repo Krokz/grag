@@ -75,10 +75,15 @@ are produced by the server's background worker (`/api/health` → `embedding`).
 
 ## Backups
 
-`backup.sh` streams `GET /api/export` from the live server (no downtime) into
-dated, gzipped JSONL. Restore with `grag --db new.lbdb import file.jsonl`.
-Because the `.lbdb` format belongs to the storage engine, JSONL is the durable
-copy — also keep it before upgrading `ladybug`.
+`backup.sh` captures a consistent snapshot from the live server into dated,
+gzipped JSONL. Writes pause during capture; download uses a completed spool. The
+CLI checks completion before publishing. Graph provenance, source ownership,
+history and retry receipts are preserved; vectors/indexes rebuild. After
+decompression, restore with `grag --db new.lbdb import file.jsonl`. The destination
+must be new and is published only after checkpoint, strict reopen and full-content
+verification. [Backup and restore details](../docs/operations/recovery.md) explain
+legacy exports, staging files and snapshot-point continuity. Keep a verified export
+before upgrading `ladybug`.
 
 ## Failure modes
 

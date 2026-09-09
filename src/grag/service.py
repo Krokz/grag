@@ -107,7 +107,7 @@ _LITERALS = re.compile(
     r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|//[^\n]*|/\*.*?\*/", re.DOTALL
 )
 _WRITE_PATTERN = re.compile(
-    r"\b(CREATE|MERGE|DELETE|DETACH|SET|DROP|ALTER|COPY|INSTALL|LOAD|UNINSTALL)\b",
+    r"\b(CREATE|MERGE|DELETE|DETACH|SET|DROP|ALTER|COPY|INSTALL|LOAD|UNINSTALL|BEGIN|COMMIT|ROLLBACK|CHECKPOINT)\b",
     re.IGNORECASE,
 )
 # CALL procedures with side effects (CREATE_VECTOR_INDEX, DROP_FTS_INDEX, ...)
@@ -398,7 +398,7 @@ class GragService:
         from grag.core.revisions import annotate_revisions
 
         rows = annotate_revisions(rows)
-        sub = extract_subgraph(EngineResult(result.columns, rows), self._pk_map())
+        sub = extract_subgraph(EngineResult(result.columns, rows), self._pk_map)
         return QueryResponse(
             columns=result.columns,
             rows=rows,

@@ -32,9 +32,10 @@ import logging
 import os
 import threading
 import weakref
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 from grag.config import EmbedderConfig, GragConfig
 from grag.core.engine import Engine, node_record_from_value
@@ -52,7 +53,6 @@ from grag.core.types import (
     VECTOR_PROPS,
     ScoredNode,
 )
-from grag.retrieval import polar
 
 # ---------------------------------------------------------------------------
 # embedders
@@ -72,6 +72,11 @@ class FastembedEmbedder:
     """Local embeddings via fastembed (optional dependency grag[embed-local])."""
 
     def __init__(self, cfg: EmbedderConfig, *, local_files_only: bool = False):
+        # ONNX 1.29's POSIX telemetry uploader can abort during process exit.
+        # Its full opt-out must precede import/native initialization; the later
+        # disable_telemetry_events API leaves that uploader alive. Respect an
+        # explicit host setting while disabling telemetry uploads by default.
+        os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
         try:
             from fastembed import TextEmbedding
         except ImportError as exc:
@@ -264,7 +269,7 @@ def get_embedder(config: GragConfig) -> Embedder | None:
 # ---------------------------------------------------------------------------
 
 _CODECS = ("fp32", "int8", "binary", "polar")
-_POPCOUNT = np.array([i.bit_count() for i in range(256)], dtype=np.uint8)
+_POPCOUNT = bytes(i.bit_count() for i in range(256))
 
 
 def _check_codec(codec: str) -> None:
@@ -277,6 +282,8 @@ def _check_codec(codec: str) -> None:
 
 def _polar_bits_per_dim() -> float:
     """Angle-quantization budget for the polar codec (env-tunable)."""
+    from grag.retrieval import polar
+
     raw = os.environ.get("GRAG_POLAR_BITS_PER_DIM")
     if not raw:
         return polar.DEFAULT_BITS_PER_DIM
@@ -291,6 +298,8 @@ def _polar_bits_per_dim() -> float:
 
 def split_magnitude(v: np.ndarray) -> tuple[float, np.ndarray]:
     """Polar split: r = L2 norm, u = unit direction (zeros when r == 0)."""
+    import numpy as np
+
     v = np.asarray(v, dtype=np.float32).ravel()
     r = float(np.linalg.norm(v))
     if r == 0.0:
@@ -310,6 +319,8 @@ def encode_direction(
         polar: 6-byte header (magic/version/dim/bits_per_dim) + packed angle
                codes; see grag.retrieval.polar.
     """
+    import numpy as np
+
     _check_codec(codec)
     u = np.asarray(u, dtype=np.float32).ravel()
     if codec == "fp32":
@@ -322,6 +333,8 @@ def encode_direction(
             q = np.round(u * (127.0 / scale)).clip(-127, 127).astype(np.int8)
         return np.float32(scale).tobytes() + q.tobytes()
     if codec == "polar":
+        from grag.retrieval import polar
+
         # polar codes a *direction*: refuse clearly non-unit input instead of
         # quantizing garbage (the zero vector from split_magnitude is allowed
         # through; its stored magnitude _emb_r = 0 annihilates it anyway).
@@ -338,6 +351,8 @@ def encode_direction(
 
 def decode_direction(blob: bytes, codec: str, dim: int) -> np.ndarray:
     """Inverse of encode_direction (int8/binary are lossy approximations)."""
+    import numpy as np
+
     _check_codec(codec)
     blob = bytes(blob)
     if codec == "fp32":
@@ -352,6 +367,8 @@ def decode_direction(blob: bytes, codec: str, dim: int) -> np.ndarray:
         q = np.frombuffer(blob[4:], dtype=np.int8)
         return q.astype(np.float32) * (scale / 127.0)
     if codec == "polar":
+        from grag.retrieval import polar
+
         return polar.reconstruct(blob, dim, _polar_bits_per_dim())
     nbytes = (dim + 7) // 8
     if len(blob) != nbytes:
@@ -371,6 +388,8 @@ def candidate_scores(
     polar decodes each code and dots the reconstructed unit vector with the
     query (polar decode is a table gather + cumulative product, so full
     decoding is cheaper than a codebook-space score would be clever)."""
+    import numpy as np
+
     _check_codec(codec)
     if not codes:
         return np.zeros(0, dtype=np.float32)
@@ -387,6 +406,8 @@ def candidate_scores(
         Q = np.stack([np.frombuffer(bytes(c[4:]), dtype=np.int8) for c in codes])
         return (Q.astype(np.float32) @ uq) * (scales / 127.0)
     if codec == "polar":
+        from grag.retrieval import polar
+
         M = polar.reconstruct_many(
             [bytes(c) for c in codes], dim,
             _polar_bits_per_dim() if polar_bits is None else polar_bits,
@@ -397,7 +418,7 @@ def candidate_scores(
     if C.shape[1] != nbytes:
         raise ValueError(f"binary codes have {C.shape[1]} bytes, expected {nbytes}.")
     qbits = np.packbits((uq >= 0).astype(np.uint8))
-    mismatches = _POPCOUNT[np.bitwise_xor(C, qbits)].sum(axis=1)
+    mismatches = np.frombuffer(_POPCOUNT, dtype=np.uint8)[np.bitwise_xor(C, qbits)].sum(axis=1)
     return np.cos(np.pi * (mismatches.astype(np.float32) / dim)).astype(np.float32)
 
 
@@ -673,6 +694,8 @@ def embed_pending_nodes(
     embedder = get_embedder(snapshot)
     if embedder is None:
         return 0
+    import numpy as np
+
     _check_codec(snapshot.vector_codec)
     _ident(table)
     polar_bits = _polar_bits_per_dim() if snapshot.vector_codec == "polar" else None
@@ -850,6 +873,8 @@ def vector_candidates(
     tables = candidate_tables(engine, config, labels)
     if not tables:
         return []
+    import numpy as np
+
     top_k = candidate_quota(tables, top_k)
     from grag.embedworker import attached_worker
 
@@ -912,6 +937,8 @@ def vector_candidates(
 
 
 def _cosine_scores(E: np.ndarray, q: np.ndarray) -> np.ndarray:
+    import numpy as np
+
     qn = float(np.linalg.norm(q))
     if qn == 0.0 or E.shape[0] == 0:
         return np.zeros(E.shape[0], dtype=np.float32)
@@ -943,6 +970,8 @@ def _exact_scan(
 
     Phase 1 ships only (pk, fp32 vector) per row — full node records are
     fetched for the top_k winners only."""
+    import numpy as np
+
     pk_prop = pk.get(table)
     if not pk_prop:
         # Unreachable via embed_pending_nodes (it requires a pk to key
@@ -999,6 +1028,8 @@ def _codec_candidates(
     the property grag bench measures, so no ANN index is involved — but it
     ships only (pk, code) per row; full nodes + fp32 vectors are fetched for
     the shortlist only."""
+    import numpy as np
+
     pk_prop = pk.get(table)
     if not pk_prop:
         return []  # see _exact_scan

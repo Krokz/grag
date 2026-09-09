@@ -4,8 +4,9 @@
 grag.service.GragService.ingest_code, the MCP tool, POST /api/ingest/code and
 the `grag ingest-code` CLI). It records STRUCTURE ONLY — Repo/Module/Class/
 Function nodes carrying path/line_start/line_end/signature/docstring/language,
-plus TerraformModuleCall nodes (name/source/version) for `module` blocks in
-.tf files, plus CONTAINS_*/IMPORTS/INHERITS/CALLS edges — so an LLM can answer
+Go Constant nodes with source expressions, and TerraformModuleCall nodes
+(name/source/version) for `module` blocks in .tf files, plus
+CONTAINS_*/IMPORTS/INHERITS/IMPLEMENTS_INTERFACE/CALLS edges — so an LLM can answer
 structural questions with cheap Cypher instead of retyping facts (like a
 module's version pin) from memory or a doc that can drift from the source.
 Source bodies stay out of the graph.
@@ -14,7 +15,9 @@ Ids are stable and human-readable: a new Repo id combines its directory name wit
 a hash of its canonical path. Registered Repo IDs are reused after explicit
 relocation. A Module id is `<repo-id>:<relative/path>`, and a
 Class/Function id is `<module_id>#<qualname>` (qualname dotted for nesting,
-e.g. `ClassName.method`). Re-ingesting preserves unchanged nodes while pruning
+e.g. `ClassName.method`). Java/C# functions append a syntax-signature digest to
+distinguish overloads; managed pre-digest records are retained as obsolete evidence.
+Re-ingesting preserves unchanged nodes while pruning
 definitions and generated edges no longer present in successfully parsed or
 deleted source files. Every node/edge carries `_source` provenance.
 
@@ -33,16 +36,17 @@ from __future__ import annotations
 import ast
 import fnmatch
 import hashlib
+import json
 import logging
 import os
-import posixpath
 import re
 import subprocess
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from grag.code_state import (
     INDEX_COLUMNS,
@@ -54,8 +58,8 @@ from grag.code_state import (
 from grag.config import GragConfig
 from grag.core.engine import Engine
 from grag.core.errors import GragError
-from grag.core.limits import bounded_sources, charge, read_source
-from grag.core.mutate import define_schema, upsert_edges, upsert_nodes
+from grag.core.limits import bounded_sources, read_source
+from grag.core.mutate import _upsert_edges, define_schema, upsert_nodes
 from grag.core.types import (
     CodeIngestRequest,
     CodeIngestResponse,
@@ -68,6 +72,11 @@ from grag.core.types import (
     UpsertNode,
     UpsertNodesRequest,
 )
+
+if TYPE_CHECKING:
+    from grag.ingest.code_go import Unit as GoUnit
+    from grag.ingest.code_js import Unit
+    from grag.ingest.code_python import Unit as PythonUnit
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +109,7 @@ _CODE_NODE_TABLES = [
         name="Module",
         primary_key="id",
         searchable=True,
-        properties=[_S(name="path"), _S(name="language"), _S(name="name")],
+        properties=[_S(name="path"), _S(name="language"), _S(name="name"), _S(name="code_coverage")],
     ),
     NodeTableSpec(
         name="Class",
@@ -114,6 +123,7 @@ _CODE_NODE_TABLES = [
             _S(name="signature"),
             _S(name="docstring"),
             _S(name="language"),
+            _S(name="kind"),
         ],
     ),
     NodeTableSpec(
@@ -129,8 +139,16 @@ _CODE_NODE_TABLES = [
             _S(name="docstring"),
             _S(name="language"),
             _S(name="is_method", type="BOOL"),
+            _S(name="identity_signature"),
         ],
     ),
+    NodeTableSpec(name="Constant", primary_key="id", searchable=True, properties=[
+        _S(name="name"), _S(name="path"), _S(name="language"), _S(name="docstring"),
+        _S(name="expression"), _S(name="declared_type"),
+        _S(name="line_start", type="INT64"), _S(name="line_end", type="INT64"),
+        _S(name="expression_line", type="INT64"), _S(name="iota_index", type="INT64"),
+        _S(name="inherited_expression", type="BOOL"),
+    ]),
     # One per Terraform `module { ... }` block, local or remote source alike.
     # name/source/version are read straight off the block by the HCL parser
     # — never hand-typed — so a version pin here can't drift from the .tf
@@ -164,34 +182,25 @@ _CODE_REL_TABLES = [
         from_label="Module",
         to_label="TerraformModuleCall",
     ),
-    RelTableSpec(name="IMPORTS", from_label="Module", to_label="Module"),
-    RelTableSpec(name="INHERITS", from_label="Class", to_label="Class"),
-    RelTableSpec(name="CALLS", from_label="Function", to_label="Function"),
+    RelTableSpec(name="CONTAINS_MODULE_CONSTANT", from_label="Module", to_label="Constant"),
+    RelTableSpec(name="IMPLEMENTS_INTERFACE", from_label="Class", to_label="Class",
+                 properties=[_S(name="sites"), _S(name="resolution"), _S(name="method_set")]),
+    RelTableSpec(name="IMPORTS", from_label="Module", to_label="Module", properties=[_S(name="sites"), _S(name="resolution")]),
+    RelTableSpec(name="INHERITS", from_label="Class", to_label="Class", properties=[_S(name="sites"), _S(name="resolution")]),
+    RelTableSpec(name="CALLS", from_label="Function", to_label="Function", properties=[_S(name="sites"), _S(name="resolution")]),
 ]
 
 # (from_label, to_label) per CONTAINS_* rel, keyed by name since Class-vs-
 # Function/Module-vs-TerraformModuleCall can't be inferred from the rel name
 # alone once there are more than two CONTAINS_MODULE_* kinds.
 _CONTAINS_ENDPOINTS = {
+    "CONTAINS_MODULE_CONSTANT": ("Module", "Constant"),
     "CONTAINS_MODULE_CLASS": ("Module", "Class"),
     "CONTAINS_MODULE_FUNCTION": ("Module", "Function"),
     "CONTAINS_CLASS_FUNCTION": ("Class", "Function"),
     "CONTAINS_MODULE_MODULECALL": ("Module", "TerraformModuleCall"),
 }
 
-_SKIP_DIRS = frozenset(
-    {
-        ".git",
-        "node_modules",
-        ".venv",
-        "venv",
-        "dist",
-        "build",
-        "__pycache__",
-        ".idea",
-        ".vscode",
-    }
-)
 _SKIP_FILE_PATTERNS = ("*.min.js",)
 
 # Content-hashed bundle filenames emitted by Vite/webpack/rollup, e.g.
@@ -230,12 +239,13 @@ _UNSUPPORTED_CODE_SUFFIXES = frozenset({".m", ".mm", ".pl", ".pm", ".ex", ".exs"
 def _walk(
     paths: list[Path], max_file_kb: int, warnings: list[str], *,
     excluded: set[str] | None = None, errors: list[str] | None = None,
+    root: str | None = None,
 ) -> Iterator[tuple[Path, Path]]:
     """Yield (repo_root, file) for every ingestable file under `paths`.
 
     Recursive; each path may be a directory (walked, repo root) or a single
-    file (its parent is the repo root). Skip directories, skip-file glob
-    patterns and oversized files are never yielded; oversized files collect a
+    file (its registered/enclosing root is preserved). Ignore rules, boundaries,
+    skip-file patterns and oversized files are never yielded; oversized files collect a
     warning. Traversal order is sorted, so ingestion is deterministic.
     """
     limit = max_file_kb * 1024
@@ -245,40 +255,25 @@ def _walk(
         if errors is not None:
             errors.append(message)
 
-    def candidates_for(path: Path):
-        if path.is_file():
-            charge("source_entries")
-            yield path.parent, path
-        elif path.is_dir():
-            for dirpath, dirnames, filenames in os.walk(
-                path, onerror=lambda exc: failed(f"skipped directory {exc.filename}: {exc}")
-            ):
-                charge("source_entries", 1 + len(dirnames) + len(filenames))
-                dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
-                for name in sorted(filenames):
-                    yield path, Path(dirpath) / name
-        else:
-            failed(f"skipped {path}: no such file or directory")
+    from grag.ingest.selection import selected_files
 
-    for path in paths:
-        candidates = candidates_for(path)
-        for root, file in candidates:
-            if _skip_file(file.name) or file.suffix.lower() not in (*_PARSERS, *_UNSUPPORTED_CODE_SUFFIXES):
-                continue
-            try:
-                size = file.stat().st_size
-            except OSError as exc:
-                failed(f"skipped {file}: could not stat ({exc})")
-                continue
-            if size > limit:
-                if excluded is not None and file.suffix.lower() in _PARSERS:
-                    excluded.add(str(root.resolve() / file.relative_to(root)))
-                warnings.append(
-                    f"skipped {file}: {size // 1024} KB exceeds max_file_kb={max_file_kb}"
-                )
-                continue
-            yield root, file
-
+    for selected_root, file in selected_files(paths, warnings, root=root, errors=errors):
+        root_path = selected_root
+        if _skip_file(file.name) or file.suffix.lower() not in (*_PARSERS, *_UNSUPPORTED_CODE_SUFFIXES):
+            continue
+        try:
+            size = file.stat().st_size
+        except OSError as exc:
+            failed(f"skipped {file}: could not stat ({exc})")
+            continue
+        if size > limit:
+            if excluded is not None and file.suffix.lower() in _PARSERS:
+                excluded.add(str(root_path.resolve() / file.relative_to(root_path)))
+            warnings.append(
+                f"skipped {file}: {size // 1024} KB exceeds max_file_kb={max_file_kb}"
+            )
+            continue
+        yield root_path, file
 
 # --- python parsing ---------------------------------------------------------------
 
@@ -295,24 +290,13 @@ class _ParsedModule:
     # Terraform `module` blocks (name/source/version read off the block
     # itself, one per block); empty for every non-HCL parser.
     terraform_module_calls: list[UpsertNode] = field(default_factory=list)
-    # Go methods whose receiver type may be declared in a DIFFERENT file of
-    # the same package (idiomatic: a type's methods commonly spread across
-    # files, e.g. cache/client.go declares Cache, cache/load.go adds a
-    # method to it) — (receiver type name, function id), resolved against a
-    # package-wide class index in code.ingest_code rather than linked
-    # same-file like every other language's CONTAINS_CLASS_FUNCTION; empty
-    # for every non-Go parser.
-    go_method_links: list[tuple[str, str]] = field(default_factory=list)
+    constants: list[UpsertNode] = field(default_factory=list)
+    go: GoUnit | None = None
+    python: PythonUnit | None = None
     contains: list[tuple[str, str, str]] = field(
         default_factory=list
     )  # (rel, from_key, to_key)
     import_refs: list[str] = field(default_factory=list)  # dotted names to resolve
-    # local name -> dotted base module, for `from X import name` (used to
-    # resolve bare `name(...)` calls to imported functions, e.g. lazy imports).
-    from_imports: dict[str, str] = field(default_factory=dict)
-    class_bases: list[tuple[str, str]] = field(
-        default_factory=list
-    )  # (class qualname, base expr)
     class_ids: dict[str, str] = field(default_factory=dict)  # simple name -> class id
     func_ids: dict[str, str] = field(
         default_factory=dict
@@ -320,10 +304,11 @@ class _ParsedModule:
     method_ids: dict[str, dict[str, str]] = field(
         default_factory=dict
     )  # class qual -> {name -> id}
-    # (caller qualname, "name" | "self_attr", called name)
-    call_refs: list[tuple[str, str, str]] = field(default_factory=list)
-    # Extra module-index keys for non-Python import resolution (C# namespace
-    # names, Terraform module dirs); empty for Python.
+    # Lexical summaries contain no source bodies or retained syntax trees.
+    js_units: list[Unit] = field(default_factory=list)
+    framework: bool = False
+    script_omissions: list[str] = field(default_factory=list)
+    # Extra module-index keys for C# namespaces / Terraform directories.
     aliases: list[str] = field(default_factory=list)
 
 
@@ -342,35 +327,6 @@ def _signature(node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> s
     if node.returns is not None:
         sig += f" -> {ast.unparse(node.returns)}"
     return sig + ":"
-
-
-def _collect_calls(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, out: list[tuple[str, str]]
-) -> None:
-    """Collect (kind, name) call refs from one function's own body.
-
-    kind "name" is a bare `foo(...)` call; kind "self_attr" is `self.foo(...)`.
-    Nested defs/classes have their own call scope and are not descended into;
-    other attribute calls (obj.m(), mod.f()) are unresolved in Wave A.
-    """
-
-    def visit(node: ast.AST) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue
-            if isinstance(child, ast.Call):
-                target = child.func
-                if isinstance(target, ast.Name):
-                    out.append(("name", target.id))
-                elif (
-                    isinstance(target, ast.Attribute)
-                    and isinstance(target.value, ast.Name)
-                    and target.value.id == "self"
-                ):
-                    out.append(("self_attr", target.attr))
-            visit(child)
-
-    visit(func)
 
 
 def _dotted(rel_path: str, repo: str) -> str:
@@ -407,9 +363,11 @@ def _parse_python(
     )
     tree = ast.parse(source)
     src = str(path)
+    symbols: dict[int, tuple[str, str]] = {}
 
     def add_class(node: ast.ClassDef, qual: str) -> None:
         cid = f"{module_id}#{qual}"
+        symbols[id(node)] = ("Class", cid)
         parsed.classes.append(
             UpsertNode(
                 label="Class",
@@ -430,7 +388,6 @@ def _parse_python(
         # nested classes attach to the Module like top-level ones.
         parsed.contains.append(("CONTAINS_MODULE_CLASS", module_id, cid))
         parsed.class_ids.setdefault(node.name, cid)
-        parsed.class_bases.extend((qual, ast.unparse(b)) for b in node.bases)
 
     def add_function(
         node: ast.FunctionDef | ast.AsyncFunctionDef,
@@ -438,6 +395,7 @@ def _parse_python(
         parent_class: str | None,
     ) -> None:
         fid = f"{module_id}#{qual}"
+        symbols[id(node)] = ("Function", fid)
         is_method = parent_class is not None
         parsed.functions.append(
             UpsertNode(
@@ -467,12 +425,8 @@ def _parse_python(
             parsed.contains.append(("CONTAINS_MODULE_FUNCTION", module_id, fid))
             if "." not in qual:
                 parsed.func_ids.setdefault(node.name, fid)
-        if calls:
-            refs: list[tuple[str, str]] = []
-            _collect_calls(node, refs)
-            parsed.call_refs.extend((qual, kind, name) for kind, name in refs)
 
-    def visit(stmts: list[ast.stmt], prefix: str, parent_class: str | None) -> None:
+    def visit(stmts: Sequence[ast.AST], prefix: str, parent_class: str | None) -> None:
         for node in stmts:
             if isinstance(node, ast.ClassDef):
                 qual = f"{prefix}.{node.name}" if prefix else node.name
@@ -484,33 +438,16 @@ def _parse_python(
                     node, qual, parent_class if prefix == parent_class else None
                 )
                 visit(node.body, qual, parent_class)
+            else:
+                # Conditionals/try/with blocks do not create Python scopes.
+                # Their declarations still need identities for lexical binding.
+                visit(list(ast.iter_child_nodes(node)), prefix, parent_class)
 
     visit(tree.body, "", None)
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            parsed.import_refs.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            base = node.module or ""
-            if node.level:  # relative import: anchor at this module's package
-                pkg = (
-                    dotted.split(".")
-                    if rel_path.endswith("__init__.py")
-                    else dotted.split(".")[:-1]
-                )
-                keep = max(0, len(pkg) - (node.level - 1))
-                base = ".".join(pkg[:keep] + (base.split(".") if base else []))
-            if base:
-                parsed.import_refs.append(base)
-                # `from pkg import submodule`: the alias may name a module too.
-                parsed.import_refs.extend(
-                    f"{base}.{a.name}" for a in node.names if a.name != "*"
-                )
-                # `from pkg.mod import func` (incl. function-local lazy imports)
-                # lets a bare `func(...)` call resolve to the imported function.
-                for a in node.names:
-                    if a.name != "*":
-                        parsed.from_imports[a.asname or a.name] = base
+    from grag.ingest.code_python import analyze
+
+    parsed.python = analyze(tree, symbols, rel_path)
     return parsed
 
 
@@ -534,7 +471,7 @@ def _tree_sitter_parser(suffix: str) -> Callable[..., _ParsedModule]:
 # tree-sitter wrappers above (Wave B) — neither touches the walk or upsert
 # pipeline.
 _TREE_SITTER_SUFFIXES = (
-    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".tf", ".go", ".vue",
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".tf", ".go", ".vue", ".svelte", ".astro", ".mts", ".cts",
     # spec-driven walkers over tree-sitter-language-pack (grag.ingest.code_langs)
     ".sh", ".bash", ".java", ".kt", ".kts", ".rs", ".c", ".h", ".cc", ".cpp",
     ".cxx", ".hpp", ".hh", ".hxx", ".rb", ".php", ".swift", ".lua", ".scala",
@@ -545,6 +482,7 @@ for _suffix in _TREE_SITTER_SUFFIXES:
     _PARSERS[_suffix] = _tree_sitter_parser(_suffix)
 del _suffix
 SUPPORTED_SUFFIXES = tuple(_PARSERS)
+PARSER_REVISION = "m36-m37-bindings-identities-v1"
 
 
 # --- resolution (IMPORTS / INHERITS / CALLS over the whole scanned set) ------------
@@ -564,93 +502,42 @@ def _resolve_module_id(dotted: str, index: dict[str, list[str]]) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _resolve_imported_func(
-    name: str,
-    base: str,
-    module_index: dict[str, list[str]],
-    by_module: dict[str, _ParsedModule],
-) -> str | None:
-    """Resolve a bare call to a `from base import name` imported function.
-
-    `base` is the imported module's dotted path; the function lives in that
-    module's func_ids under `name`. Returns the function id, or None if the
-    module isn't in the scanned set or doesn't define it (external import).
-    """
-    mid = _resolve_module_id(base, module_index)
-    if mid and mid in by_module:
-        return by_module[mid].func_ids.get(name)
-    return None
-
-
-def _resolve_base(
-    expr: str,
-    parsed: _ParsedModule,
-    module_index: dict[str, list[str]],
-    class_index: dict[str, list[str]],
-    by_module: dict[str, _ParsedModule],
-) -> str | None:
-    """Resolve an unparsed base expression ('Foo', 'mod.Foo', 'Generic[T]') to
-    a scanned Class id: same module first, then the named module, then a
-    globally unique class of that name. Best-effort; None skips the edge."""
-    name = expr.split("[")[0].strip()  # drop generics subscript
-    if not name:
-        return None
-    parts = name.split(".")
-    cls_name = parts[-1]
-    if len(parts) == 1:
-        own = parsed.class_ids.get(cls_name)
-        if own:
-            return own
-    else:
-        mid = _resolve_module_id(".".join(parts[:-1]), module_index)
-        if mid and mid in by_module:
-            found = by_module[mid].class_ids.get(cls_name)
-            if found:
-                return found
-    matches = class_index.get(cls_name, [])
-    return matches[0] if len(matches) == 1 else None
-
-
-def _missing_module_sources(engine: Engine, directory_roots: set[Path]) -> set[str]:
-    """Previously ingested files that disappeared below an authoritative root."""
-
-    missing: set[str] = set()
-    for root in directory_roots:
-        prefix = f"{root}{os.sep}"
-        rows = engine.execute(
-            "MATCH (n:Module) WHERE n._source STARTS WITH $prefix "
-            "RETURN DISTINCT n._source",
-            {"prefix": prefix},
-        ).rows
-        for row in rows:
-            source = row[0]
-            if source and not Path(str(source)).exists():
-                missing.add(str(source))
-    return missing
-
-
 def _prune_code_nodes(
     engine: Engine,
     *,
     authoritative_sources: set[str],
     desired_by_label_source: dict[str, dict[str, set[str]]],
+    warnings: list[str],
 ) -> int:
     if not authoritative_sources:
         return 0
     pruned = 0
-    for label in ("Module", "Class", "Function", "TerraformModuleCall"):
+    module_ids: dict[str, list[str]] = {}
+    for key, source in engine.execute(
+        "MATCH (m:Module) WHERE m._source IN $sources "
+        "AND (m._ingest_hash IS NOT NULL OR m._source_state IS NOT NULL) RETURN m.id,m._source",
+        {"sources": sorted(authoritative_sources)},
+    ).rows:
+        module_ids.setdefault(source, []).append(key)
+    for label in ("Module", "Class", "Function", "Constant", "TerraformModuleCall"):
         desired_by_source = desired_by_label_source[label]
         for source in sorted(authoritative_sources):
-            result = engine.execute_write(
-                f"MATCH (n:{label}) WHERE n._source = $source "
-                "AND NOT n.id IN $keys DETACH DELETE n RETURN count(n)",
-                {
-                    "source": source,
-                    "keys": sorted(desired_by_source.get(source, set())),
-                },
+            from grag.ingest.document_sync import prune_unreferenced_nodes
+
+            legacy_guard = (
+                "AND (n.language IS NULL OR NOT n.language IN ['java','csharp'] OR n.identity_signature IS NOT NULL) "
+                if label == "Function" else ""
             )
-            if result.rows:
-                pruned += int(result.rows[0][0])
+            pruned += prune_unreferenced_nodes(
+                engine, label, "n._source = $source AND NOT n.id IN $keys "
+                + legacy_guard +
+                "AND (n._source_state IS NOT NULL OR n.id IN $modules "
+                "OR any(mid IN $modules WHERE n.id STARTS WITH (mid + '#')))",
+                {"source": source, "keys": sorted(desired_by_source.get(source, set())),
+                 "modules": module_ids.get(source, [])},
+                warnings, state_prop="_source_state",
+            )
+
     return pruned
 
 
@@ -659,6 +546,7 @@ def _prune_code_edges(
     *,
     authoritative_sources: set[str],
     desired: set[tuple[str, str, str, str]],
+    warnings: list[str],
 ) -> int:
     """Delete only generated edges absent from the newly resolved graph."""
 
@@ -666,12 +554,15 @@ def _prune_code_edges(
         return 0
     pruned = 0
     for spec in _CODE_REL_TABLES:
+        unknown = 0
         rows = engine.execute(
-            f"MATCH (a)-[r:{spec.name}]->(b) RETURN a.id, b.id, r._source"
+            f"MATCH (a)-[r:{spec.name}]->(b) RETURN a.id, b.id, r._source, r._code_owner, b._source"
         ).rows
-        for from_key, to_key, source in rows:
+        for from_key, to_key, source, owner, target_source in rows:
             edge_key = (spec.name, str(from_key), str(to_key), str(source))
-            if source not in authoritative_sources or edge_key in desired:
+            if owner is None and ({source, target_source} & authoritative_sources) and edge_key not in desired:
+                unknown += 1
+            if owner != source or not ({source, target_source} & authoritative_sources) or edge_key in desired:
                 continue
             result = engine.execute_write(
                 f"MATCH (a)-[r:{spec.name}]->(b) "
@@ -685,6 +576,8 @@ def _prune_code_edges(
             )
             if result.rows:
                 pruned += int(result.rows[0][0])
+        if unknown:
+            warnings.append(f"Preserved {unknown} {spec.name} relationship(s) with unknown ownership from an older code index; review obsolete links explicitly.")
     return pruned
 
 
@@ -744,7 +637,10 @@ def _ensure_repo_staleness_columns(engine: Engine) -> None:
     databases ingested before these columns existed need an explicit ADD.
     """
     _ensure_columns(engine, "Repo", (*_REPO_STALENESS_COLUMNS, *INDEX_COLUMNS))
-    _ensure_columns(engine, "Module", (_INGEST_HASH_PROP,))
+    _ensure_columns(engine, "Module", (_INGEST_HASH_PROP, "code_coverage"))
+    _ensure_columns(engine, "Class", ("kind",))
+    for table in ("CALLS", "INHERITS", "IMPORTS"):
+        _ensure_columns(engine, table, ("sites", "resolution"))
 
 
 def _ensure_columns(engine: Engine, table: str, columns: tuple[str, ...]) -> None:
@@ -768,7 +664,7 @@ def _ingest_hash(data: bytes, *, calls: bool) -> str:
     from grag import __version__
 
     h = hashlib.sha256(data)
-    h.update(f"\x00calls={int(calls)}\x00grag={__version__}".encode())
+    h.update(f"\x00calls={int(calls)}\x00grag={__version__}\x00parser={PARSER_REVISION}".encode())
     return h.hexdigest()
 
 
@@ -780,7 +676,7 @@ def _stored_ingest_hashes(engine: Engine, roots: set[Path]) -> dict[str, str]:
         try:
             rows = engine.execute(
                 f"MATCH (n:Module) WHERE n._source STARTS WITH $prefix "
-                f"AND n.{_INGEST_HASH_PROP} IS NOT NULL "
+                f"AND n.{_INGEST_HASH_PROP} IS NOT NULL AND coalesce(n._source_state,'') <> 'obsolete' "
                 f"RETURN n._source, n.{_INGEST_HASH_PROP}",
                 {"prefix": prefix},
             ).rows
@@ -856,6 +752,11 @@ def _ingest_code(
         ),
     )
     _ensure_repo_staleness_columns(engine)
+    _ensure_columns(engine, "Function", ("identity_signature",))
+    for spec in _CODE_REL_TABLES:
+        _ensure_columns(engine, spec.name, ("_code_owner",))
+    for label in ("Module", "Class", "Function", "Constant", "TerraformModuleCall"):
+        _ensure_columns(engine, label, ("_source_state",))
 
     warnings: list[str] = []
     input_paths = [Path(p).expanduser() for p in req.paths]
@@ -863,15 +764,20 @@ def _ingest_code(
 
     persisted_ids = registered_repo_ids(engine)
     roots: dict[str, Path] = {}
-    directory_roots: set[Path] = set()
-    for path in input_paths:
-        if path.is_dir():
-            root = path.resolve()
-            directory_roots.add(root)
-        elif path.is_file():
-            root = path.resolve().parent
-        else:
+    from grag.ingest.selection import path_roots
+
+    if req.replace_scope and not req.root:
+        raise GragError("replace_scope requires an explicit root", hint="Set root to the registered Repo.path; paths=[] removes its code scope.")
+    for path, selected_root in path_roots(input_paths, req.root, registered=[Path(p) for p in persisted_ids]).items():
+        if not path.exists() and not req.root:
+            warnings.append(f"skipped {path}: no such file or directory")
             continue
+        root = selected_root.resolve()
+        roots[persisted_ids.get(str(root), _repo_id(root))] = root
+    if req.root:
+        root = Path(req.root).expanduser().resolve()
+        if not root.is_dir():
+            raise GragError(f"Indexed root is missing or inaccessible: {root}")
         roots[persisted_ids.get(str(root), _repo_id(root))] = root
     ingested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     repos: dict[str, UpsertNode] = {
@@ -901,8 +807,16 @@ def _ingest_code(
         _stored_ingest_hashes(engine, set(roots.values())) if req.incremental else {}
     )
     unsupported: dict[str, int] = {}
+    selected_sources: set[str] = set()
+    walk_errors: list[str] = []
+    candidates: list[tuple[Path, Path]] = []
+    for scope in scopes.values():
+        candidates.extend(_walk([Path(p) for p in scope.paths], req.max_file_kb,
+                                warnings, root=scope.root, errors=walk_errors))
+    selected_sources.update(str(file) for _, file in candidates)
 
-    for walked_root, walked_file in _walk(input_paths, req.max_file_kb, warnings):
+    go_metadata: dict[Path, bytes] = {}
+    for walked_root, walked_file in candidates:
         rel_path = walked_file.relative_to(walked_root).as_posix()
         root = walked_root.resolve()
         # Keep the lexical path below the canonical root so provenance-based
@@ -920,6 +834,10 @@ def _ingest_code(
             raw = read_source(file, req.max_file_kb * 1024)
             source = raw.decode("utf-8")
             parsed = parser(file, source, repo=repo, rel_path=rel_path, calls=req.calls)
+            if parsed.go is not None:
+                from grag.ingest.go_modules import package_path
+
+                parsed.go.import_path = package_path(file, root, go_metadata)
             if rel_path == "__init__.py":
                 parsed.dotted = repo_name
             parsed_modules.append(parsed)
@@ -935,6 +853,7 @@ def _ingest_code(
         except (SyntaxError, ValueError) as exc:
             warnings.append(f"skipped {file}: could not parse ({exc})")
 
+    parsed_hashes.update({str(path): hashlib.sha256(raw).hexdigest() for path, raw in go_metadata.items()})
     for suffix in sorted(unsupported):
         warnings.append(
             f"skipped {unsupported[suffix]} file(s) with extension '{suffix}': "
@@ -944,19 +863,10 @@ def _ingest_code(
     # Cross-module resolution: IMPORTS, INHERITS and CALLS need the whole
     # scanned set, so edges are built after every module is parsed.
     module_index: dict[str, list[str]] = {}
-    class_index: dict[str, list[str]] = {}
     by_module: dict[str, _ParsedModule] = {}
-    # (package directory, type name) -> class id, for resolving Go method
-    # receivers: a type's methods routinely live in a different file of the
-    # same package than the type declaration itself (see _walk_go), so
-    # class ids can't be derived from the method's own file/module.
-    go_class_by_pkg: dict[tuple[str, str], str] = {}
     for pm in parsed_modules:
         mid = str(pm.module.key)
         by_module[mid] = pm
-        pkg_dir = posixpath.dirname(str(pm.module.properties.get("path", "")))
-        for cid in pm.class_ids.values():
-            go_class_by_pkg.setdefault((pkg_dir, cid.rsplit("#", 1)[1]), cid)
         # Index both the repo-relative dotted path and the repo-qualified one:
         # when the repo dir IS the top package (repo "pkg" holding core.py),
         # absolute imports say "pkg.core" while the relative dotted is "core".
@@ -971,21 +881,6 @@ def _ingest_code(
             module_index.setdefault(key, [])
             if mid not in module_index[key]:
                 module_index[key].append(mid)
-        for cid in pm.class_ids.values():
-            simple = cid.rsplit("#", 1)[1].rsplit(".", 1)[-1]
-            class_index.setdefault(simple, [])
-            if cid not in class_index[simple]:
-                class_index[simple].append(cid)
-
-    # Global function index (simple name -> ids) for resolving bare calls to
-    # from-imported or otherwise-referenced functions defined in scanned modules.
-    func_index: dict[str, list[str]] = {}
-    for pm in parsed_modules:
-        for n in pm.functions:
-            simple = str(n.key).rsplit("#", 1)[1].rsplit(".", 1)[-1]
-            func_index.setdefault(simple, [])
-            if str(n.key) not in func_index[simple]:
-                func_index[simple].append(str(n.key))
 
     edges: dict[tuple[str, str, str], UpsertEdge] = {}
 
@@ -1015,48 +910,54 @@ def _ingest_code(
         for rel, from_key, to_key in pm.contains:
             from_label, to_label = _CONTAINS_ENDPOINTS[rel]
             add_edge(rel, from_label, from_key, to_label, to_key, src)
-        if pm.go_method_links:
-            pkg_dir = posixpath.dirname(str(pm.module.properties.get("path", "")))
-            for recv_type, fid in pm.go_method_links:
-                target = go_class_by_pkg.get((pkg_dir, recv_type))
-                if target:
-                    add_edge("CONTAINS_CLASS_FUNCTION", "Class", target, "Function", fid, src)
-                # else: receiver type not declared anywhere in the scanned
-                # package (e.g. a generic/embedded edge case tree-sitter
-                # didn't resolve) — the Function node still exists, just
-                # unlinked, same as any other best-effort miss here.
-        for ref in pm.import_refs:
+        for ref in ([] if pm.js_units or pm.framework or pm.go is not None or pm.python is not None else pm.import_refs):
             target = _resolve_module_id(ref, module_index)
             if target and target != mid:
                 add_edge("IMPORTS", "Module", mid, "Module", target, src)
-        for qual, expr in pm.class_bases:
-            target = _resolve_base(expr, pm, module_index, class_index, by_module)
-            if target:
-                add_edge("INHERITS", "Class", f"{mid}#{qual}", "Class", target, src)
-        for qual, kind, name in pm.call_refs:
-            caller = f"{mid}#{qual}"
-            if kind == "name":
-                target = pm.func_ids.get(name)
-                if target is None and name in pm.from_imports:
-                    # `from base import name`; `name(...)` -> the imported function
-                    target = _resolve_imported_func(
-                        name, pm.from_imports[name], module_index, by_module
-                    )
-                if target is None:
-                    # Unique global match across the scanned set (guarded/lazy calls).
-                    matches = func_index.get(name, [])
-                    target = matches[0] if len(matches) == 1 else None
-            else:  # self_attr: method on the caller's own class
-                cls_qual = qual.rsplit(".", 1)[0] if "." in qual else ""
-                target = pm.method_ids.get(cls_qual, {}).get(name)
-            if target:
-                add_edge("CALLS", "Function", caller, "Function", target, src)
+
+    from grag import __version__
+    from grag.ingest.code_go import resolve as resolve_go
+    from grag.ingest.code_js import resolve as resolve_js
+    from grag.ingest.code_python import resolve as resolve_python
+
+    js_edges = resolve_js(parsed_modules, calls=req.calls)
+    go_edges = resolve_go(parsed_modules, calls=req.calls)
+    python_edges = resolve_python(parsed_modules, calls=req.calls)
+    if any(pm.go is not None for pm in parsed_modules):
+        warnings.append("Go relationship coverage is partial static analysis. Inspect Module.code_coverage; interface calls target declarations, constant expressions are not evaluated, and empty edges do not prove absence.")
+    for edge in [*js_edges, *go_edges, *python_edges]:
+        edges[(edge.type, str(edge.from_key), str(edge.to_key))] = edge
+    if any(pm.js_units or pm.framework for pm in parsed_modules):
+        warnings.append("JS/TS relationship coverage is partial static analysis. Inspect Module.code_coverage for unresolved calls/imports and omitted framework scripts; empty edges do not prove absence.")
+    # Dependencies can change relationships/coverage without editing the caller.
+    # Include Python bindings, JS exports and Go package/method-set changes.
+    derived: dict[str, list[Any]] = {}
+    for edge in [*js_edges, *go_edges, *python_edges]:
+        derived.setdefault(str(edge.source), []).append([
+            edge.type, edge.from_key, edge.to_key, edge.properties,
+        ])
+    for pm in parsed_modules:
+        if not pm.js_units and not pm.framework and pm.go is None and pm.python is None:
+            continue
+        source = str(pm.module.source)
+        digest = hashlib.sha256(json.dumps([
+            parsed_hashes[source], __version__, PARSER_REVISION, req.calls,
+            pm.module.properties.get("code_coverage"),
+            sorted(derived.get(source, []), key=lambda row: (row[0], row[1], row[2])),
+        ], sort_keys=True).encode()).hexdigest()
+        if not req.incremental or stored_hashes.get(source) != digest:
+            changed_sources.add(source)
+            new_hashes[source] = digest
+        else:
+            changed_sources.discard(source)
+            new_hashes.pop(source, None)
 
     nodes_by_label: list[tuple[str, dict[str, UpsertNode]]] = [
         ("Repo", repos),
         ("Module", {str(pm.module.key): pm.module for pm in parsed_modules}),
         ("Class", {str(n.key): n for pm in parsed_modules for n in pm.classes}),
         ("Function", {str(n.key): n for pm in parsed_modules for n in pm.functions}),
+        ("Constant", {str(n.key): n for pm in parsed_modules for n in pm.constants}),
         (
             "TerraformModuleCall",
             {
@@ -1071,6 +972,7 @@ def _ingest_code(
         "Module": {},
         "Class": {},
         "Function": {},
+        "Constant": {},
         "TerraformModuleCall": {},
     }
     verified = verify_ingest(
@@ -1094,14 +996,20 @@ def _ingest_code(
             if to_write:
                 summary = upsert_nodes(engine, config, UpsertNodesRequest(nodes=to_write))
                 warnings.extend(summary.warnings)
+                if label != "Repo":
+                    engine.execute_write(f"MATCH (n:{label}) WHERE n.id IN $keys SET n._source_state='current'", {"keys": [n.key for n in to_write]})
 
         # Pruning and edge writes are scoped to changed + deleted files. An edge
         # is (re)written when its own file changed OR its target's file changed:
         # a symbol added to B that an unchanged A already referenced gains its
         # edge without rewriting all of A.
-        authoritative_sources = changed_sources | _missing_module_sources(
-            engine, directory_roots
-        )
+        removed_sources: set[str] = set()
+        if not walk_errors:
+            for key in roots:
+                rows = engine.execute("MATCH (m:Module) WHERE m.id STARTS WITH $prefix RETURN m._source",
+                                      {"prefix": f"{key}:"}).rows
+                removed_sources.update(str(row[0]) for row in rows if row[0] and str(row[0]) not in selected_sources)
+        authoritative_sources = changed_sources | removed_sources
         module_source = {mid: str(pm.module.source) for mid, pm in by_module.items()}
 
         def owning_source(key: str) -> str | None:
@@ -1121,11 +1029,16 @@ def _ingest_code(
             engine,
             authoritative_sources=authoritative_sources,
             desired=desired_edges,
+            warnings=warnings,
         )
+        from grag.ingest.code_identity import retire_legacy_functions
+
+        retire_legacy_functions(engine, authoritative_sources, warnings)
         nodes_pruned = _prune_code_nodes(
             engine,
             authoritative_sources=authoritative_sources,
             desired_by_label_source=desired_by_label_source,
+            warnings=warnings,
         )
         nodes_pruned += _prune_legacy_repos(engine, repos)
 
@@ -1136,11 +1049,18 @@ def _ingest_code(
         for rel_type in sorted(edges_by_type):
             batch = edges_by_type[rel_type]
             edge_count += len(batch)
-            summary = upsert_edges(engine, config, UpsertEdgesRequest(edges=batch))
-            warnings.extend(summary.warnings)
+            by_source: dict[str, list[UpsertEdge]] = {}
+            for edge in batch:
+                by_source.setdefault(str(edge.source), []).append(edge)
+            for source, owned in by_source.items():
+                summary = _upsert_edges(engine, config, UpsertEdgesRequest(edges=owned), code_owner=source)
+                warnings.extend(summary.warnings)
 
         _record_ingest_hashes(engine, new_hashes)
         record_generations(engine, scopes, verified)
+        for key, scope in scopes.items():
+            if not scope.paths:
+                engine.execute_write("MATCH (r:Repo {id:$key}) SET r._index_generation=NULL, r._index_error=NULL", {"key": key})
 
     if config.embedder is not None:
         from grag.embedworker import notify_embed_worker
@@ -1153,6 +1073,7 @@ def _ingest_code(
         classes=counts["Class"],
         functions=counts["Function"],
         module_calls=counts["TerraformModuleCall"],
+        constants=counts["Constant"],
         edges=len(edges),
         nodes_pruned=nodes_pruned,
         edges_pruned=edges_pruned,
@@ -1171,29 +1092,30 @@ def ingest_code_paths(
     *,
     calls: bool = True,
     max_file_kb: int = 1024,
+    root: Path | None = None,
+    replace_scope: bool = False,
 ) -> str:
     """Ingest code structure from `paths` and return a human-readable summary
     for the CLI (mirrors loaders.ingest_paths)."""
-    from grag.service import GragService
+    from grag.client import GraphClient
 
-    service = GragService(config)
-    try:
-        resp = service.ingest_code(
-            CodeIngestRequest(
-                paths=[str(p) for p in paths], calls=calls, max_file_kb=max_file_kb
-            )
-        )
-    finally:
-        service.close()
+    if config.server_url:
+        raise GragError("ingest-code needs paths on the database server's filesystem.", hint="Run this command on that host, or use the ingest_code MCP tool with server paths.")
+    with GraphClient(config) as client:
+        resp = CodeIngestResponse.model_validate(client.call("ingest_code",
+            CodeIngestRequest(paths=[str(p.expanduser().absolute()) for p in paths],
+                              root=str(root.expanduser().resolve()) if root else None,
+                              replace_scope=replace_scope, calls=calls, max_file_kb=max_file_kb)))
+        target = client.target
 
     lines = [
         (
             f"Ingested code from {len(paths)} path(s): "
             f"{resp.repos} repo(s), {resp.modules} module(s), {resp.classes} class(es), "
-            f"{resp.functions} function(s), {resp.edges} edge(s) resolved; "
+            f"{resp.functions} function(s), {resp.constants} constant(s), {resp.edges} edge(s) resolved; "
             f"{resp.files_unchanged}/{resp.files_parsed} file(s) unchanged (skipped); "
             f"{resp.nodes_pruned} stale node(s) and {resp.edges_pruned} stale edge(s) "
-            f"pruned in {config.db_path}."
+            f"pruned in {target}."
         )
     ]
     if resp.warnings:

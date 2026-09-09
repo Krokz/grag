@@ -23,7 +23,7 @@ def _state(engine):
     records = []
     for line in export_lines(engine):
         record = json.loads(line)
-        if record["type"] == "grag_export":
+        if record["type"] in {"grag_export", "complete"}:
             continue
         record.pop("created_at", None)
         if record["type"] == "node":
@@ -54,7 +54,7 @@ def _change_repo(root):
 @pytest.mark.parametrize("initially_indexed", [False, True])
 @pytest.mark.parametrize("phase", [
     "upsert_nodes", "_prune_code_edges", "_prune_code_nodes",
-    "_prune_legacy_repos", "upsert_edges", "_record_ingest_hashes",
+    "_prune_legacy_repos", "_upsert_edges", "_record_ingest_hashes",
 ])
 def test_interruption_rolls_back_and_retry_matches_clean_ingest(
     engine, tmp_path, monkeypatch, initially_indexed, phase
@@ -167,14 +167,14 @@ def test_failed_ingest_remains_rolled_back_after_reopen(tmp_path, monkeypatch):
         ingest_code(engine, cfg, req)
         before = _state(engine)
         _change_repo(root)
-        real = code.upsert_edges
+        real = code._upsert_edges
 
         def interrupted(*args, **kwargs):
             real(*args, **kwargs)
             raise RuntimeError("edge interruption")
 
         with monkeypatch.context() as fault:
-            fault.setattr(code, "upsert_edges", interrupted)
+            fault.setattr(code, "_upsert_edges", interrupted)
             with pytest.raises(RuntimeError, match="edge interruption"):
                 ingest_code(engine, cfg, req)
     with Engine(cfg) as reopened:
@@ -198,11 +198,11 @@ from grag.config import GragConfig
 from grag.core.engine import Engine
 from grag.core.types import CodeIngestRequest
 code = importlib.import_module('grag.ingest.code')
-real = code.upsert_edges
+real = code._upsert_edges
 def crash(*args, **kwargs):
     real(*args, **kwargs)
     os._exit(73)
-code.upsert_edges = crash
+code._upsert_edges = crash
 cfg = GragConfig(db_path=sys.argv[1], buffer_pool_size=128 * 1024**2)
 engine = Engine(cfg)
 code.ingest_code(engine, cfg, CodeIngestRequest(paths=[sys.argv[2]]))

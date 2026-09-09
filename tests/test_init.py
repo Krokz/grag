@@ -343,13 +343,17 @@ def test_skill_ops_claude_and_cursor_paths(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
     ops = plan_skill_ops(["claude", "cursor"], tmp_path)
-    paths = {op.path for op in ops}
+    paths = {op.path for op in ops if op.path.name == "SKILL.md"}
     assert paths == {
         tmp_path / ".claude" / "skills" / "grag" / "SKILL.md",
         tmp_path / ".cursor" / "skills" / "grag" / "SKILL.md",
     }
     assert all(op.created for op in ops)
-    assert all(op.content.startswith("---\n") for op in ops)
+    assert all(op.content.startswith("---\n") for op in ops if op.path.name == "SKILL.md")
+    for path in paths:
+        assert {op.path.name for op in ops if op.path.parent == path.parent / "references"} == {
+            "memory.md", "ingestion.md", "operations.md",
+        }
 
 
 def test_skill_ops_skip_clients_without_skill_support(tmp_path, monkeypatch):
@@ -406,9 +410,9 @@ def test_skill_ops_replace_existing_grag_skill(tmp_path, monkeypatch, newline):
     existing.parent.mkdir(parents=True)
     existing.write_bytes("---\nname: grag\ndescription: old\n---\n\nold version\n".replace("\n", newline).encode())
     ops = plan_skill_ops(["claude"], tmp_path)
-    assert len(ops) == 1
-    assert not ops[0].created
-    assert ops[0].content == _skill_template().replace("\n", newline)
+    op = next(op for op in ops if op.path == existing)
+    assert not op.created
+    assert op.content == _skill_template().replace("\n", newline)
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
@@ -422,11 +426,11 @@ def test_skill_ops_append_to_foreign_skill(tmp_path, monkeypatch, newline):
     original = "---\nname: mine\ndescription: mine\n---\n\nuser content\n".replace("\n", newline)
     existing.write_bytes(original.encode())
     ops = plan_skill_ops(["claude"], tmp_path)
-    assert len(ops) == 1
-    assert not ops[0].created
-    assert ops[0].content.startswith(original)
-    assert "user content" in ops[0].content
-    assert ops[0].content.endswith(_skill_template().replace("\n", newline))
+    op = next(op for op in ops if op.path == existing)
+    assert not op.created
+    assert op.content.startswith(original)
+    assert "user content" in op.content
+    assert op.content.endswith(_skill_template().replace("\n", newline))
     from grag.project import apply_ops, plan_skill_removal_ops
 
     apply_ops(ops)
@@ -481,7 +485,6 @@ def test_remove_ops_restore_appended_skill(tmp_path, monkeypatch):
     apply_ops(plan_skill_ops(["claude"], tmp_path))
     assert skill.read_text() != original  # template was appended
     ops = plan_remove_ops(["claude"], tmp_path)
-    assert len(ops) == 1
-    assert isinstance(ops[0], WriteOp)
+    assert isinstance(next(op for op in ops if op.path == skill), WriteOp)
     apply_ops(ops)
     assert skill.read_text() == original

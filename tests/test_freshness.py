@@ -432,7 +432,7 @@ def test_options_and_file_scope_survive_restart(tmp_path):
         assert _names(svc) == {"beta"}
         assert (
             json.loads(index_records(svc.engine)[str(root)]["_index_options"])
-            == req.model_dump()
+            == req.model_copy(update={"root": str(root)}).model_dump()
         )
     finally:
         svc.close()
@@ -447,7 +447,7 @@ def test_partial_ingest_keeps_registered_scope_and_latest_options(indexed):
     )
     stored = index_records(svc.engine)[str(root)]
     assert json.loads(stored["_index_options"])["paths"] == [str(root)]
-    assert stored["_index_error"]  # only part of the registered scope was parsed
+    assert stored["_index_error"] is None  # the complete saved scope is parsed
     assert _fresh(svc).status == "fresh"
     assert _names(svc) == {"alpha", "other"}
     assert (
@@ -723,8 +723,12 @@ def test_registered_mcp_read_policies_and_metadata(tmp_path, name, arguments):
         if "token_budget" in arguments:
             assert (len(text.encode()) + 3) // 4 <= arguments["token_budget"]
         tool = next(t for t in asyncio.run(server.list_tools()) if t.name == name)
-        assert "freshness_timeout_ms" in tool.description
-        assert "Legacy indexes" in tool.description
+        # Shared semantics live once in server instructions; per-tool schemas
+        # still expose the control and each read reminds callers to check status.
+        assert "freshness_timeout_ms" in tool.input_schema["properties"]
+        assert "freshness.status" in tool.description
+        assert "freshness_timeout_ms" in mcp._INSTRUCTIONS
+        assert "Legacy indexes" in mcp._INSTRUCTIONS
         assert set(tool.input_schema["properties"]["freshness"]["enum"]) == {
             "allow_stale",
             "wait",

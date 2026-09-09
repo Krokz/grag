@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import os
 import threading
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,34 @@ _LOCK = threading.Lock()
 _HANDLES: list[Any] = []  # Keep DLLs alive for the lifetime of native connections.
 _DIRECTORY = Path(__file__).parent / "_runtime"
 _DLLS = ("libcrypto-3-x64.dll", "libssl-3-x64.dll")
+
+
+def connection_backend(connection: Any) -> str:
+    module = type(connection._connection).__module__
+    return "capi" if module == "ladybug._lbug_capi" else "pybind" if module == "ladybug._lbug" else "unknown"
+
+
+def configure_query_timeout(connection: Any, milliseconds: int) -> None:
+    """Use the native deadline on each grag-owned connection, without Python timers.
+
+    Ladybug 0.20.2/0.20.3's C-API wrapper interrupts after min(timeout, 10ms), and its
+    outer Connection rejects two UNWIND ranges immediately when its Python flag
+    is nonzero. The setter also configures the real native timeout. Clear ONLY
+    those Python flags after the native setter succeeds; preserve native limits.
+    No dependency files, global classes or unrelated connections are modified.
+    """
+    capi = connection_backend(connection) == "capi"
+    if capi and version("ladybug") not in {"0.20.2", "0.20.3"}:
+        raise ConfigurationError("Unverified Ladybug C-API timeout implementation",
+                                 hint="Install grag's pinned Ladybug runtime before using the C-API backend.")
+    try:
+        connection.set_query_timeout(milliseconds)
+        if capi:
+            connection._query_timeout_ms = 0
+            connection._connection._query_timeout_ms = 0
+    except Exception as exc:
+        raise ConfigurationError("Could not configure the native query timeout",
+                                 hint="Restart with grag's supported Ladybug runtime; the requested execution bound was not installed.") from exc
 
 
 def prepare_native_runtime() -> None:

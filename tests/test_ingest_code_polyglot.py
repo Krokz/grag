@@ -77,7 +77,7 @@ def test_ingest_typescript(engine, tmp_path):
 
     resp = ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(web)]))
 
-    assert resp.warnings == []
+    assert any("partial static" in w for w in resp.warnings)
     assert (resp.repos, resp.modules, resp.classes, resp.functions) == (1, 2, 2, 4)
 
     rows = engine.execute(
@@ -134,8 +134,8 @@ def test_ingest_typescript(engine, tmp_path):
     }
     # relative import './helper' resolves path-based within the scanned set
     assert _edge_pairs(engine, "IMPORTS") == {(greeter, helper)}
-    # CALLS/INHERITS are Python-only in Wave B
-    assert _count(engine, "MATCH ()-[r:CALLS]->() RETURN count(*)") == 0
+    # The imported function resolves; unbound type-only Speaker does not.
+    assert _edge_pairs(engine, "CALLS") == {(f"{greeter}#Greeter.speak", f"{helper}#format")}
     assert _count(engine, "MATCH ()-[r:INHERITS]->() RETURN count(*)") == 0
 
 
@@ -165,7 +165,7 @@ def test_ingest_javascript_require(engine, tmp_path):
     legacy = _mid(app, "legacy.js")
     helper = _mid(app, "helper.js")
 
-    assert resp.warnings == []
+    assert any("partial static" in w for w in resp.warnings)
     assert (resp.modules, resp.classes, resp.functions) == (2, 1, 2)
     rows = engine.execute("MATCH (m:Module) RETURN m.language").rows
     assert {r[0] for r in rows} == {"javascript"}
@@ -238,11 +238,12 @@ def test_ingest_csharp(engine, tmp_path):
     rows = engine.execute(
         "MATCH (f:Function) RETURN f.id, f.is_method ORDER BY f.id"
     ).rows
-    assert [r[0] for r in rows] == [
+    assert [r[0].split("~", 1)[0] for r in rows] == [
         f"{widget}#MyApp.Models.Widget.Run",
         f"{greeter}#MyApp.Services.Greeter.Greet",
         f"{greeter}#MyApp.Services.IGreeter.Greet",
     ]
+    assert all(len(r[0].rsplit("~", 1)[1]) == 24 for r in rows)
     assert [r[1] for r in rows] == [True, True, True]
 
     # /// xmldoc becomes the docstring, tags stripped
@@ -410,7 +411,7 @@ def test_ingest_go(engine, tmp_path):
     resp = ingest_code(engine, engine.config, CodeIngestRequest(paths=[str(pkg)]))
     mid = _mid(pkg, "greeter.go")
 
-    assert resp.warnings == []
+    assert len(resp.warnings) == 1 and "Go relationship coverage" in resp.warnings[0]
     assert (resp.repos, resp.modules, resp.classes, resp.functions) == (1, 1, 3, 4)
     assert engine.execute("MATCH (m:Module) RETURN m.language").rows == [["go"]]
 
@@ -455,12 +456,13 @@ def test_ingest_go(engine, tmp_path):
     assert _edge_pairs(engine, "CONTAINS_MODULE_FUNCTION") == {(mid, f"{mid}#Shout")}
 
 
-def test_ingest_go_imports_resolve_by_package_name(engine, tmp_path):
+def test_ingest_go_imports_resolve_by_module_path(engine, tmp_path):
     repo = tmp_path / "repo"
     (repo / "internal" / "widget").mkdir(parents=True)
     (repo / "internal" / "widget" / "widget.go").write_text(
         "package widget\n\nfunc New() int { return 1 }\n", encoding="utf-8"
     )
+    (repo / "go.mod").write_text("module github.com/myorg/myrepo\n", encoding="utf-8")
     (repo / "main.go").write_text(
         'package main\n\n'
         'import (\n'
@@ -475,10 +477,8 @@ def test_ingest_go_imports_resolve_by_package_name(engine, tmp_path):
     main = _mid(repo, "main.go")
     widget = _mid(repo, "internal/widget/widget.go")
 
-    assert resp.warnings == []
-    # "fmt" (stdlib) has no local match and skips silently; the local
-    # "github.com/myorg/myrepo/internal/widget" import resolves by matching
-    # its last path segment against the target file's declared package name.
+    assert len(resp.warnings) == 1 and "Go relationship coverage" in resp.warnings[0]
+    # Local imports resolve by exact go.mod path; external fmt remains unresolved.
     assert _edge_pairs(engine, "IMPORTS") == {(main, widget)}
 
 

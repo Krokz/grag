@@ -121,6 +121,13 @@ jobs:
       - name: Run tests
         run: pytest
 
+      - name: Code navigation regressions
+        # Exercise optional Go/Java/C# parsers on every OS/Python runner instead of
+        # silently skipping it in the base development install.
+        run: |
+          python -m pip install "tree-sitter>=0.23" tree-sitter-go tree-sitter-c-sharp "tree-sitter-language-pack>=1.16.2"
+          python -m pytest -q tests/test_ingest_code_go.py tests/test_ingest_code_python.py tests/test_ingest_code_identity.py
+
   lint:
     name: ruff + mypy
     runs-on: ubuntu-latest

@@ -95,21 +95,17 @@ def _ingest_chunks(
     )
 
     nodes: list[UpsertNode] = []
-    from grag.ingest.document_sync import mark_current, prepare_document_state
+    from grag.ingest.document_sync import DocumentSync, prepare_document_state
 
     prepare_document_state(engine, [req.label])
-    desired_by_source: dict[str, set[str]] = {}
-    desired_by_identity: dict[str, set[str]] = {}
+    sync = DocumentSync(engine, req)
     source_occurrences: dict[str, int] = {}
     for doc in req.documents:
-        base_identity = _source_identity(doc.source, doc.text, doc.metadata)
-        desired_by_identity.setdefault(base_identity, set())
+        base_identity = sync.identity(doc)
         occurrence_key = _normalized_source(doc.source) if doc.source else base_identity
         occurrence = source_occurrences.get(occurrence_key, 0)
         source_occurrences[occurrence_key] = occurrence + 1
         identity = f"{base_identity}~{occurrence:04d}" if occurrence else base_identity
-        if doc.source is not None:
-            desired_by_source.setdefault(doc.source, set())
         if req.chunk:
             chunks = _chunk_text(doc.text, req.chunk_size, req.chunk_overlap)
         else:
@@ -127,71 +123,21 @@ def _ingest_chunks(
                     source=doc.source,
                 )
             )
-            if doc.source is not None:
-                desired_by_source[doc.source].add(key)
-            desired_by_identity[base_identity].add(key)
 
     warnings: list[str] = []
     with engine.write_transaction():
         if nodes:
             upsert_nodes(engine, config, UpsertNodesRequest(nodes=nodes))
-            mark_current(engine, req.label, [n.key for n in nodes])
-        nodes_pruned = _prune_stale_chunks(
-            engine,
-            req.label,
-            desired_by_source=desired_by_source,
-            desired_by_identity=desired_by_identity,
-            warnings=warnings,
-        )
+            sync.mark(nodes)
+        sync.replace_edges(warnings)
+        nodes_pruned = sync.prune(warnings)
+
     return IngestResponse(
         label=req.label,
         nodes_created=len(nodes),
         nodes_pruned=nodes_pruned,
         warnings=list(dict.fromkeys(warnings)),
     )
-
-
-def _prune_stale_chunks(
-    engine: Engine,
-    label: str,
-    *,
-    desired_by_source: dict[str, set[str]],
-    desired_by_identity: dict[str, set[str]],
-    warnings: list[str],
-) -> int:
-    from grag.ingest.document_sync import prune_unreferenced_nodes
-
-    if not desired_by_source and not desired_by_identity:
-        return 0
-    pruned = 0
-    # Identity pruning handles equivalent relative/absolute spellings of the
-    # same path and removes surplus duplicate-document occurrences.
-    for identity, desired in desired_by_identity.items():
-        pruned += prune_unreferenced_nodes(
-            engine,
-            label,
-            "n.id STARTS WITH $identity AND NOT n.id IN $keys",
-            {"identity": identity, "keys": sorted(desired)},
-            warnings,
-            remove_owned_edges=True,
-        )
-    # Provenance pruning also migrates legacy basename-only chunk ids.
-    columns = {
-        str(row[1])
-        for row in engine.execute(f"CALL TABLE_INFO('{label}') RETURN *").rows
-    }
-    if "_source" not in columns:
-        return pruned
-    for source, desired in desired_by_source.items():
-        pruned += prune_unreferenced_nodes(
-            engine,
-            label,
-            "n._source = $source AND NOT n.id IN $keys",
-            {"source": source, "keys": sorted(desired)},
-            warnings,
-            remove_owned_edges=True,
-        )
-    return pruned
 
 
 def _embed_pending(engine: Engine, config: GragConfig, label: str) -> None:
@@ -218,7 +164,7 @@ def _embed_pending(engine: Engine, config: GragConfig, label: str) -> None:
 
 
 @bounded_sources
-def load_paths(paths: list[Path]) -> tuple[list[IngestDocument], list[str], int]:
+def load_paths(paths: list[Path], *, errors: list[str] | None = None) -> tuple[list[IngestDocument], list[str], int]:
     """Load .md/.txt/.json/.jsonl files (directories walked recursively).
 
     Returns (documents, warnings, files_read). Unreadable files and
@@ -228,18 +174,17 @@ def load_paths(paths: list[Path]) -> tuple[list[IngestDocument], list[str], int]
     warnings: list[str] = []
     files_read = 0
     check_size("paths", len(paths), 64)
-    expanded: list[Path] = []
-    for path in paths:
-        if path.is_dir():
-            selected = []
-            for item in path.rglob("*"):
-                charge("source_entries")
-                if item.is_file() and item.suffix.lower() in _SUPPORTED_SUFFIXES:
-                    selected.append(item)
-                    check_size("document_files", len(selected) + len(expanded), 256)
-            expanded.extend(sorted(selected))
-        else:
-            expanded.append(path)
+    from grag.ingest.selection import selected_files
+
+    expanded = []
+    for _, file in selected_files(paths, warnings, errors=errors):
+        if file.suffix.lower() in _SUPPORTED_SUFFIXES:
+            expanded.append(file)
+            check_size("document_files", len(expanded), 256)
+        elif file.resolve() in {p.expanduser().resolve() for p in paths}:
+            warnings.append(f"skipped {file}: unsupported extension '{file.suffix}'")
+            if errors is not None:
+                errors.append(warnings[-1])
     for path in expanded:
         suffix = path.suffix.lower()
         if suffix not in _SUPPORTED_SUFFIXES:
@@ -252,14 +197,27 @@ def load_paths(paths: list[Path]) -> tuple[list[IngestDocument], list[str], int]
             loaded = _load_file(path, suffix)
         except FileNotFoundError:
             warnings.append(f"skipped {path}: file not found")
+            if errors is not None:
+                errors.append(warnings[-1])
             continue
         except (OSError, UnicodeDecodeError, ValueError, ValidationError) as exc:
             warnings.append(f"skipped {path}: could not load ({exc})")
+            if errors is not None:
+                errors.append(warnings[-1])
             continue
         check_size("documents", len(documents) + len(loaded), 256)
-        documents.extend(loaded)
+        documents.extend(doc.model_copy(update={"source_file": str(path.absolute())}) for doc in loaded)
         files_read += 1
     return documents, warnings, files_read
+
+
+def load_request(paths: list[Path], *, sections: bool = False, label: str = "Chunk") -> tuple[IngestRequest, list[str], int]:
+    errors: list[str] = []
+    documents, warnings, count = load_paths(paths, errors=errors)
+    if errors:
+        warnings.append("Source scan incomplete; directory deletion synchronization was skipped.")
+    return IngestRequest(documents=documents, sections=sections, label=label,
+                         sync_paths=[] if errors else [str(p.expanduser().resolve()) for p in paths]), warnings, count
 
 
 def ingest_paths(
@@ -270,14 +228,13 @@ def ingest_paths(
 
     Returns a human-readable summary for the CLI.
     """
-    from grag.service import GragService
+    from grag.client import GraphClient
 
-    documents, warnings, files_read = load_paths(paths)
-    service = GragService(config)
-    try:
-        resp = service.ingest(IngestRequest(documents=documents, sections=sections))
-    finally:
-        service.close()
+    req, warnings, files_read = load_request(paths, sections=sections)
+    documents = req.documents
+    with GraphClient(config) as client:
+        resp = IngestResponse.model_validate(client.call("ingest", req))
+        target = client.target
 
     structure = (
         f" {resp.documents} document node(s), {resp.sections} section(s), "
@@ -290,7 +247,7 @@ def ingest_paths(
             f"Ingested {len(documents)} document(s) from {files_read} file(s):"
             f"{structure} "
             f"{resp.nodes_created} chunk node(s) written, {resp.nodes_pruned} stale "
-            f"node(s) pruned from label '{resp.label}' in {config.db_path}."
+            f"node(s) pruned from label '{resp.label}' in {target}."
         )
     ]
     warnings.extend(resp.warnings)

@@ -25,6 +25,14 @@ Git-ignored `.grag/project.json`, and configures an MCP connection and agent gui
 Use `grag init --client cursor` or `--client claude` when choosing explicitly.
 `grag init --dry-run` previews changes before applying.
 
+The development version after 0.8.0 also initializes the written MCP registration,
+lists its tools, and writes/reads one non-searchable `GragSetup:connection` record.
+It prints the registration, resolved command and selected database. Verification
+failure returns a nonzero exit code while preserving the saved configuration.
+Use `--no-verify` for offline configuration preparation; readiness remains unverified.
+This checks the connection from your terminal environment. Reconnect the actual
+harness too: its environment and permissions can differ.
+
 The default new database is `~/.grag/<project-name>-<checkout-id>.lbdb`. Run commands
 from anywhere inside the checkout to reuse that mapping. [Projects and relocation](guides/projects.md)
 explains existing databases, worktrees, configuration backups and removal.
@@ -40,14 +48,10 @@ Ask the agent:
 > Use grag to index this project's source directory. Describe the schema and show
 > one function's name, source path and line range.
 
-Choose that directory deliberately: scanning does not yet honor `.gitignore` or
-stop at nested worktrees. If the whole project is a suitable scope, `grag init
---ingest` can combine setup and initial indexing. [Code ingestion](guides/code.md)
-lists current language coverage and scope limits.
-
-Use the MCP ingest tool while the server owns the database. Direct CLI ingest
-does not yet forward to that server; [server ownership](operations/server.md)
-explains when it is safe to use it.
+Choose the intended source directory. The development version honors ignore rules
+and skips nested worktrees and symlinks. `grag init --ingest` combines setup and
+indexing; CLI ingestion uses the running owner when available.
+[Code ingestion](guides/code.md) lists language coverage and scope options.
 
 ## 4. Save something worth retaining
 
@@ -66,6 +70,9 @@ the truth of authored memories. Read [freshness](guides/freshness.md) and
 ## Everyday commands
 
 ```bash
+grag remember "Use a ten-minute cache" --id cache-policy
+grag search "cache"
+grag context Memory:cache-policy
 grag status     # selected database, server address and log
 grag doctor     # installation diagnostics; see installation guide for release-specific checks
 grag stop       # clean shutdown of the selected managed server

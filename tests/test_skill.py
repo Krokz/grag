@@ -22,7 +22,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml
+
+from grag.project import apply_ops, plan_skill_ops, plan_skill_removal_ops
+from grag.project_files import ProjectConfigError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,6 +58,62 @@ def test_skill_copies_exist_and_stay_in_sync():
             str(p.relative_to(REPO_ROOT)) for p in [*SKILL_PATHS, PACKAGED_TEMPLATE]
         )
     )
+    bundle = {p.relative_to(PACKAGED_TEMPLATE.parent): p.read_bytes()
+              for p in PACKAGED_TEMPLATE.parent.rglob("*.md")}
+    for path in SKILL_PATHS:
+        assert {p.relative_to(path.parent): p.read_bytes() for p in path.parent.rglob("*.md")} == bundle
+
+
+def test_main_skill_stays_small_and_reference_links_are_packaged():
+    text = PACKAGED_TEMPLATE.read_text()
+    assert len(text.encode()) < 8_000  # previously 38,589 bytes on every activation
+    links = re.findall(r"\]\((references/[^)]+)\)", text)
+    assert links
+    assert all((PACKAGED_TEMPLATE.parent / target).is_file() for target in links)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_init_installs_and_upgrades_the_whole_bundle(tmp_path, monkeypatch, newline):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    root = tmp_path / ".claude/skills/grag"
+    apply_ops(plan_skill_ops(["claude"], tmp_path))
+    for source in PACKAGED_TEMPLATE.parent.rglob("*.md"):
+        target = root / source.relative_to(PACKAGED_TEMPLATE.parent)
+        assert target.read_bytes() == source.read_bytes()
+    reference = root / "references/memory.md"
+    reference.write_bytes(("<!-- grag-managed skill reference: memory -->\nold\n").replace("\n", newline).encode())
+    apply_ops(plan_skill_ops(["claude"], tmp_path))
+    assert reference.read_bytes() == (PACKAGED_TEMPLATE.parent / "references/memory.md").read_text().replace("\n", newline).encode()
+    assert plan_skill_ops(["claude"], tmp_path) == []
+    apply_ops(plan_skill_removal_ops(["claude"], tmp_path))
+    assert list(root.rglob("*.md")) == []
+
+
+def test_foreign_reference_collision_does_not_publish_a_partial_skill(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    root = tmp_path / ".claude/skills/grag"
+    reference = root / "references/memory.md"
+    reference.parent.mkdir(parents=True)
+    reference.write_text("My own memory procedures\n")
+    with pytest.raises(ProjectConfigError, match="user content"):
+        plan_skill_ops(["claude"], tmp_path)
+    assert reference.read_text() == "My own memory procedures\n"
+    assert list(root.rglob("*.md")) == [reference]
+
+
+def test_removal_preserves_modified_reference_and_custom_entrypoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    root = tmp_path / ".claude/skills/grag"
+    apply_ops(plan_skill_ops(["claude"], tmp_path))
+    reference = root / "references/memory.md"
+    reference.write_text(reference.read_text() + "Local advice\n")
+    apply_ops(plan_skill_removal_ops(["claude"], tmp_path))
+    assert reference.read_text().endswith("Local advice\n")
+    assert not (root / "SKILL.md").exists()
+    apply_ops(plan_skill_ops(["claude"], tmp_path))
+    (root / "SKILL.md").write_text("Local entrypoint using references\n")
+    apply_ops(plan_skill_removal_ops(["claude"], tmp_path))
+    assert len(list(root.rglob("*.md"))) == 4
 
 
 def test_skill_frontmatter_valid_for_all_harnesses():

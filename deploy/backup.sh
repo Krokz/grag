@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Online backup of a RUNNING grag server as portable JSONL (schema + nodes +
-# edges + provenance; embeddings are derived data and rebuild on import).
-#
-# The .lbdb file is single-writer, so `grag export` on the file itself needs
-# the server stopped. This script streams GET /api/export instead — no
-# downtime — and keeps a rolling window of dated files.
+# Online verified JSONL backup, including graph, history and retry receipts.
+# Writes pause during snapshot capture; download uses the completed spool.
+# Embeddings/indexes are derived data and rebuild after restore.
+# The server stays running; this script keeps dated snapshots.
 #
 #   GRAG_SERVER_URL=https://grag.example.com GRAG_API_TOKEN=... deploy/backup.sh /backups
 #   # cron: 17 3 * * * /opt/grag/deploy/backup.sh /backups >> /var/log/grag-backup.log 2>&1
@@ -19,12 +17,11 @@ mkdir -p "$dest"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 out="$dest/grag-$stamp.jsonl"
 
-# `grag export --url` needs only the stdlib; curl works too:
-#   curl -fsS -H "Authorization: Bearer $GRAG_API_TOKEN" "$GRAG_SERVER_URL/api/export" -o "$out"
+# The updated CLI checks the completion checksum before publishing the file.
 grag export --url "$GRAG_SERVER_URL" -o "$out"
 gzip -f "$out"
 echo "backup: $out.gz ($(du -h "$out.gz" | cut -f1))"
 
-# Restore into a fresh database (server stopped, or a new file):
+# Restore into a new database file (existing destinations are refused):
 #   gunzip -c grag-<stamp>.jsonl.gz | grag --db restored.lbdb import /dev/stdin
 ls -1t "$dest"/grag-*.jsonl.gz 2>/dev/null | tail -n +$((keep + 1)) | xargs -r rm -f

@@ -30,7 +30,7 @@ from grag.core.types import (
 
 # Kept here without importing evidence.py, which depends on the engine.
 _SAFETY_PROPS = {"_evidence_state", "_review_state", "_expires_at", "_superseded_by",
-                 "_evidence_seq", "_document_state", "_history_revision", "_evidence_visibility", "status"}
+                 "_evidence_seq", "_document_state", "_source_state", "_history_revision", "_evidence_visibility", "status"}
 _CITATION_PROPS = {PROVENANCE_SOURCE, "line_start", "line_end", "status", *_SAFETY_PROPS}
 
 
@@ -42,6 +42,20 @@ def estimate_tokens(text: str) -> int:
 def with_freshness(text: str, freshness: FreshnessReport) -> str:
     footer = json.dumps({"freshness": freshness.model_dump()}, separators=(",", ":"))
     return f"{text}\n\n---\n{footer}" if text else footer
+
+
+def compact_graph_values(value: Any) -> Any:
+    """Omit null columns only on whole native entities in MCP query output.
+
+    Explicit projections, including user-built maps/lists containing null,
+    remain exact. Identity, revisions and every non-null property are retained.
+    """
+    if isinstance(value, dict):
+        entity = "_ID" in value and "_LABEL" in value
+        return {k: compact_graph_values(v) for k, v in value.items() if not (entity and v is None)}
+    if isinstance(value, list):
+        return [compact_graph_values(v) for v in value]
+    return value
 
 
 def _render_value(value: Any) -> str:

@@ -580,7 +580,7 @@ def test_cli_install_preview_and_remove_preserve_other_registrations(
     other = '"other": {"url": "https://other/mcp/", "custom": [1, 2, 3]}'
     header = "// keep client settings\n" if client == "zed" else ""
     path.write_text(header + '{"' + section + '": {' + other + "}}\n")
-    args = ["init", "--client", client, "--no-skill", "--no-claude-md"]
+    args = ["init", "--client", client, "--no-skill", "--no-claude-md", "--no-verify"]
     if url:
         args.append("--url")
     assert cli.main(args) == 0

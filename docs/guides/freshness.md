@@ -37,15 +37,16 @@ generation, saved options, error, and retry delay. It uses the selected database
 and normal authentication; anonymous `/api/health` exposes only the default
 database's summary counters and freshness under `code_index`.
 
-An explicit `ingest_code` saves its paths, `calls`, `max_file_kb`, and `incremental`
+An explicit `ingest_code` saves its paths, `calls`, `max_file_kb`, `incremental`, and enclosing `root`
 options for later refreshes and restarts. File-only scopes stay file-only; partial
 ingests retain previously registered paths under the same root, and the latest
 explicit options apply to that saved scope. A partial or failed ingest cannot
 advance the last verified generation. Indexes created before this metadata existed
 report `unknown`: explicitly run `ingest_code` once with the intended scope and
 options to enroll them. Missing or relocated paths, parse/access failures, and
-previously indexed files that now exceed the size limit stay unverified with
-diagnostics; they never silently become fresh. Scope removal and relocation need
-explicit reconciliation. `GRAG_AUTO_REFRESH_CODE=0` disables checking; direct Python
+missing registered files stay unverified with diagnostics. In the development
+version after 0.8.0, newly ignored or size-excluded files are reconciled as deliberate
+exclusions. `replace_scope=true` with an explicit root replaces its saved paths; an
+empty list unregisters it. Relocation still requires explicit reconciliation. `GRAG_AUTO_REFRESH_CODE=0` disables checking; direct Python
 services opt in with `service.enable_auto_refresh()`. A required-fresh read fails
 when checking is disabled.

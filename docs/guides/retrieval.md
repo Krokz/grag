@@ -104,19 +104,40 @@ Cypher remains unfiltered. The footer names `evidence_policy`;
 not every row filtered within the database.
 
 Whole-entity Cypher replies (`RETURN n`, paths, lists and maps of entities)
-omit derived vector properties. Entity IDs, relationships, provenance and
+omit derived vector properties. MCP also omits null columns on whole entities;
+Python/REST retain those null columns. Entity IDs, relationships, provenance and
 revision guards remain available. Explicit projections (`RETURN n.embedding`)
-still return the requested values. Query replies are row-limited; they do not
+still return the requested values, including nulls in projected columns, maps
+and lists. Query replies are row-limited; they do not
 use search/context token budgets.
 
 
 ## Start small for narrow questions
 
-For a known symbol, describe the schema and project only its name, path, signature
+For a known symbol, reuse the schema and project only its name, path, signature
 and line range in Cypher. For text search, try a smaller budget (for example 800),
 `hops=0`, and the relevant labels before expanding. The budget is a ceiling, not a
 target, but current packing does not guarantee a short answer for a simple query
 or a calibrated “no evidence” response. Inspect relevance and omissions.
+
+There is no mandatory search → context → query sequence. Start with one projected
+query for a known fact, search for discovery, and fetch more context only when the
+answer needs it. Cache the schema and use its revision check when it may have
+changed. Scalar, projected and empty queries skip catalog reads needed only for
+graph serialization. These shortcuts retain freshness and completeness metadata.
+
+The installed skill keeps everyday guidance in `SKILL.md`; ingestion, correction
+history and operational procedures live in references loaded when needed. Harnesses
+choose how much tool and skill text enters a model context. Count tool descriptions,
+input schemas, server instructions, activated skill/references and returned evidence
+separately when measuring a workflow; response `token_budget` covers only the
+retrieval payload, not the whole session.
+
+BM25 needs no model and does not import NumPy, the polar codec or model runtimes on
+its normal first-search path. Optional embeddings add model preparation/download,
+cached model load, document embedding backlog and query inference costs. Measure
+those separately from database startup and warm searches; a cached-model run does
+not measure first-time download cost. See [optional embeddings](embeddings.md).
 
 See [code coverage](code.md), [embedding tradeoffs](embeddings.md), and
 [resource limits](../reference/limits.md).

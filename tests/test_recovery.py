@@ -423,3 +423,21 @@ with Engine(GragConfig(db_path=sys.argv[1], buffer_pool_size=128*1024**2)) as e:
     assert rows[0][0]['id'] == 'base'
 """, report["recovered_db"])
     assert result.returncode == 0, result.stderr
+
+
+def test_init_verifies_actual_corrupt_database_and_keeps_original_files(cfg, tmp_path, monkeypatch, capsys):
+    _corrupt_wal(cfg)
+    before = _files(cfg)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr("grag.project._stdio_entry", lambda db, port: {
+        "command": sys.executable,
+        "args": ["-m", "grag.cli", "--db", str(db), "mcp"],
+        "env": {"GRAG_EMBED_PROVIDER": "", "GRAG_BUFFER_POOL_MB": "128"},
+    })
+    assert main(["--db", str(cfg.db_path), "init", "--client", "claude", "--no-skill", "--no-claude-md"]) == 1
+    error = capsys.readouterr().err
+    assert "Client verification failed" in error and "recover" in error
+    assert "Traceback" not in error
+    assert _files(cfg) == before
+    assert str(cfg.db_path) in (tmp_path / ".mcp.json").read_text()

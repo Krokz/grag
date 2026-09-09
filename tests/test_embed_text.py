@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from grag.config import DEFAULT_EMBED_EXCLUDE_PROPS, EmbedderConfig, GragConfig
 from grag.core.types import IngestDocument, IngestRequest, SearchRequest
 from grag.retrieval import vectors
@@ -156,3 +158,30 @@ def test_fastembed_default_threads_is_modest(monkeypatch):
     )
     vectors.FastembedEmbedder(_cfg(model="BAAI/bge-small-en-v1.5", dim=1))
     assert 1 <= seen["threads"] <= 4
+
+
+@pytest.mark.parametrize("configured,expected", [(None, "1"), ("0", "0"), ("1", "1")])
+def test_local_embedding_telemetry_default_precedes_native_import(monkeypatch, configured, expected):
+    import builtins
+    import os
+    import types
+
+    if configured is None:
+        monkeypatch.delenv("ORT_DISABLE_TELEMETRY", raising=False)
+    else:
+        monkeypatch.setenv("ORT_DISABLE_TELEMETRY", configured)
+    imported = []
+    original = builtins.__import__
+
+    def importing(name, *args, **kwargs):
+        if name == "fastembed":
+            # The uploader latches the environment during dependency import,
+            # before the model constructor or first inference can run.
+            assert os.environ.get("ORT_DISABLE_TELEMETRY") == expected
+            imported.append(name)
+            return types.SimpleNamespace(TextEmbedding=lambda **options: object())
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", importing)
+    vectors.FastembedEmbedder(_cfg(model="fixture", dim=1), local_files_only=True)
+    assert imported == ["fastembed"]

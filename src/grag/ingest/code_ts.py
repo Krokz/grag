@@ -5,18 +5,10 @@ This module is imported LAZILY from `grag.ingest.code` (which owns the
 `_PARSERS` dispatch) so a base install without the `code` extra never imports
 tree-sitter. Parsers fill the same `_ParsedModule` contract as
 `_parse_python` — Module/Class/Function nodes, CONTAINS_* rels, import refs —
-so the walk/upsert pipeline and cross-module IMPORTS resolution in
-`code.ingest_code` work uniformly. Two deliberate scope cuts:
-
-* CALLS/INHERITS stay Python-only: `call_refs` and `class_bases` are left
-  empty here (the class/func/method id maps are still populated for the
-  shared indexes).
-* Import refs are normalized onto the dotted path keys the existing resolver
-  matches: relative specifiers (`./lib/x`) resolve against the importing
-  file, C# `using` matches scanned namespaces via `_ParsedModule.aliases`,
-  a Terraform `module` source matches a scanned directory holding exactly
-  one .tf file, and a Go import matches a scanned package by declared name
-  (see `_walk_go`). Unresolved refs (external packages) skip silently.
+so the walk/upsert pipeline remains shared. JS/TS additionally produce lexical
+binding summaries for `code_js` to resolve calls, runtime class extends and
+relative imports. Go delegates package calls, constants and basic interface method
+sets to code_go. C# namespaces and Terraform directories retain best-effort imports.
 
 Grammar notes: `.tsx` uses the tsx language (JSX on) and plain `.ts` the
 typescript language (JSX must stay off there), per tree-sitter-typescript.
@@ -26,7 +18,7 @@ version read straight off the block — never hand-typed, so a version pin in
 the graph can't drift from the source of truth), and IMPORTS edges from
 local `module` block sources only. Go has no lexical class nesting: methods
 are top-level funcs carrying a receiver type, matched back to their
-struct/interface Class node by that type name (see `_walk_go`).
+struct/interface Class node through the isolated package index in code_go.
 """
 
 from __future__ import annotations
@@ -48,6 +40,8 @@ _INSTALL_HINT = 'Install code parsing: pip install "gragdb[code]"'
 # suffix -> (grammar module, language-factory attribute, graph language prop)
 _SUFFIX_LANGUAGES = {
     ".ts": ("tree_sitter_typescript", "language_typescript", "typescript"),
+    ".mts": ("tree_sitter_typescript", "language_typescript", "typescript"),
+    ".cts": ("tree_sitter_typescript", "language_typescript", "typescript"),
     ".tsx": ("tree_sitter_typescript", "language_tsx", "typescript"),
     ".js": ("tree_sitter_javascript", "language", "javascript"),
     ".jsx": ("tree_sitter_javascript", "language", "javascript"),
@@ -77,7 +71,8 @@ _PACK_SUFFIXES: dict[str, str] = {
 for _suffix, _language in _PACK_SUFFIXES.items():
     _SUFFIX_LANGUAGES[_suffix] = ("pack", _language, _language)
 # Vue single-file components: the <script> block parses as TS or JS.
-_SUFFIX_LANGUAGES[".vue"] = ("vue", "", "vue")
+for _framework in (".vue", ".svelte", ".astro"):
+    _SUFFIX_LANGUAGES[_framework] = ("scripts", "", _framework[1:])
 
 # Import specifiers may carry an explicit extension; strip it to match the
 # extension-less dotted keys modules are indexed under.
@@ -86,11 +81,6 @@ _CODE_EXTS = (
     ".sh", ".bash", ".hpp", ".hh", ".hxx", ".h", ".cpp", ".cc", ".cxx", ".c",
     ".rb", ".php", ".rs", ".lua",
 )
-
-_VUE_SCRIPT = re.compile(
-    r"<script(?P<attrs>[^>]*)>(?P<body>.*?)</script>", re.DOTALL | re.IGNORECASE
-)
-
 
 def _build_parser(suffix: str) -> Any:
     """Build a tree-sitter Parser for `suffix`, importing tree-sitter and the
@@ -148,8 +138,8 @@ def parse_file(
 ) -> _ParsedModule:
     """Parse one ts/js/cs/tf file into a _ParsedModule.
 
-    `calls` is part of the `_PARSERS` dispatch signature but unused: CALLS is
-    Python-only in Wave B. Raises ValueError when tree-sitter reports syntax
+    JS/TS call collection is separate from resolution, where `calls` is honored.
+    Raises ValueError when tree-sitter reports syntax
     errors — the caller collects it as a warning and skips the file, exactly
     like SyntaxError for .py.
     """
@@ -157,9 +147,8 @@ def parse_file(
 
     language = _SUFFIX_LANGUAGES[suffix][2]
     grammar_suffix = suffix
-    if suffix == ".vue":
-        source, grammar_suffix = _vue_script(source)
-        language = _SUFFIX_LANGUAGES[grammar_suffix][2]
+    if suffix in {".vue", ".svelte", ".astro"}:
+        return _parse_scripts(suffix, path, source, repo=repo, rel_path=rel_path)
     spec = code_langs.SPECS.get(language)
     root = _build_parser(grammar_suffix).parse(source.encode("utf-8")).root_node
     if root.has_error and spec is None:
@@ -183,23 +172,40 @@ def parse_file(
     elif language == "hcl":
         _walk_hcl(root, source.encode("utf-8"), parsed, rel_path)
     elif language == "go":
-        _walk_go(root, source.encode("utf-8"), parsed, rel_path)
+        from grag.ingest.code_go import parse
+
+        parsed.go = parse(root, source.encode("utf-8"), parsed, rel_path)
     else:
-        _walk_tsjs(root, source.encode("utf-8"), parsed, path, rel_path)
+        from grag.ingest.code_js import analyze
+
+        symbols = _walk_tsjs(root, source.encode("utf-8"), parsed, path, rel_path)
+        parsed.js_units.append(analyze(root, source.encode("utf-8"), symbols))
     return parsed
 
 
-def _vue_script(source: str) -> tuple[str, str]:
-    """The <script> block of a Vue SFC, padded with newlines so line numbers
-    stay those of the .vue file; parsed as .tsx/.ts/.js by its lang attr."""
-    match = _VUE_SCRIPT.search(source)
-    if match is None:
-        return "", ".js"
-    attrs = match.group("attrs")
-    lang = re.search(r"""lang\s*=\s*["']?(\w+)""", attrs)
-    suffix = {"ts": ".ts", "tsx": ".tsx", "jsx": ".jsx"}.get(lang.group(1).lower() if lang else "", ".js")
-    padding = "\n" * source[: match.start("body")].count("\n")
-    return padding + match.group("body"), suffix
+def _parse_scripts(suffix: str, path: Path, source: str, *, repo: str, rel_path: str) -> _ParsedModule:
+    from grag.ingest.code_js import analyze
+    from grag.ingest.code_scripts import scripts
+
+    blocks, omitted = scripts(source, suffix)
+    parsed = _ParsedModule(
+        module=UpsertNode(label="Module", key=f"{repo}:{rel_path}",
+                          properties={"path": rel_path, "language": suffix[1:],
+                                      "name": rel_path.rsplit(".", 1)[0].replace("/", ".")}, source=str(path)),
+        dotted=rel_path.rsplit(".", 1)[0].replace("/", "."),
+        framework=True, script_omissions=omitted,
+    )
+    for block in blocks:
+        src = block.source.encode("utf-8")
+        root = _build_parser(block.suffix).parse(src).root_node
+        if root.has_error:
+            raise ValueError(f"tree-sitter reported syntax errors in {block.prefix or 'script'} block")
+        # Definition language describes the script, Module language its container.
+        parsed.module.properties["language"] = _SUFFIX_LANGUAGES[block.suffix][2]
+        symbols = _walk_tsjs(root, src, parsed, path, rel_path, prefix=block.prefix)
+        parsed.js_units.append(analyze(root, src, symbols))
+    parsed.module.properties["language"] = suffix[1:]
+    return parsed
 
 
 # --- shared node helpers ---------------------------------------------------------
@@ -322,10 +328,17 @@ def _add_function(
     link_to_class=False still sets is_method and method_ids but skips the
     same-file CONTAINS_CLASS_FUNCTION append — for Go, whose methods can
     name a receiver type declared in a different file of the same package;
-    the caller resolves and links those via `_ParsedModule.go_method_links`
+    the Go package resolver supplies those containment links
     instead (a same-file class id would often be wrong)."""
     module_id = str(parsed.module.key)
     fid = f"{module_id}#{qual}"
+    signature = _signature(node, src)
+    identity: dict[str, str] = {}
+    if language in {"java", "csharp"}:
+        from grag.ingest.code_identity import function_identity
+
+        fid, identity_signature, signature = function_identity(node, src, fid)
+        identity["identity_signature"] = identity_signature
     is_method = parent_class is not None
     parsed.functions.append(
         UpsertNode(
@@ -336,10 +349,11 @@ def _add_function(
                 "path": rel_path,
                 "line_start": node.start_point[0] + 1,
                 "line_end": node.end_point[0] + 1,
-                "signature": _signature(node, src),
+                "signature": signature,
                 "docstring": _docstring(anchor, src),
                 "language": language,
                 "is_method": is_method,
+                **identity,
             },
             source=source_path,
         )
@@ -424,10 +438,11 @@ _TSJS_DECL_TYPES = (
 
 
 def _walk_tsjs(
-    root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_path: str
-) -> None:
+    root: Any, src: bytes, parsed: _ParsedModule, path: Path, rel_path: str, *, prefix: str = ""
+) -> dict[int, tuple[str, str]]:
     language = str(parsed.module.properties["language"])
     source_path = str(path)
+    symbols: dict[int, tuple[str, str]] = {}
 
     def name_of(node: Any) -> str | None:
         name = node.child_by_field_name("name")
@@ -470,13 +485,14 @@ def _walk_tsjs(
                     language=language,
                     source_path=source_path,
                 )
+                symbols[target.id] = ("Class", f"{parsed.module.key}#{qual}")
                 body = target.child_by_field_name("body")
                 if body is not None:
                     for member in body.children:
                         if member.type in _TSJS_METHOD_TYPES:
                             mname = name_of(member)
                             if mname:
-                                _add_function(
+                                fid = _add_function(
                                     parsed,
                                     member,
                                     member,
@@ -488,11 +504,12 @@ def _walk_tsjs(
                                     language=language,
                                     source_path=source_path,
                                 )
+                                symbols[member.id] = ("Function", fid)
             elif target.type in _TSJS_FUNCTION_TYPES:
                 name = name_of(target)
                 if name:
                     qual = f"{prefix}.{name}" if prefix else name
-                    _add_function(
+                    fid = _add_function(
                         parsed,
                         target,
                         anchor,
@@ -504,6 +521,7 @@ def _walk_tsjs(
                         language=language,
                         source_path=source_path,
                     )
+                    symbols[target.id] = ("Function", fid)
             elif target.type in ("lexical_declaration", "variable_declaration"):
                 # `const f = (x) => ...` / `const f = function ...`
                 for decl in target.named_children:
@@ -520,7 +538,7 @@ def _walk_tsjs(
                         continue
                     name = _text(name_node, src)
                     qual = f"{prefix}.{name}" if prefix else name
-                    _add_function(
+                    fid = _add_function(
                         parsed,
                         decl,
                         anchor,
@@ -532,6 +550,7 @@ def _walk_tsjs(
                         language=language,
                         source_path=source_path,
                     )
+                    symbols[value.id] = ("Function", fid)
             elif target.type in _TSJS_NAMESPACE_TYPES:
                 ns = None
                 body = None
@@ -549,34 +568,9 @@ def _walk_tsjs(
                     visit(body.children, nested)
 
     program = root.named_children if root.type == "program" else root.children
-    visit(list(program), "")
+    visit(list(program), prefix)
 
-    # Imports, whole-tree (like ast.walk in _parse_python): static
-    # import/export-from sources and CommonJS require("...") calls.
-    for node in _walk_all(root):
-        if node.type in ("import_statement", "export_statement"):
-            source = node.child_by_field_name("source")
-            if source is not None:
-                parsed.import_refs.extend(
-                    _path_import_refs(_string_value(source, src), rel_path)
-                )
-        elif node.type == "call_expression":
-            fn = node.child_by_field_name("function")
-            if (
-                fn is not None
-                and fn.type == "identifier"
-                and _text(fn, src) == "require"
-            ):
-                args = node.child_by_field_name("arguments")
-                first = (
-                    args.named_children[0]
-                    if args is not None and args.named_children
-                    else None
-                )
-                if first is not None and first.type == "string":
-                    parsed.import_refs.extend(
-                        _path_import_refs(_string_value(first, src), rel_path)
-                    )
+    return symbols
 
 
 # --- c# ----------------------------------------------------------------------------
@@ -749,174 +743,3 @@ def _walk_hcl(root: Any, src: bytes, parsed: _ParsedModule, rel_path: str) -> No
             parsed.import_refs.extend(
                 _path_import_refs(source_val, rel_path, index_name=None)
             )
-
-
-# --- go ------------------------------------------------------------------------------
-
-
-def _go_receiver_type(node: Any, src: bytes) -> str | None:
-    """The receiver's type name for a `method_declaration`
-    (`func (g *Greeter) X()` / `func (g Greeter) X()` -> "Greeter"), or None
-    if the node isn't shaped like a method (defensive; grammar guarantees a
-    receiver here in practice)."""
-    if not node.named_children or node.named_children[0].type != "parameter_list":
-        return None
-    receiver = node.named_children[0]
-    if not receiver.named_children:
-        return None
-    pd = receiver.named_children[0]
-    if pd.type != "parameter_declaration" or not pd.named_children:
-        return None
-    type_node = pd.named_children[-1]  # receiver var name (if any) comes first
-    if type_node.type in ("pointer_type", "generic_type") and type_node.named_children:
-        type_node = type_node.named_children[0]
-    return _text(type_node, src) if type_node.type == "type_identifier" else None
-
-
-def _walk_go(root: Any, src: bytes, parsed: _ParsedModule, rel_path: str) -> None:
-    """Go has no lexical class nesting: methods are top-level funcs carrying
-    a receiver type, not members of a struct/interface body, and — unlike
-    every OOP language here — a method's receiver can name ANY declared
-    type, not just a struct or interface (named slices/maps/basic types
-    with methods are idiomatic Go: sort.Interface implementations, Stringer
-    enums). So every `type X ...` spec becomes a Class node regardless of
-    kind, guaranteeing a method's receiver always names something; kind-
-    specific handling only adds interface_type's method_elem entries as
-    Function nodes too, since for an interface that's most of what it *is*.
-
-    Unlike every other language here, a receiver type's declaration and its
-    methods routinely live in DIFFERENT files of the same package (a type
-    declared in one file, its methods spread across many more — extremely
-    common Go style). So method_declaration doesn't link same-file like
-    everyone else: it records (receiver type name, function id) in
-    `parsed.go_method_links` and `code.ingest_code` resolves those against a
-    package-wide (directory, type name) -> class id index built after every
-    file in the scan is parsed, once the receiver's actual declaring file is
-    knowable. Interface method_elem entries skip this — an interface's
-    method set can't be declared outside its own `interface { ... }` body,
-    so same-file linking is always correct for those.
-
-    IMPORTS resolution is best-effort and narrower than the other languages:
-    Go import paths are always fully-qualified (no relative-import syntax),
-    and without parsing go.mod there's no way to know a local package's true
-    import-path prefix. So this matches on the imported package's own name
-    (its declared `package` clause, registered as an alias, vs. the
-    import path's last segment by Go convention) — it resolves imports of
-    single-file local packages whose name is unique across the scanned set,
-    and silently skips everything else (stdlib, third-party, and any
-    multi-file local package, which registers an ambiguous alias — the same
-    accepted limitation as C# namespaces and Terraform module dirs spread
-    across several files)."""
-    language = "go"
-    source_path = str(parsed.module.source)
-
-    pkg_node = next(
-        (c for c in root.named_children if c.type == "package_clause"), None
-    )
-    if pkg_node is not None:
-        ident = next(
-            (c for c in pkg_node.named_children if c.type == "package_identifier"),
-            None,
-        )
-        if ident is not None:
-            parsed.aliases.append(_text(ident, src))
-
-    for node in root.named_children:
-        if node.type == "type_declaration":
-            specs = [c for c in node.named_children if c.type == "type_spec"]
-            for spec in specs:
-                if len(spec.named_children) < 2:
-                    continue
-                name_node, kind_node = spec.named_children[0], spec.named_children[1]
-                if name_node.type != "type_identifier":
-                    continue
-                name = _text(name_node, src)
-                # A doc comment sits directly above a solo `type X struct {}`
-                # declaration; grouped `type (...)` specs rarely carry one,
-                # so fall back to the spec itself (empty docstring).
-                anchor = node if len(specs) == 1 else spec
-                _add_class(
-                    parsed,
-                    spec,
-                    anchor,
-                    src,
-                    name=name,
-                    qual=name,
-                    rel_path=rel_path,
-                    language=language,
-                    source_path=source_path,
-                )
-                if kind_node.type == "interface_type":
-                    for elem in kind_node.named_children:
-                        if elem.type != "method_elem" or not elem.named_children:
-                            continue
-                        mname_node = elem.named_children[0]
-                        if mname_node.type != "field_identifier":
-                            continue
-                        mname = _text(mname_node, src)
-                        _add_function(
-                            parsed,
-                            elem,
-                            elem,
-                            src,
-                            name=mname,
-                            qual=f"{name}.{mname}",
-                            parent_class=name,
-                            rel_path=rel_path,
-                            language=language,
-                            source_path=source_path,
-                        )
-        elif node.type == "method_declaration":
-            recv_type = _go_receiver_type(node, src)
-            mname_node = node.named_children[1] if len(node.named_children) > 1 else None
-            if (
-                recv_type is None
-                or mname_node is None
-                or mname_node.type != "field_identifier"
-            ):
-                continue
-            mname = _text(mname_node, src)
-            fid = _add_function(
-                parsed,
-                node,
-                node,
-                src,
-                name=mname,
-                qual=f"{recv_type}.{mname}",
-                parent_class=recv_type,
-                rel_path=rel_path,
-                language=language,
-                source_path=source_path,
-                link_to_class=False,
-            )
-            parsed.go_method_links.append((recv_type, fid))
-        elif node.type == "function_declaration":
-            name_node = node.named_children[0] if node.named_children else None
-            if name_node is None or name_node.type != "identifier":
-                continue
-            name = _text(name_node, src)
-            _add_function(
-                parsed,
-                node,
-                node,
-                src,
-                name=name,
-                qual=name,
-                parent_class=None,
-                rel_path=rel_path,
-                language=language,
-                source_path=source_path,
-            )
-
-    for spec in _walk_all(root):
-        if spec.type != "import_spec":
-            continue
-        path_node = next(
-            (c for c in spec.named_children if c.type == "interpreted_string_literal"),
-            None,
-        )
-        if path_node is None:
-            continue
-        path = _string_value(path_node, src)
-        if path:
-            parsed.import_refs.append(path.rsplit("/", 1)[-1])

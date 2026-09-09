@@ -12,6 +12,7 @@ unless you call `GragConfig.from_env()`.
 | `GRAG_DB_PATH` | Filesystem path | `knowledge.lbdb` | Database used in single-database mode. In multi-db mode, its filename identifies the preferred default database. Overridden by global CLI option `--db`. |
 | `GRAG_DB_DIR` | Directory path | unset | Enables multi-database mode: short database names resolve to `<dir>/<name>.lbdb`. Overridden by global CLI option `--db-dir`. |
 | `GRAG_BUFFER_POOL_MB` | Integer MiB | `256` | LadybugDB buffer-pool memory. Raise it for large imports/index builds; lower it to reduce resident-memory pressure. This is not the database file size. |
+| `GRAG_STATEMENT_TIMEOUT_MS` | Integer 0–2147483647 | `30000` | Cooperative native execution limit per ordinary statement, in milliseconds. `0` disables it. Commit, rollback and checkpoint always finish without this deadline. Set it on the owning server and restart; another client's environment does not reconfigure a running owner. |
 | `GRAG_TOKEN_BUDGET` | Integer 256–32768 | `2000` | Estimated budget for the complete retrieval payload, including graph and metadata; request-level `token_budget` wins. Not a model-token guarantee. |
 | `GRAG_SEARCH_LABEL_CAP` | Integer | `2` | Maximum fused search seeds contributed by one node label before other labels get a turn. Prevents large tables such as `Function` from crowding out `Decision`/`Concept`. Set `0` or a negative value to disable diversity capping and use pure fused rank order. |
 | `GRAG_VECTOR_CODEC` | `fp32`, `int8`, `binary`, `polar` | `fp32` | Storage/candidate-generation codec. `fp32` uses exact cosine scanning; compressed codecs scan compact codes and exactly rescore shortlisted fp32 vectors. Changes make existing vectors pending for automatic rebuilding. |
@@ -55,17 +56,29 @@ in the next table.
 | `default_query_limit` | `int` | `100` | Row limit applied when a query/request does not provide one. |
 | `max_query_limit` | `int` | `1000` | Server-side ceiling for requested query/search limits. |
 | `max_hops` | `int` | `3` | Maximum graph-expansion depth accepted by retrieval/context requests. |
-| `statement_timeout_ms` | `int` | `30000` | Maximum LadybugDB statement execution time in milliseconds. |
 | `mcp_path` | `str \| None` | `None` | Mounts streamable HTTP MCP into the REST/UI app at this path. `None` leaves MCP unmounted. CLI equivalent: `serve --with-mcp --mcp-path /mcp`. |
 | `host` | `str` | `127.0.0.1` | Expected bind host used by Host-header/DNS-rebinding allow-lists. The CLI's `serve --host` or `mcp --host` sets the runtime bind. |
 
 The remaining `GragConfig` fields map directly to the environment table:
 `db_path`, `db_dir`, `buffer_pool_size` (bytes rather than MiB),
-`default_token_budget`, `search_label_cap`, `vector_codec`, `embedder`,
+`default_token_budget`, `statement_timeout_ms`, `search_label_cap`, `vector_codec`, `embedder`,
 `api_token`, `cors_origins`, `max_embed_per_search`, `embed_in_background`, `server_url`,
 `server_db`, `allow_insecure_http`, and `wal_auto_recover`. `EmbedderConfig` contains
 `provider`, `model`, `dim`, `base_url`, and `api_key_env`, with the same meanings and
 defaults listed above.
+
+Native timeout checks are cooperative: compilation, allocation and some operators
+can run past the configured interval before checking it. This is not a hard wall-clock
+limit on a tool call, lock wait, whole ingestion or shutdown. Query result/work limits
+still apply. Python configuration rejects negative values, booleans and non-integers;
+environment configuration rejects invalid integers before opening the database.
+
+`grag doctor` reports the actual Ladybug backend and tests the selected local timeout.
+The owning server's `/api/health` reports its `engine.backend`, version, effective
+`statement_timeout_ms`, `completion_timeout_ms` and `writer_state`. Recreate a Python
+Engine to apply configuration changes. Both pybind and the pinned Ladybug 0.20.3
+C-API backend use native limits; grag disables that version's erroneous Python
+10 ms watchdog and synthetic range-query interrupt on its own connections only.
 
 ## CLI options
 
@@ -109,10 +122,11 @@ The configuration-affecting options are:
 | `stop` | — | Gracefully stops the managed background server for the selected database. |
 | `stop -a` / `-all` / `--all` | off | Stops every safely verifiable managed grag server. Refuses unresolved legacy registrations instead of reporting false success. |
 | `stop --force` | off | Also permits signaling a live legacy/unverified registration; use only after independently verifying its recorded PID. |
-| `doctor` | `--prepare`, `--json`, `--timeout` (M16 development build) | Isolated native/FTS/model/grammar readiness checks; explicit asset preparation. Human report includes env/server and reachable-server index staleness. Exit 1 for unavailable required capabilities. |
-| `export --out FILE` | stdout | Dumps the database as portable JSONL (schema, nodes, edges, provenance; embeddings excluded). |
-| `export --url URL` | `GRAG_SERVER_URL` or unset | Online backup: streams `GET /api/export` from a running server (bearer from `GRAG_API_TOKEN`) instead of opening the file, which the single-writer lock forbids while a server runs. `--server-db` selects the database on a multi-db server. |
-| `import FILE` | — | Replays a `grag export` file into the selected database (idempotent merge). |
+| `doctor` | `--prepare`, `--json`, `--timeout` | Isolated native/FTS/model/grammar readiness checks; explicit asset preparation. Human report includes env/server and reachable-server index staleness. Exit 1 for unavailable required capabilities. |
+| `export --out FILE` | stdout | Captures and validates a consistent format-2 JSONL snapshot, including history and retry receipts. File publication is atomic; vectors/indexes are rebuilt. |
+| `export --url URL` | `GRAG_SERVER_URL` or unset | Explicit server override for online snapshot capture (bearer from `GRAG_API_TOKEN`). Without this flag, `--db` automatically uses its registered owner when available. `--server-db` selects a multi-db database. |
+| `import --allow-legacy` | off | Explicitly accepts v1 exports without completion proof, history, receipts or internal ownership/lifecycle state. |
+| `import FILE` | — | Restores into a new local `--db` file; validates completion, restores transactionally in staging, then checkpoints and verifies all contents after strict reopen before publication. Existing destinations are refused. |
 | `init --client CLIENT` | `auto` | MCP client to configure: `claude`, `cursor`, `windsurf`, `zed`, or auto-detection. |
 | `init --port PORT` | saved, otherwise derived per-project | Port written into generated MCP/shared-server configuration. New defaults derive from the database path (41000–49151); choose an explicit port if occupied. |
 | `init --ingest` | off | Also runs `ingest-code` on the resolved project root immediately. |

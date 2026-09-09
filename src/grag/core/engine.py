@@ -19,7 +19,7 @@ import logging
 import os
 import queue
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +28,13 @@ from typing import Any
 import ladybug as lb
 
 from grag.config import GragConfig
-from grag.core.errors import ConfigurationError, CypherError, GragError
+from grag.core.errors import (
+    ConfigurationError,
+    CypherError,
+    GragError,
+    QueryInterruptedError,
+    TransactionOutcomeUnknown,
+)
 from grag.core.ident import validate_identifier
 from grag.core.limits import charge, charge_result
 from grag.core.types import (
@@ -42,7 +48,11 @@ from grag.core.types import (
     Subgraph,
     make_node_id,
 )
-from grag.native import prepare_native_runtime
+from grag.native import (
+    configure_query_timeout,
+    connection_backend,
+    prepare_native_runtime,
+)
 
 logger = logging.getLogger("grag")
 
@@ -70,6 +80,9 @@ class EngineResult:
 class Engine:
     def __init__(self, config: GragConfig, *, _recover_wal: bool = False, read_only: bool = False):
         self.config = config
+        # Validate even model_copy/assignment overrides before opening any file.
+        # Like native buffer sizing, this setting belongs to the engine lifetime.
+        self._statement_timeout_ms = GragConfig(statement_timeout_ms=config.statement_timeout_ms).statement_timeout_ms
         self.read_only = read_only
         if read_only and (_recover_wal or not Path(config.db_path).is_file()):
             raise ConfigurationError("Read-only inspection requires an existing database file")
@@ -95,8 +108,10 @@ class Engine:
         self.schema_cache: dict[str, SchemaDocument] = {}
         self._catalog_generation = 0
         self._prepared_catalog: dict[lb.Connection, int] = {}
+        self._configured_timeouts: dict[lb.Connection, int] = {}
         self._transaction_owner: int | None = None
         self._transaction_failed = False
+        self._writer_recovery_required = False
         # Serialize code-ingest planning as well as publishing. Parsing stays
         # outside the write transaction, so ordinary writes can still proceed.
         self.code_ingest_lock = threading.RLock()
@@ -105,9 +120,9 @@ class Engine:
         self._readers_lock = threading.Lock()
         # LadybugDB >= 0.20.2 exposes a plan-cache kill switch; older runtimes
         # need the private-cache eviction workaround (see _clear_prepared_cache).
-        self.plan_cache_disabled = self._disable_plan_cache(self._write_conn)
-        self._set_timeout(self._write_conn)
         try:
+            self._set_timeout(self._write_conn, 0)
+            self.plan_cache_disabled = self._disable_plan_cache(self._write_conn)
             self._preload_extensions()
             if not read_only:
                 if self._retire_native_vector_indexes():
@@ -118,8 +133,8 @@ class Engine:
                     self.close()
                     self._db = self._open_db(db_path, config)
                     self._write_conn = lb.Connection(self._db)
+                    self._set_timeout(self._write_conn, 0)
                     self.plan_cache_disabled = self._disable_plan_cache(self._write_conn)
-                    self._set_timeout(self._write_conn)
                     self._preload_extensions()
                 self._stamp_version()
         except BaseException:
@@ -325,6 +340,45 @@ class Engine:
         finally:
             self._readers.put(conn)
 
+    def iter_rows(self, cypher: str) -> Generator[dict[str, Any], None, None]:
+        """Stream a trusted bulk-transfer query without a Python table-sized list.
+
+        The caller owns snapshot/lifecycle admission and must exhaust or close
+        this iterator on its creating thread. Ordinary bounded queries use execute.
+        """
+        owned = self.in_write_transaction
+        conn = self._write_conn if owned else self._borrow_reader()
+        result = None
+        try:
+            self._clear_prepared_cache(conn)
+            charge("statements")
+            self._set_timeout(conn)
+            executed = conn.execute(cypher)
+            if isinstance(executed, list):
+                for item in executed:
+                    item.close()
+                raise CypherError("Bulk snapshot reads require exactly one statement")
+            result = executed
+            columns = list(result.get_column_names())
+            while result.has_next():
+                charge("result_rows")
+                row = [_plain(v) for v in result.get_next()]
+                charge_result(row)
+                yield dict(zip(columns, row, strict=True))
+        except GragError:
+            raise
+        except Exception as exc:
+            if str(exc).strip() == "Interrupted.":
+                raise QueryInterruptedError() from exc
+            raise CypherError(str(exc), hint="Bulk snapshot read failed; no complete backup was produced.") from exc
+        finally:
+            try:
+                if result is not None:
+                    result.close()
+            finally:
+                if not owned:
+                    self._readers.put(conn)
+
     def execute_write(
         self, cypher: str, params: dict[str, Any] | None = None
     ) -> EngineResult:
@@ -344,6 +398,8 @@ class Engine:
         tests/test_mutate.py::test_upsert_edges_distinct_endpoints_*.
         """
         with self._write_lock:
+            if self._writer_recovery_required:
+                raise TransactionOutcomeUnknown()
             self.schema_cache.clear()
             if cypher.lstrip().upper().startswith(("ALTER ", "CREATE NODE TABLE ", "CREATE REL TABLE ", "DROP TABLE ", "COMMIT", "ROLLBACK")):
                 # The Python prepared statement can retain a bound RETURN n
@@ -426,9 +482,14 @@ class Engine:
                 # A native statement failure may already have rolled back;
                 # preserve the original error if ROLLBACK says so. Bypass
                 # execute_write's failed-transaction guard for cleanup only.
-                with suppress(GragError):
+                try:
                     self._clear_prepared_cache(self._write_conn)
                     self._run(self._write_conn, "ROLLBACK", None)
+                except BaseException as cleanup:
+                    if not (isinstance(cleanup, CypherError) and cleanup.message == "No active transaction for ROLLBACK."):
+                        self._writer_recovery_required = True
+                        logger.exception("Transaction rollback failed; writer requires reopening")
+                        raise TransactionOutcomeUnknown() from cleanup
                 raise
             finally:
                 self._transaction_owner = None
@@ -454,7 +515,7 @@ class Engine:
         """
         try:
             self._run(conn, "CALL enable_cached_prepared_statement='none'", None)
-        except GragError:
+        except CypherError:
             return False
         return True
 
@@ -491,7 +552,7 @@ class Engine:
                 "LadybugDB query safety check failed: the runtime does not "
                 "expose the prepared-statement cache internals grag requires; "
                 "refusing the query to prevent cached-plan data corruption.",
-                hint="Install the verified runtime with: pip install 'ladybug==0.20.2'.",
+                hint="Install the verified runtime with: pip install 'ladybug==0.20.3'.",
             )
         self._evict_prepared(cache, lock)
         self._prepared_catalog[conn] = self._catalog_generation
@@ -521,8 +582,18 @@ class Engine:
     def _run(
         self, conn: lb.Connection, cypher: str, params: dict[str, Any] | None, *, max_rows: int | None = None
     ) -> EngineResult:
-        charge("statements")
+        command = cypher.strip().rstrip(";").strip().upper()
+        completion = command in {"COMMIT", "ROLLBACK", "CHECKPOINT"}
+        # Cleanup must still run after an operation exhausts its work budget.
+        if not completion:
+            charge("statements")
+        commit_started = False
         try:
+            # Never report an interrupted completion as a rolled-back write.
+            # Leave its zero timeout in place until the NEXT statement, avoiding
+            # a setter failure after COMMIT being mistaken for a failed commit.
+            self._set_timeout(conn, 0 if completion else None)
+            commit_started = command == "COMMIT" and conn is self._write_conn
             results = conn.execute(cypher, params or {})
             # The bindings return a list of QueryResults for multi-statement
             # strings; grag only ever sends one statement at a time.
@@ -538,9 +609,15 @@ class Engine:
             finally:
                 result.close()
             return EngineResult(columns, rows)
-        except GragError:
-            raise
-        except Exception as exc:
+        except BaseException as exc:
+            if commit_started:
+                self._writer_recovery_required = True
+                logger.exception("COMMIT result uncertain; writer requires reopening")
+                raise TransactionOutcomeUnknown() from exc
+            if isinstance(exc, GragError) or not isinstance(exc, Exception):
+                raise
+            if str(exc).strip() == "Interrupted.":
+                raise QueryInterruptedError() from exc
             if str(exc).startswith("Buffer manager exception:") and "buffer pool is full" in str(exc):
                 from grag.core.errors import ResourceLimitError
 
@@ -581,26 +658,39 @@ class Engine:
         except queue.Empty:
             with self._readers_lock:
                 if self._readers_created < self.config.max_read_conns:
-                    self._readers_created += 1
                     conn = lb.Connection(self._db)
-                    if self.plan_cache_disabled:
-                        self._disable_plan_cache(conn)
-                    self._set_timeout(conn)
+                    try:
+                        self._set_timeout(conn, 0)
+                        if self.plan_cache_disabled:
+                            self._disable_plan_cache(conn)
+                    except BaseException:
+                        self._configured_timeouts.pop(conn, None)
+                        conn.close()
+                        raise
+                    self._readers_created += 1
                     return conn
             return self._readers.get()  # all busy: wait for one to come back
 
-    def _set_timeout(self, conn: lb.Connection) -> None:
-        setter = getattr(conn, "set_query_timeout", None)
-        if callable(setter) and self.config.statement_timeout_ms:
-            with suppress(Exception):  # best-effort driver knob
-                setter(self.config.statement_timeout_ms)
+    def _set_timeout(self, conn: lb.Connection, milliseconds: int | None = None) -> None:
+        milliseconds = self._statement_timeout_ms if milliseconds is None else milliseconds
+        if self._configured_timeouts.get(conn) != milliseconds:
+            configure_query_timeout(conn, milliseconds)
+            self._configured_timeouts[conn] = milliseconds
+
+    def runtime_info(self) -> dict[str, Any]:
+        from importlib.metadata import version
+
+        return {"backend": connection_backend(self._write_conn), "version": version("ladybug"),
+                "statement_timeout_ms": self._statement_timeout_ms,
+                "timeout_mode": "native", "completion_timeout_ms": 0,
+                "writer_state": "reopen_required" if self._writer_recovery_required else "ready"}
 
     def close(self) -> None:
         # Flush the WAL to the main database file so that if the process is
         # restarted immediately there is no WAL to replay (and no replay failure
         # risk). Suppress failures: the write connection may already be closed or
         # the DB may be read-only.
-        if not self.read_only:
+        if not self.read_only and not self._writer_recovery_required:
             with suppress(Exception):
                 self._run(self._write_conn, "CHECKPOINT", None)
         conns = [self._write_conn]
@@ -614,6 +704,7 @@ class Engine:
             if callable(close):
                 with suppress(Exception):  # close() must never raise
                     close()
+        self._configured_timeouts.clear()
         # The Database holds the buffer manager's (very large) virtual mapping;
         # without closing it, processes that open many engines leak address space.
         db_close = getattr(self._db, "close", None)
@@ -750,7 +841,7 @@ def drop_internal_rows(result: EngineResult) -> EngineResult:
 
 
 def extract_subgraph(
-    result: EngineResult, pk_by_label: dict[str, str] | None = None
+    result: EngineResult, pk_by_label: dict[str, str] | Callable[[], dict[str, str] | None] | None = None
 ) -> Subgraph:
     """Collect every node/rel (including inside paths/lists) in a result set.
 
@@ -781,6 +872,11 @@ def extract_subgraph(
     for row in result.rows:
         for cell in row:
             walk(cell)
+
+    if callable(pk_by_label):
+        # Scalar/projection/empty results need no catalog work. Resolve only
+        # when canonical node identities are actually part of the response.
+        pk_by_label = pk_by_label() if node_vals else None
 
     nodes: dict[str, NodeRecord] = {}
     id_of_internal: dict[tuple, str] = {}

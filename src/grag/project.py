@@ -179,7 +179,21 @@ def _mcp_entry(
             if stdio
             else _remote_url_entry(server_url, server_db)
         )
-    return _stdio_entry(db_path, port) if stdio else _url_entry(port)
+    if stdio:
+        return _stdio_entry(db_path, port)
+    from grag.admin import _http_origin, find_server
+
+    entry = _url_entry(port)
+    owner = find_server(db_path)
+    if owner and owner.port == port and owner.mcp_enabled and owner.mcp_path:
+        origin = _http_origin(owner.host, owner.port)
+        if origin:
+            entry = {"url": f"{origin}{owner.mcp_path.rstrip('/')}/"}
+    import os
+
+    if os.environ.get("GRAG_API_TOKEN"):
+        entry["headers"] = {"Authorization": f"Bearer {_TOKEN_REF}"}
+    return entry
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +345,37 @@ def _skill_template() -> str:
     return files("grag.assets").joinpath("skill/SKILL.md").read_text(encoding="utf-8")
 
 
+def _skill_references() -> dict[str, str]:
+    """Ship conditional guidance with the entrypoint, including in wheel installs."""
+    from importlib.resources import files
+
+    root = files("grag.assets").joinpath("skill/references")
+    return {item.name: item.read_text(encoding="utf-8")
+            for item in sorted(root.iterdir(), key=lambda item: item.name)
+            if item.is_file() and item.name.endswith(".md")}
+
+
+def _reference_ops(directory: Path, references: dict[str, str], *, remove: bool = False) -> list[WriteOp | DeleteOp | SkipOp]:
+    ops: list[WriteOp | DeleteOp | SkipOp] = []
+    for name, template in references.items():
+        path = directory / "references" / name
+        before = snapshot(path)
+        if before.data is None:
+            if not remove:
+                ops.append(WriteOp(path, template, before))
+            continue
+        current = before.text
+        equal = current.replace("\r\n", "\n") == template
+        if remove:
+            ops.append(DeleteOp(path, before) if equal else SkipOp(path, "Skill reference was modified — retained"))
+        elif not equal:
+            if not current.startswith("<!-- grag-managed skill reference:"):
+                raise ProjectConfigError(f"Skill reference {path} is user content; move it before installing grag's reference bundle")
+            newline = "\r\n" if "\r\n" in current else "\n"
+            ops.append(WriteOp(path, template.replace("\n", newline), before))
+    return ops
+
+
 def _skill_paths(clients: list[str], project_root: Path) -> list[Path]:
     """Project-level SKILL.md targets for every harness the user evidently uses.
 
@@ -363,7 +408,7 @@ def _is_grag_skill(text: str) -> bool:
     return False
 
 
-def plan_skill_ops(clients: list[str], project_root: Path) -> list[WriteOp]:
+def plan_skill_ops(clients: list[str], project_root: Path) -> list[WriteOp | DeleteOp | SkipOp]:
     """Plan SKILL.md writes so agents get grag's operating guidance, not just tools.
 
     An existing file is only replaced when it is grag's own skill (an older
@@ -371,8 +416,12 @@ def plan_skill_ops(clients: list[str], project_root: Path) -> list[WriteOp]:
     other SKILL.md is user content: the template is appended, never clobbered.
     """
     template = _skill_template()
-    ops: list[WriteOp] = []
+    references = _skill_references()
+    ops: list[WriteOp | DeleteOp | SkipOp] = []
     for path in _skill_paths(clients, project_root):
+        # References precede the entrypoint so a fresh install doesn't advertise
+        # files that have not been written yet. All operations use checked writes.
+        ops.extend(_reference_ops(path.parent, references))
         before = snapshot(path)
         if before.data is None:
             ops.append(WriteOp(path, template, before))
@@ -403,10 +452,12 @@ def plan_skill_removal_ops(
     modified by the user and is skipped with a manual-removal note.
     """
     template = _skill_template()
+    references = _skill_references()
     ops: list[DeleteOp | SkipOp | WriteOp] = []
     for path in _skill_paths(clients, project_root):
         before = snapshot(path)
         if before.data is None:
+            ops.extend(_reference_ops(path.parent, references, remove=True))
             continue
         current = before.text
         candidates = (template, template.replace("\n", "\r\n"))
@@ -421,6 +472,8 @@ def plan_skill_removal_ops(
             ops.append(
                 SkipOp(path, "SKILL.md was modified after init — remove it manually")
             )
+            continue  # a retained custom entrypoint may still need its references
+        ops.extend(_reference_ops(path.parent, references, remove=True))
     return ops
 
 
@@ -444,7 +497,8 @@ def _claude_md_block(
             "Connect: `grag mcp --server-url "
             f"{server_url}` with `GRAG_API_TOKEN` exported; the graph is shared "
             "with the whole team, so writes land for everyone.\n\n"
-            "**Always call `search_knowledge` before answering questions about this project.**  \n"
+            "Ground project answers in grag: `cypher_query` for exact facts, "
+            "`search_knowledge` for discovery; request `freshness=\"require\"` when current code matters.  \n"
             "Code is indexed on the server (do not `ingest_code` local paths). "
             "New facts: `upsert_nodes` / `upsert_edges`.\n"
             f"{_BLOCK_END}"
@@ -454,9 +508,12 @@ def _claude_md_block(
         f"{_BLOCK_START}\n"
         "## grag\n\n"
         f"Database: `{db}`  \n"
-        f"Run: `GRAG_EMBED_PROVIDER=fastembed grag --db {db} serve --with-mcp --port {port}`\n\n"
-        "**Always call `search_knowledge` before answering questions about this project.**  \n"
-        "Unfamiliar code: `ingest_code` first. New facts: `upsert_nodes` / `upsert_edges`.\n"
+        "Use the registered MCP connection to the shared database owner. "
+        "BM25 works without an embedding model.\n\n"
+        "Ground project answers in grag: `cypher_query` for exact facts, "
+        "`search_knowledge` for discovery; request `freshness=\"require\"` when current code matters.  \n"
+        "Index missing code scope with `ingest_code`. Save sourced facts with "
+        "`upsert_nodes` / `upsert_edges`. See the grag skill for detailed workflows.\n"
         f"{_BLOCK_END}"
     )
 

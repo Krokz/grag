@@ -46,7 +46,6 @@ from grag.core.types import (
     ContextRequest,
     DefineSchemaRequest,
     FreshnessMode,
-    IngestRequest,
     MutationSummary,
     NodeTableSpec,
     QueryRequest,
@@ -147,35 +146,20 @@ def _validate_standalone_http_security(config: GragConfig, host: str) -> None:
 
 
 _INSTRUCTIONS = (
-    "Always call search_knowledge before answering any question about this "
-    "project's code, architecture, entities, or history — even when you think "
-    "you already know. On an unfamiliar repository, call ingest_code on the "
-    "paths first, then search. Read workflow: search_knowledge → get_context → "
-    "cypher_query for exact structured reads. Retrieval footers report truncated and omission "
-    "counts: incomplete context is partial evidence. Increase token_budget, reduce "
-    "hops, or call get_context with one node id and text_property to page a long "
-    "STRING. Continue with text_offset=next_offset and text_sha256=sha256 until "
-    "next_offset is null; restart from offset 0 if the text changed. "
-    "Graph reads report freshness.status. Use freshness='require' when the answer "
-    "depends on current code; freshness_timeout_ms bounds the verification wait "
-    "(default 5000, maximum 60000). A timeout or error is not fresh evidence. "
-    "Legacy indexes with unknown scope need explicit ingest_code enrollment. "
-    "Write workflow: define_schema → "
-    "upsert_nodes (optionally with edges in the same atomic call). Record new facts you learn immediately with "
-    "upsert_nodes / upsert_edges so the knowledge compounds across sessions. "
-    "Embedding: search runs FTS-only by default. Semantic (vector) search — "
-    "which significantly improves recall on natural-language queries — requires "
-    "the server to be started with GRAG_EMBED_PROVIDER=fastembed (recommended: "
-    "local, no API key, ONNX-based). If the user has not enabled it, suggest: "
-    "pip install 'gragdb[embed-local]' then restart the server with "
-    "GRAG_EMBED_PROVIDER=fastembed. When search_knowledge returns "
-    "pending_embeddings > 0, nodes are still being embedded — the server's "
-    "background worker drains the backlog on its own, so recall improves on "
-    "later searches. When it returns \"vector\": \"off\", "
-    "no embedder is configured on this server process — FTS-only is expected "
-    "and pending_embeddings will never appear, so don't mistake that for "
-    "\"fully embedded.\" \"vector\": \"error\" means an embedder is configured "
-    "but failed for that call — say so rather than guessing why recall is FTS-only."
+    "Use grag to ground project questions. Read describe_schema once, then choose "
+    "cypher_query with narrow projections for exact facts, or search_knowledge for fuzzy "
+    "questions. Call get_context only for needed neighbors, selected evidence or paging. "
+    "Reuse schema revisions; an unfamiliar unindexed source needs ingest_code first. "
+    "Freshness: allow_stale reads immediately; wait permits an unverified read at the "
+    "deadline; require errors unless source verification succeeds. freshness_timeout_ms "
+    "(0..60000, default5000) bounds verification, not query execution. Only fresh verifies "
+    "the registered scope at checked_at, not memories/embeddings or later file edits. "
+    "Legacy indexes need explicit ingest_code to enroll a verifiable scope. "
+    "Read evidence qualifiers, truncation/omission counters and parser-coverage limits. "
+    "Save useful decisions/corrections with source; use guarded atomic upserts and exact "
+    "operation-ID retries where appropriate. BM25 is the default; embeddings are optional "
+    "and add model preparation, memory and indexing costs. Do not enable them merely "
+    "because vector=off. Never delete WAL/shadow files to repair a database."
 )
 
 
@@ -282,20 +266,10 @@ def describe_schema(
     service: GragService, freshness: FreshnessMode = "allow_stale", freshness_timeout_ms: int = 5000,
     detail: SchemaDetail = "compact", if_revision: str | None = None,
 ) -> str:
-    """Return the current knowledge-graph schema as compact text: node tables
-    with property types and primary keys, plus directed relationship endpoints.
-    Derived vector columns, counts and samples are omitted by default. Use
-    detail="full" for those details. The footer includes schema_revision and
-    freshness; pass if_revision from a previous response of the same detail
-    level to receive unchanged=true instead of repeating the schema. Reuse
-    your cached schema only when unchanged=true. The revision describes this
-    schema view, not source freshness (full views include counts and samples).
-
-    Call this BEFORE writing any Cypher — cypher_query needs exact table and
-    property names, and upsert keys are the table's primary key. Also call it
-    after define_schema to see new tables (define_schema returns the fresh
-    text too, so re-describing right away is optional). On an empty database
-    the text is empty: define a schema first.
+    """Read schema before Cypher or schema changes. Compact output gives labels, properties,
+    primary keys and directed relationship endpoints. detail="full" adds counts/samples.
+    Cache schema_revision; if_revision returns unchanged=true only for the same detail.
+    Graph freshness is separate from schema revision.
     """
     doc = service.describe_schema(freshness=freshness, freshness_timeout_ms=freshness_timeout_ms, detail=detail, if_revision=if_revision)
     return schema_text(doc)
@@ -309,33 +283,12 @@ def define_schema(
     if_not_exists: bool = True,
     allow_similar: bool = False,
 ) -> str:
-    """Create node and relationship tables. Use before the first upsert of a
-    new entity or relationship kind. Idempotent: with if_not_exists=true
-    (default) tables that already exist are left unchanged; set false to fail
-    loudly on redefinition. Returns the fresh schema text (same shape as
-    describe_schema).
-
-    Reuse before you invent: call describe_schema first and write into the
-    label that already covers the concept. A new name that only differs from
-    an existing one by case, plural or punctuation ("Decisions" vs
-    "Decision", "todo_item" vs "TodoItem") is refused with a hint naming the
-    existing table; pass allow_similar=true only when it is genuinely a
-    different concept.
-
-    Args:
-        node_tables: e.g. [{"name": "Person", "primary_key": "name",
-            "properties": [{"name": "age", "type": "INT64"}],
-            "searchable": true}].
-            "name" is required; "primary_key" defaults to "id" and its column
-            is created automatically; property "type" is one of STRING, INT64,
-            DOUBLE, BOOL, DATE, TIMESTAMP (default STRING); "searchable"
-            (default true) maintains a full-text index so search_knowledge can
-            find these nodes.
-        rel_tables: e.g. [{"name": "KNOWS", "from_label": "Person",
-            "to_label": "Person", "properties": [{"name": "since",
-            "type": "INT64"}]}]. "name", "from_label" and "to_label" are
-            required, and both labels must be existing node tables (define
-            them in the same or an earlier call).
+    """Create/reuse node and directed relationship tables; call before writing a new type.
+    Reuse existing labels: near-duplicates are refused unless allow_similar=true.
+    Node primary keys default to STRING id; declare a different type in properties.
+    Properties support STRING, INT64, DOUBLE, BOOL, DATE, TIMESTAMP. searchable enables
+    retrieval. Relationship endpoints must exist or be defined in this call.
+    Returns the current compact schema. if_not_exists=true preserves existing tables.
     """
     req = DefineSchemaRequest(
         node_tables=[NodeTableSpec.model_validate(t) for t in node_tables],
@@ -349,47 +302,18 @@ def define_schema(
 
 @_return_errors
 def upsert_nodes(service: GragService, nodes: Sequence[UpsertNode | dict], edges: Sequence[UpsertEdge | dict] | None = None, operation_id: str | None = None) -> str:
-    """Record facts you discover about the project. Create or update nodes.
-    Identity is (label, key) where key is the
-    table's primary-key value: an existing key merges properties, a new key
-    creates the node, so re-upserts are idempotent. Properties not declared on
-    the table are skipped with a warning (declare them via define_schema
-    first); properties starting with "_" are grag-internal and always skipped.
-
-    Args:
-        nodes: e.g. [{"label": "Person", "key": "alice",
-            "properties": {"age": 34}, "source": "notes/people.md"}].
-            "label" must be an existing node table (see describe_schema);
-            "key" is the table's primary-key value — the node's identity, so
-            its canonical id becomes "Label:key" (e.g. "Person:alice");
-            "properties" is a dict of declared column values; "source" is
-            optional provenance (file, url, doc id) recorded automatically as
-            the node's _source property.
-            Optional "expected_revision" checks the last-read _revision;
-            "absent" means create only. A conflict rejects the entire batch.
-            Optional "evidence": {} adopts this node into durable history.
-            It can patch state (current/superseded/retracted), review
-            (unreviewed/accepted/disputed), expires_at (timezone required;
-            null clears), superseded_by (canonical id; null clears), actor
-            and reason. Existing-node evidence changes require expected_revision.
-            Superseding requires state=superseded; cycles/missing targets fail.
-            Actor is a caller-supplied attribution, not authenticated identity.
-            Omitted fields preserve metadata. Later upserts retain history even
-            without evidence; absent actor stays unknown for that edit.
-        edges: optional relationships to save atomically with these nodes;
-            uses the same shape as upsert_edges. Endpoints can be in nodes.
-        operation_id: optional unique ID (1-128 characters). Reuse the exact
-            request and ID after an ambiguous response. A committed retry
-            returns its original result with replayed=true, even after later
-            edits. Reusing the ID for a different request is a conflict.
-
-    Returns JSON {"nodes": n, "edges": 0, "warnings": [...]} — always check
-    "warnings" for skipped properties.
-    No nodes or edges commit on error. Guarded/retryable writes also return
-    revisions keyed by canonical entity ID. To read a token, return a whole
-    entity via cypher_query (RETURN n, or RETURN a,r,b); _revision is computed
-    metadata, not a stored Cypher column. Tracked nodes also carry a monotonically
-    increasing _evidence_seq; earlier edits before adoption remain unknown.
+    """Atomically save nodes and optional edges; any error rolls back the entire batch.
+    Reuse schema; node key holds the primary-key value, never properties. Supply source.
+    Omitted fields preserve values; null clears a property. Check warnings for skipped
+    properties. At most 1000 total nodes/edges and 2 MiB per call; split larger work.
+    For lost responses, retry the exact payload and operation_id; replay returns the
+    original result without undoing later edits. A changed payload with that ID conflicts.
+    For competing edits use expected_revision from a whole-entity query, or "absent"
+    for create-only. Relationship tokens use r2:; legacy tokens require a fresh read.
+    Node evidence={} starts durable correction history; existing-node evidence patches
+    require expected_revision. Optional state/review/actor/reason/expiry/supersession
+    are explicit caller metadata, not independent verification. Source and history survive
+    later corrections. Results include counts/warnings and guarded or retryable revisions.
     """
     req = UpsertNodesRequest(nodes=[UpsertNode.model_validate(n) for n in nodes], edges=[UpsertEdge.model_validate(e) for e in edges or []], operation_id=operation_id)
     return _summary_json(service.upsert_nodes(req))
@@ -397,28 +321,13 @@ def upsert_nodes(service: GragService, nodes: Sequence[UpsertNode | dict], edges
 
 @_return_errors
 def upsert_edges(service: GragService, edges: Sequence[UpsertEdge | dict], operation_id: str | None = None) -> str:
-    """Record relationships between facts you discover. Create or update
-    relationships between existing nodes. Both endpoint
-    nodes must exist already (upsert_nodes first) and the direction must match
-    the rel table's declared from/to labels. Identity is (type, from, to), so
-    re-upserting the same edge merges properties idempotently.
-
-    Args:
-        edges: e.g. [{"type": "KNOWS", "from_label": "Person",
-            "from_key": "alice", "to_label": "Person", "to_key": "bob",
-            "properties": {"since": 2020}, "source": "notes/people.md"}].
-            Endpoints are addressed by (label, primary-key value) — the same
-            keys used in upsert_nodes. "source" is optional provenance
-            recorded automatically as the edge's _source property.
-            Optional "expected_revision" checks the last-read _revision;
-            "absent" requires that this edge does not exist.
-        operation_id: optional ID for safe retries of the exact same request,
-            with the same semantics as upsert_nodes.
-
-    Returns JSON {"nodes": 0, "edges": n, "warnings": [...]} — always check
-    "warnings" for skipped properties.
-    The complete edge batch is atomic. Use upsert_nodes(nodes, edges=...)
-    to include new endpoint nodes in the same transaction.
+    """Atomically save directed relationships between existing endpoints. Reuse schema;
+    use upsert_nodes with edges to create endpoints in the same transaction. Check warnings.
+    Supply source, optional expected_revision (r2: token from RETURN r, or "absent"),
+    and operation_id for exact retries after lost responses. Legacy unprefixed edge guards
+    require a reread; stored old receipts still replay unchanged. Same type/endpoints
+    select the guarded relationship; duplicate relationships must be reconciled first.
+    At most 1000 edges and 2 MiB per call. Returns counts/warnings and applicable revisions.
     """
     req = UpsertEdgesRequest(edges=[UpsertEdge.model_validate(e) for e in edges], operation_id=operation_id)
     return _summary_json(service.upsert_edges(req))
@@ -429,36 +338,23 @@ def cypher_query(
     service: GragService, cypher: str, limit: int | None = None,
     freshness: FreshnessMode = "allow_stale", freshness_timeout_ms: int = 5000,
 ) -> str:
-    """Run a READ-ONLY Cypher query (MATCH ... RETURN, aggregations, path
-    patterns) and return compact JSON:
-    {"columns": [...], "rows": [[...]], "row_count": n, "truncated": bool}.
-
-    Call describe_schema first for exact table and property names. Write
-    keywords (CREATE, MERGE, DELETE, SET, DROP, ...) are rejected — use
-    define_schema, upsert_nodes and upsert_edges for writes. For fuzzy
-    "what do we know about X" lookups prefer search_knowledge; use
-    cypher_query for exact, structured reads.
-
-    Args:
-        cypher: the query text, e.g. "MATCH (p:Person)-[k:KNOWS]->(q:Person)
-            RETURN p.name, q.name, k.since". Node/relationship values in rows
-            come back as JSON objects (their "_ID"/"_LABEL" keys are
-            grag-internal — ignore them; canonical "Label:key" ids come from
-            search_knowledge / get_context).
-            Whole entities omit derived vector properties (embedding, _emb_*).
-            Explicit property projections such as RETURN n.embedding still
-            return the requested value, including inside a user-built map.
-            Whole entities include computed "_revision" for conditional
-            upserts; it is not a stored column, so RETURN n rather than n._revision.
-        limit: max rows, clamped to the server's configured limits (default
-            100). "truncated": true means more rows exist — narrow the query
-            or raise limit.
+    """Run read-only Cypher with compact JSON columns/rows/row_count/truncated/freshness.
+    Read describe_schema first; project only needed fields for exact lookups or counts.
+    Use search_knowledge for fuzzy questions. This tool accepts no writes.
+    Whole nodes/relationships include computed _revision and omit vectors/null columns;
+    _revision is not a stored Cypher property. Explicit property/map projections remain
+    exact, including nulls and vectors. Return endpoints with relationships for canonical
+    subgraph IDs; native _ID/_SRC/_DST are storage identities, not durable IDs.
+    Default limit=100, clamped by server policy; truncated=true means more rows exist.
+    An empty result is limited to the indexed scope and available parser coverage.
     """
     resp = service.cypher_query(QueryRequest(
         cypher=cypher, limit=limit, freshness=freshness, freshness_timeout_ms=freshness_timeout_ms,
     ))
     # Match REST's JSON conversion (especially timestamps and nested values).
     payload = resp.model_dump(mode="json", exclude={"subgraph"})
+    from grag.core.serialize import compact_graph_values
+    payload["rows"] = compact_graph_values(payload["rows"])
     return json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
 
 
@@ -474,58 +370,18 @@ def search_knowledge(
     freshness_timeout_ms: int = 5000,
     evidence: Literal["current", "all"] = "current",
 ) -> str:
-    """Call this first for any question about what exists in the knowledge
-    graph — even when you think you already know. Full-text seeds (plus vector
-    seeds if an embedder is configured), k-hop graph expansion, packed into a
-    token budget. This is the primary "what do we know about X?" tool — use it
-    when you don't know exact node ids. Use get_context when you already have
-    ids; use cypher_query for exact structured reads.
-
-    Args:
-        query: free-text query, e.g. "payment outage postmortem".
-        top_k: max seed nodes (default 8).
-        hops: graph expansion depth from each seed (default 1, server-clamped).
-        labels: optional node-table allowlist for seeds, e.g. ["Doc",
-            "Person"].
-        evidence: current (default) excludes superseded/retracted/expired,
-            disputed and retained obsolete document evidence before ranking
-            and expansion. Legacy status values superseded/retracted/expired
-            are recognized; other statuses (including task done) are unchanged.
-            Unreviewed/legacy evidence remains eligible, not certified true.
-            all includes inactive evidence for explicit historical review.
-        token_budget: estimated tokens for the complete response, including
-            graph and footer (minimum 256; server default when omitted).
-
-    Returns the packed context (ready for grounding), a "---" separator, then
-    a JSON footer {"seeds": [{"id": "Doc:42", "score": 0.016, "match":
-    "fts"}, ...]}. Pass seed ids to get_context for focused follow-up
-    expansion. The footer also reports truncated, omission counts, and
-    expansion_limited. A truncated response is partial evidence: increase the
-    budget or use get_context with text_property to page a long STRING. Values
-    in the graph are either complete or omitted. Oversized prose may also
-    appear as an explicitly marked excerpt: text_excerpts in the footer gives
-    node_id, property, character offset/end, total_chars and sha256. This is
-    partial evidence, not the whole property. Read more with get_context using
-    text_property, text_offset=offset (or end) and text_sha256=sha256; restart
-    paging from 0 if you need the entire value. A changed hash requires a fresh
-    read. Selection uses lexical sentence matches and may miss semantic-only
-    passages. Estimates use ceil(UTF-8 bytes / 4), not a
-    model-specific tokenizer. When the footer includes "pending_embeddings": n, n nodes are
-    still awaiting vector embedding — vector recall improves as later
-    searches or the background worker drain that backlog. The freshness footer
-    reports code-index verification separately: use freshness="require" for
-    answers that depend on current code, and do not treat error, unknown, or a
-    timed-out wait as verified evidence. When
-    the footer includes "vector": "off", no embedder is configured for this
-    server process — every seed is FTS-only and pending_embeddings will
-    never appear (it's always 0), so don't read "no pending_embeddings" as
-    "fully embedded." "vector": "error" means an embedder is configured but
-    the vector path failed for this call (bad install or config) and
-    silently fell back to FTS — worth checking server logs.
-    evidence_policy names the selection policy. excluded_evidence counts only
-    encountered post-shortlist/path exclusions, not all rows filtered in the
-    database. Cypher is an unfiltered structural read. No policy establishes
-    truth or detects contradictory claims automatically.
+    """Retrieve cited context for a fuzzy question: BM25 plus optional vectors, then graph
+    expansion. Narrow labels when known; top_k controls seeds and hops controls neighbors.
+    Use cypher_query projections for exact names/counts, get_context for selected IDs.
+    Inspect the JSON footer: freshness, evidence_policy, truncated and omission counts.
+    Current evidence excludes superseded/retracted/expired/disputed/obsolete nodes;
+    evidence="all" includes them with qualifiers. Unreviewed evidence is not certified.
+    Whole properties may be omitted to fit token_budget. text_excerpts are partial slices;
+    follow their node/property/offset/sha256 using get_context paging before claiming
+    complete evidence. Empty/complete output never proves exhaustive graph coverage.
+    BM25 works without an embedder; vector="off" is expected then. vector="error" means
+    configured embeddings failed; pending_embeddings reports unfinished embedding work.
+    Budgets are UTF-8/4 estimates (256..32768), not tokenizer counts.
     """
     resp = service.search_knowledge(
         SearchRequest(
@@ -559,42 +415,17 @@ def get_context(
     history_before: int | None = None,
     revision: int | None = None,
 ) -> str:
-    """Fetch token-budgeted context around specific nodes by canonical id. Use
-    after search_knowledge (pass its seed ids) or with ids discovered via
-    cypher_query.
-
-    Args:
-        node_ids: canonical ids "Label:key", e.g. ["Person:alice", "Doc:42"].
-        hops: expansion depth around the nodes (default 1, server-clamped).
-        token_budget: estimated tokens for the complete response, including
-            graph and footer (minimum 256; server default when omitted).
-        text_property: read a STRING property on exactly one node in pages;
-            this mode ignores hops. Use for long values omitted by packing.
-        text_offset: character offset, initially 0; continue using next_offset
-            from the text_page footer until it is null.
-        text_sha256: pass the previous page's sha256 on continuation to detect
-            text changes; on a mismatch restart at offset 0 without a hash.
-        evidence: current (default) uses search's lifecycle policy; all allows
-            inspection/paging of obsolete, expired or disputed evidence.
-        history: list recorded authored revisions for exactly one node,
-            newest first. Read entries and next_before from the history footer.
-            Starts at adoption, with sequence 0 baseline for an existing node;
-            earlier edits and baseline authorship are unknown. No graph expansion.
-        history_before: continue history using its next_before cursor. At most
-            20 entries per page, further constrained by token_budget.
-        revision: read a recorded sequence for one node (including historical
-            evidence), optionally with text_property paging. No expansion:
-            historical relationship topology is not recorded. Cannot combine
-            with history. Raw Cypher/relocation and import are not history events.
-
-    Returns cited context plus a JSON footer after "---". truncated and the
-    omitted_nodes/edges/properties counts describe incomplete packing. Increase
-    the budget, reduce hops, or page a specific STRING property to retrieve more.
-    expansion_limited means the traversal path cap was reached. Estimates use
-    ceil(UTF-8 bytes / 4), not a model-specific tokenizer. In page mode the
-    selected value is exact (JSON-escaped); other properties are not requested.
-    Ids that don't resolve are skipped;
-    unknown labels are an error (call describe_schema for the valid labels).
+    """Retrieve cited context for known Label:key IDs, expanding up to hops within token_budget.
+    Inspect freshness, evidence_policy, truncated and omission counters; absent properties
+    may be omitted for space. evidence="current" filters obsolete/retracted/disputed/expired
+    nodes; evidence="all" includes qualified old evidence. It does not certify truth.
+    For a long STRING, pass exactly one ID and text_property; page with text_offset and
+    text_sha256 from text_page until next_offset=null. If changed, restart at zero without
+    the hash. Page mode skips expansion; a last suffix may still report truncated=true.
+    For tracked memory, history=true lists up to 20 revisions; continue using history_before.
+    revision=<sequence> retrieves one saved snapshot and can combine with text_property.
+    History needs one ID, starts at adoption, and does not reconstruct past relationships.
+    Budgets are UTF-8/4 estimates (256..32768); use Cypher for exact structured projections.
     """
     resp = service.get_context(
         ContextRequest(
@@ -616,47 +447,23 @@ def ingest_code(
     calls: bool = True,
     max_file_kb: int = 1024,
     background: bool = False,
+    root: str | None = None,
+    replace_scope: bool = False,
 ) -> str:
-    """Call this on any repository or file tree before answering questions about
-    its code structure. Indexes the STRUCTURE of one or more code repositories into the graph:
-    Repo/Module/Class/Function nodes (path, line range, signature, docstring —
-    never source bodies) plus CONTAINS_*/IMPORTS/INHERITS/CALLS edges. Use it
-    to answer "what calls X / what inherits from Y / what does module Z
-    import" with cheap cypher_query instead of reading files. Re-running on
-    the same tree preserves stable nodes and prunes removed files, symbols,
-    and generated edges. Repo ids include a canonical-path hash, so same-named
-    checkouts cannot collide. Parses Python via stdlib ast; TypeScript/
-    JavaScript/Vue, C#, Terraform, Go, Bash, Java, Kotlin, Rust, C, C++, Ruby,
-    PHP, Swift, Lua, Scala and SQL via tree-sitter (needs the optional extra:
-    pip install "gragdb[code]"; CALLS/INHERITS edges are Python-only for
-    now). Other code files are skipped with a warning.
-
-    Terraform (.tf) `module` blocks also become TerraformModuleCall nodes
-    (name, source, version), one per block, local or registry/git source
-    alike — read straight off the .tf file, never retyped by hand. Prefer
-    this over writing a module's version into a manually-authored node from
-    a README or other doc: cypher_query it instead (e.g. MATCH
-    (m:TerraformModuleCall) WHERE m.source CONTAINS '<name>' RETURN
-    m.version) so the answer can't drift from what's actually pinned.
-
-    Args:
-        paths: repo directories (or single files) to walk, e.g. ["src"].
-            Build artifacts and VCS dirs (.git, node_modules, dist, ...) are
-            skipped automatically.
-        calls: also record resolvable CALLS edges (default true).
-        max_file_kb: skip files larger than this many KB (default 1024).
-        background: queue the ingest on the server and return immediately
-            with {"id": ..., "status": "queued"}; poll job_status(id) for the
-            result. Use for large trees so this call does not block for
-            minutes. Re-ingests are incremental either way: unchanged files
-            are parsed for cross-file resolution but never rewritten.
-
-    Returns compact JSON {"repos": n, "modules": n, "classes": n,
-    "functions": n, "module_calls": n, "edges": n, "nodes_pruned": n,
-    "edges_pruned": n, "files_parsed": n, "files_unchanged": n,
-    "warnings": [...]} — always check "warnings" for skipped files.
+    """Index local source structure, names, signatures, docstrings and file/line citations;
+    source bodies stay in files. Incremental scans reconcile changed/removed generated
+    nodes/edges while retaining authored links; check warnings and obsolete qualifiers.
+    Python works by default; other supported languages/framework scripts need gragdb[code].
+    Go also indexes Constant source expressions and basic interface method sets.
+    Do not assume complete call/import resolution: inspect Module.code_coverage for JS/TS/Go;
+    missing edges do not prove absence. paths honor ignores and skip symlinks/nested repos.
+    Use root for one intended scope. Registered paths accumulate unless replace_scope=true
+    with an explicit root; paths=[] then unregisters that scope. Saved options govern refresh.
+    calls controls CALLS edges; max_file_kb limits individual source files.
+    Use background=true for large scans and poll job_status; a returned job is not completion.
+    Serving reads verify enrolled code scopes; require freshness when current code matters.
     """
-    req = CodeIngestRequest(paths=paths, calls=calls, max_file_kb=max_file_kb)
+    req = CodeIngestRequest(paths=paths, calls=calls, max_file_kb=max_file_kb, root=root, replace_scope=replace_scope)
     if background:
         job = service.submit_ingest_code(req)
         return json.dumps(job.model_dump(), ensure_ascii=False, separators=_COMPACT)
@@ -672,42 +479,21 @@ def ingest_docs(
     label: str = "Chunk",
     background: bool = False,
 ) -> str:
-    """Index documents (.md/.txt/.json/.jsonl files or directories of them) on
-    the server's filesystem into the graph. With sections=true (default) a
-    Markdown file's heading hierarchy becomes Document -> Section nodes
-    (SUBSECTION_OF / NEXT_SECTION between sections), each section's body is
-    chunked under it (Chunk -IN_SECTION-> Section), and any code symbol the
-    text names in backticks that exists in the code graph gets a
-    MENTIONS_FUNCTION / MENTIONS_CLASS / MENTIONS_MODULE edge. Run ingest_code
-    first so those links resolve. Use this for specs and design documents;
-    sections=false is the flat chunk loader for loose notes.
-
-    Re-running on the same files is an authoritative sync: current sections
-    and chunks are merged and generated links are replaced atomically.
-    Relationships you create or update through upsert_edges are preserved.
-    Obsolete nodes still referenced by authored/unknown links are retained;
-    warnings identify those nodes and legacy links with unknown ownership.
-    Retained obsolete content may describe an earlier revision. Section ids are stable
-    ("<doc>#<heading/slug/path>"), so the empty IMPLEMENTS (Function ->
-    Section) and IMPLEMENTS_CLASS tables are ready for you to record which
-    code realises which part of the spec via upsert_edges.
-
-    Args:
-        paths: files or directories on the server, e.g. ["docs/algo-bible.md"].
-        sections: heading-aware graph (default true) vs flat chunks.
-        label: chunk node label (default "Chunk").
-        background: queue the ingest and return {"id", "status": "queued"};
-            poll job_status(id). Use for large documents.
-
-    Returns compact JSON {"label", "nodes_created", "nodes_pruned",
-    "documents", "sections", "code_links", "files_read", "warnings": [...]}.
+    """Index local Markdown/text/JSON/JSONL documents with provenance. JSON expects a list
+    of {text, source?, metadata?} records or a documents wrapper; JSONL one record per line.
+    Arbitrary JSON fixtures/schemas are skipped with warnings. sections=true preserves
+    heading structure for Markdown; other formats use flat chunks. label names the chunk table.
+    Ingest code first to link mentioned symbols. Directory scans reconcile deleted documents;
+    file updates replace generated content/links. Authored or unknown links can retain obsolete
+    nodes; inspect warnings. Failed scans do not authorize deletion of unseen documents.
+    Honor ignores and source scope; documents need explicit re-ingestion after edits.
+    Use background=true for large input, then poll job_status. Paths are on the server.
     """
     from pathlib import Path
 
-    from grag.ingest.loaders import load_paths
+    from grag.ingest.loaders import load_request
 
-    documents, warnings, files_read = load_paths([Path(p) for p in paths])
-    req = IngestRequest(documents=documents, label=label, sections=sections)
+    req, warnings, files_read = load_request([Path(p) for p in paths], label=label, sections=sections)
     if background:
         job = service.submit_ingest(req)
         payload = job.model_dump()
@@ -723,18 +509,10 @@ def ingest_docs(
 
 @_return_errors
 def job_status(service: GragService, job_id: str) -> str:
-    """Poll a background job started with ingest_code(background=true).
-
-    Args:
-        job_id: the "id" returned when the job was queued.
-
-    Returns compact JSON {"id", "kind", "status": "queued"|"running"|"done"|
-    "failed"|"cancelled", "created_at", "started_at", "finished_at", "result", "error"}.
-    "result" holds the ingest response once status is "done"; "error" the
-    failure/cancellation message when "failed" or "cancelled". Shutdown cancels
-    queued work and lets active work drain before closing its database.
-    Unknown ids are an error (jobs live in
-    memory for the serving process).
+    """Poll a background ingestion job by job_id. queued/running are unfinished;
+    done includes the result and warnings, failed includes the error, cancelled requires
+    resubmission if still wanted. Jobs are process-local and disappear after restart.
+    A job ID or running response never establishes a successful ingest.
     """
     job = service.get_job(job_id)
     return json.dumps(job.model_dump(), ensure_ascii=False, separators=_COMPACT)
@@ -746,18 +524,7 @@ def job_status(service: GragService, job_id: str) -> str:
 def _doc(fn: Callable[..., Any]) -> str:
     doc = inspect.cleandoc(fn.__doc__ or "")
     if fn.__name__ in {"describe_schema", "cypher_query", "search_knowledge", "get_context"}:
-        doc += (
-            "\n\nCode freshness: freshness='allow_stale' (default) reads without waiting; "
-            "'wait' requests verification but permits an unverified read at the deadline; "
-            "'require' returns an error unless verification succeeds. "
-            "freshness_timeout_ms defaults to 5000 (range 0-60000) and bounds only "
-            "the verification wait. Concurrent reads share work; failure backoff applies. "
-            "The freshness object reports status, checked_at, and timed_out. "
-            "Only 'fresh' verifies the registered code scope at that check; it does "
-            "not certify embeddings, authored memories, or subsequent source edits. "
-            "Inspect GET /api/index/status for root errors and saved options. "
-            "Legacy indexes report 'unknown' until explicitly ingested with the intended scope/options."
-        )
+        doc += "\nUse freshness='require' for current code; inspect freshness.status. Timeout/error is not verification."
     return doc
 
 
@@ -886,10 +653,12 @@ def create_server(
         calls: bool = True,
         max_file_kb: Annotated[int, Field(ge=1, le=32_768)] = 1024,
         background: bool = False,
+        root: str | None = None,
+        replace_scope: bool = False,
         ctx: Context | None = None,
     ) -> str:
         return ingest_code(
-            _resolve_service(registry, ctx), paths, calls, max_file_kb, background
+            _resolve_service(registry, ctx), paths, calls, max_file_kb, background, root, replace_scope
         )
 
     @server.tool(name="ingest_docs", structured_output=False, description=_doc(ingest_docs))

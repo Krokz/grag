@@ -127,7 +127,7 @@ def validate_request(req: BaseModel) -> None:
     if hasattr(req, "nodes") or hasattr(req, "edges"):
         check_size("mutation_items", len(getattr(req, "nodes", [])) + len(getattr(req, "edges", [])), MAX_MUTATIONS,
                    hint="Split the write into batches of at most 1000 total nodes and edges, each with its own operation_id.")
-    for name, maximum in (("node_tables", 64), ("rel_tables", 64), ("documents", 256), ("paths", 64)):
+    for name, maximum in (("node_tables", 64), ("rel_tables", 64), ("documents", 256), ("paths", 64), ("sync_paths", 64)):
         check_size(name, len(getattr(req, name, [])), maximum)
 
 

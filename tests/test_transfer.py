@@ -106,7 +106,8 @@ def test_export_stream_shape(populated):
     kinds = {r["type"] for r in records}
     assert {"node", "edge"} <= kinds
     node_labels = {r["label"] for r in records if r["type"] == "node"}
-    assert node_labels == {"Person", "Team"}
+    assert node_labels == {"Person", "Team", "_grag_tables"}
+    assert records[-1]["type"] == "complete"
     ada = next(
         r for r in records if r["type"] == "node" and r.get("key") == "p1"
     )
@@ -181,9 +182,11 @@ def test_import_rejects_newer_format(config):
         target.close()
 
 
-def test_export_excludes_internal_tables(populated):
+def test_export_preserves_registry_but_excludes_runtime_stamps(populated):
     records = [json.loads(line) for line in export_lines(populated)]
     schema = next(r for r in records if r["type"] == "schema")
     names = {t["name"] for t in schema["node_tables"]}
-    assert not any(n.startswith("_") for n in names)
-    assert all(not r["label"].startswith("_") for r in records if r["type"] == "node")
+    assert "_grag_tables" in names
+    assert "_grag_meta" not in names
+    from grag.core.types import VECTOR_PROPS
+    assert all(p["name"] not in VECTOR_PROPS for t in schema["node_tables"] for p in t["properties"])

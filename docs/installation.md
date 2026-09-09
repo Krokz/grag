@@ -13,16 +13,17 @@ Linux, macOS, and Windows are all exercised in CI. For CLI + MCP use, prefer a
 
 ## Windows
 
-**M16 development build:** Windows x64 grag wheels include the OpenSSL runtime
+**From grag 0.9.0:** Windows x64 grag wheels include the OpenSSL runtime
 needed by LadybugDB. Ordinary wheel installs require no separate OpenSSL setup.
 The libraries load from grag's own package directory. Source/editable Windows
 installs need the [runtime build step](development.md#windows-source-builds).
 Other platforms keep a small universal wheel without these DLLs.
 
-**PyPI 0.8.0 and earlier do not include this fix.** A missing-OpenSSL error can
-appear as `Could not find lbug C API shared library`. Prefer a release containing
-the M16 fix when available, or build the development checkout; an older doctor
-report saying “installed” does not prove native loading succeeds.
+**Versions 0.8.0 and earlier do not include this fix.** A missing-OpenSSL error can
+appear as `Could not find lbug C API shared library`. Upgrade to 0.9.0 or later;
+an older doctor report saying “installed” does not prove native loading succeeds.
+Ladybug's Windows wheel supplies the native engine; ordinary grag wheel installs
+do not require manually downloading the separate C-API DLL used by grag's CI tests.
 
 Human CLI output escapes characters a legacy terminal cannot represent. Saved
 configuration files and exported JSONL retain UTF-8, including Unicode paths and
@@ -41,7 +42,7 @@ disconnecting an agent leaves it running. Use `grag stop` for a clean shutdown.
 The default install uses BM25 full-text search and does not configure an embedding
 provider. The native engine can download its FTS extension on first use. Optional
 language-pack grammars and local embedding models may also need downloads before
-offline use. In the M16 development build:
+offline use:
 
 ```bash
 grag doctor              # offline asset checks; no project DB opened
@@ -72,7 +73,7 @@ See [embeddings](guides/embeddings.md) for the optional local model and its cost
 
 ## What doctor verifies
 
-The M16 doctor opens a temporary native database and runs Cypher, builds and
+Doctor opens a temporary native database and runs Cypher, builds and
 queries an FTS index, loads/parses each supported installed grammar, and runs
 real inference for a configured local model. Separate child processes contain
 native crashes and timeouts. Plain checks do not download assets. An installed
@@ -94,7 +95,7 @@ error and see [troubleshooting](operations/troubleshooting.md).
 
 Without an embedder, everything works FTS-only (BM25 is native to the engine).
 
-**LadybugDB compatibility.** This release pins LadybugDB 0.20.2. grag disables the
+**LadybugDB compatibility.** This release pins LadybugDB 0.20.3. grag disables the
 engine's cached-physical-plan fast path on every connection (`CALL
 enable_cached_prepared_statement='none'`, the upstream kill switch for the
 LadybugDB/ladybug#877 family of stale-re-execution bugs) and falls back to per-statement

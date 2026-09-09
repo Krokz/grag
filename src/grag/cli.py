@@ -69,11 +69,15 @@ def _config(args: argparse.Namespace) -> GragConfig:
         cfg.db_path = Path(args.db)
         # An explicit CLI selector wins over the opposite environment selector.
         cfg.db_dir = None
+        cfg.server_url = None
+        cfg.server_db = None
     if getattr(args, "db_dir", None):
         # Leave cfg.db_path at its default: its name picks the preferred
         # default db inside db_dir.
         cfg.db_path = GragConfig().db_path
         cfg.db_dir = Path(args.db_dir)
+        cfg.server_url = None
+        cfg.server_db = None
     if getattr(args, "cmd", None) != "init" and not explicit_database(args):
         moving = getattr(args, "cmd", None) == "relocate"
         root = Path(args.new_root).expanduser().resolve() if moving else project_root()
@@ -212,11 +216,31 @@ def main(argv: list[str] | None = None) -> int:
     ingest_code = sub.add_parser(
         "ingest-code", help="ingest code structure (Repo/Module/Class/Function)"
     )
-    ingest_code.add_argument("paths", nargs="+")
+    ingest_code.add_argument("paths", nargs="*")
+    ingest_code.add_argument("--root", type=Path, help="enclosing source root for selected paths")
+    ingest_code.add_argument("--replace-scope", action="store_true", help="replace the saved scope under --root; no paths removes its code index")
     ingest_code.add_argument("--no-calls", action="store_true", help="skip CALLS edges")
     ingest_code.add_argument(
         "--max-file-kb", type=int, default=1024, help="skip files larger than this (KB)"
     )
+
+    remember = sub.add_parser("remember", help="save a text memory in the selected graph")
+    remember.add_argument("text")
+    remember.add_argument("--id", help="stable memory key (default: a new UUID)")
+    remember.add_argument("--label", default="Memory")
+    remember.add_argument("--source", default="grag remember")
+    remember.add_argument("--expected-revision", help="guard a revision of an existing memory")
+    remember.add_argument("--json", action="store_true")
+    search = sub.add_parser("search", help="retrieve knowledge from the selected graph")
+    search.add_argument("query")
+    search.add_argument("--label", action="append", dest="labels")
+    context = sub.add_parser("context", help="retrieve context around Label:key node IDs")
+    context.add_argument("node_ids", nargs="+")
+    for retrieval in (search, context):
+        retrieval.add_argument("--tokens", type=int, default=2000)
+        retrieval.add_argument("--hops", type=int, default=1)
+        retrieval.add_argument("--freshness", choices=["allow_stale", "wait", "require"], default="allow_stale")
+        retrieval.add_argument("--json", action="store_true")
 
     sub.add_parser("status", help="show whether a server is running for this database")
 
@@ -301,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor.add_argument("--timeout", type=float, help="seconds per isolated probe (default 30; 300 with --prepare)")
 
     export = sub.add_parser(
-        "export", help="dump the database as portable JSONL (schema + nodes + edges)"
+        "export", help="capture a verified JSONL snapshot (including history and retry receipts)"
     )
     export.add_argument(
         "--out", "-o", default=None, help="output file (default: stdout)"
@@ -320,9 +344,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     import_ = sub.add_parser(
-        "import", help="replay a 'grag export' JSONL file into this database"
+        "import", help="restore and verify a 'grag export' snapshot into a new --db file"
     )
     import_.add_argument("file", help="JSONL file produced by 'grag export'")
+    import_.add_argument("--allow-legacy", action="store_true", help="accept v1 files without completion proof, history or retry receipts")
 
     bench = sub.add_parser("bench", help="codec benchmark (recall / latency / RSS)")
     bench.add_argument("--codec", default=None)
@@ -404,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="with --server-url: database name on a multi-db (--db-dir) server",
     )
+    init.add_argument("--no-verify", action="store_true", help="write configuration only; leave client readiness explicitly unverified")
     init.add_argument(
         "--no-mcp",
         action="store_true",
@@ -435,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = _config(args)
-    except (ProjectConfigError, OSError) as exc:
+    except (ProjectConfigError, OSError, ValueError) as exc:
         print(f"grag {args.cmd}: {exc}", file=sys.stderr)
         return 1
 
@@ -563,23 +589,17 @@ def main(argv: list[str] | None = None) -> int:
             except GragError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
-    elif args.cmd == "ingest":
-        from grag.ingest.loaders import ingest_paths
+    elif args.cmd in ("ingest", "ingest-code", "remember", "search", "context"):
+        from pydantic import ValidationError
 
-        summary = ingest_paths(
-            cfg, [Path(p) for p in args.paths], sections=args.sections
-        )
-        print(summary)
-    elif args.cmd == "ingest-code":
-        from grag.ingest.code import ingest_code_paths
+        from grag.cli_graph import graph_command
+        from grag.core.errors import GragError
 
-        summary = ingest_code_paths(
-            cfg,
-            [Path(p) for p in args.paths],
-            calls=not args.no_calls,
-            max_file_kb=args.max_file_kb,
-        )
-        print(summary)
+        try:
+            return graph_command(args, cfg)
+        except (GragError, ValidationError, OSError) as exc:
+            print(f"grag {args.cmd}: {exc}", file=sys.stderr)
+            return 1
     elif args.cmd == "status":
         from grag.admin import status_lines
 
@@ -648,63 +668,39 @@ def main(argv: list[str] | None = None) -> int:
         # JSONL is a portable UTF-8 data stream, including supplementary Unicode.
         reconfigure = getattr(sys.stdout, "reconfigure", None)
         if callable(reconfigure):
-            reconfigure(encoding="utf-8", errors="strict")
-        from grag.admin import find_server
-        from grag.core.engine import Engine
-        from grag.transfer import export_to
+            reconfigure(encoding="utf-8", errors="strict", newline="\n")
+        from grag.client import GraphClient
+        from grag.core.errors import GragError
+        from grag.transfer_io import export_client
 
-        export_url = args.url or cfg.server_url
-        if export_url:
-            from grag.transfer import export_from_server
-
-            try:
-                n = export_from_server(
-                    export_url,
-                    args.out,
-                    api_token=cfg.api_token,
-                    db_name=args.server_db or cfg.server_db,
-                    allow_insecure=cfg.allow_insecure_http,
-                )
-            except (OSError, SystemExit) as exc:
-                print(f"export failed: {exc}", file=sys.stderr)
-                return 1
-            if args.out:
-                print(f"Exported {n} line(s) from {export_url} to {args.out}", file=sys.stderr)
-            return 0
-        if find_server(cfg.db_path) is not None:
-            print(
-                "A server is running on this database (single-writer lock).\n"
-                "Stop it first: grag --db "
-                f"{cfg.db_path} stop",
-                file=sys.stderr,
-            )
+        export_cfg = cfg.model_copy(update={
+            "server_url": args.url or cfg.server_url,
+            "server_db": args.server_db or cfg.server_db,
+        })
+        try:
+            if not export_cfg.server_url and not export_cfg.db_path.is_file():
+                raise GragError("Export source database does not exist; select it with --db.")
+            with GraphClient(export_cfg) as client:
+                n = export_client(client, args.out)
+        except (GragError, OSError, UnicodeError) as exc:
+            print(f"export failed: {exc}", file=sys.stderr)
             return 1
-        with Engine(cfg) as engine:
-            if args.out:
-                with open(args.out, "w", encoding="utf-8") as fh:
-                    n = export_to(engine, fh)
-                print(f"Exported {n} line(s) to {args.out}", file=sys.stderr)
-            else:
-                export_to(engine, sys.stdout)
+        if args.out:
+            print(f"Exported verified snapshot ({n} lines) to {args.out}", file=sys.stderr)
     elif args.cmd == "import":
-        from grag.admin import find_server
-        from grag.core.engine import Engine
-        from grag.transfer import import_from
+        from grag.core.errors import GragError
+        from grag.transfer_io import restore_file
 
-        if find_server(cfg.db_path) is not None:
-            print(
-                "A server is running on this database (single-writer lock).\n"
-                "Stop it first: grag --db "
-                f"{cfg.db_path} stop",
-                file=sys.stderr,
-            )
+        try:
+            report = restore_file(cfg, args.file, allow_legacy=args.allow_legacy)
+        except (GragError, OSError, UnicodeError) as exc:
+            print(f"import failed: {exc}", file=sys.stderr)
             return 1
-        with Engine(cfg) as engine, open(args.file, encoding="utf-8") as fh:
-            report = import_from(engine, cfg, fh)
-            engine.execute_write("CHECKPOINT")
-        print(f"Imported {report['nodes']} node(s), {report['edges']} edge(s).")
-        for w in report["warnings"]:
-            print(f"  warning: {w}")
+        print(f"Restored {report['nodes']} node(s), {report['edges']} edge(s), "
+              f"{report['history']} history entries and {report['retry_receipts']} retry receipts "
+              f"to {report['database']}. Closed and reopened contents verified.")
+        for warning in report["warnings"]:
+            print(f"  warning: {warning}")
     elif args.cmd == "bench":
         from grag.retrieval.bench import run_bench
 
@@ -764,11 +760,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"grag relocate: {exc}", file=sys.stderr)
             return 1
     elif args.cmd == "init":
+        from grag.core.errors import GragError
         from grag.project_files import ProjectConfigError
 
         try:
             return _init_command(args, cfg)
-        except (ProjectConfigError, OSError) as exc:
+        except (ProjectConfigError, GragError, OSError) as exc:
             print(f"grag init: {exc}", file=sys.stderr)
             return 1
     return 0
@@ -850,6 +847,12 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
                 "Use --db <file> init to adopt it or choose a different database explicitly."
             )
     port = args.port
+    if port is None and db_path is not None and not args.server_url:
+        from grag.admin import find_server
+
+        owner = find_server(db_path)
+        if owner:
+            port = owner.port
     if port is None:
         if identity and db_path == Path(identity.db_path):
             port = identity.port
@@ -879,18 +882,10 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
             args.ingest = False
 
     ops: list[WriteOp | SkipOp | DeleteOp] = []
+    mcp_ops = []
     if not args.no_mcp:
-        ops.extend(
-            plan_mcp_ops(
-                clients,
-                project_root,
-                db_path,
-                stdio=not args.url,
-                port=port,
-                server_url=server_url,
-                server_db=args.server_db,
-            )
-        )
+        mcp_ops = plan_mcp_ops(clients, project_root, db_path, stdio=not args.url, port=port, server_url=server_url, server_db=args.server_db)
+        ops.extend(mcp_ops)
     if not args.no_claude_md:
         ops.append(
             plan_claude_md_op(
@@ -914,6 +909,15 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
     print("Writing:")
     apply_ops(ops)
 
+    print(f"Database: {server_url or db_path}")
+    if mcp_ops and not args.no_verify:
+        from grag.onboarding import verify_registrations
+
+        for report in verify_registrations([op.path for op in mcp_ops], project_root):
+            print(f"Verified MCP write/read: {report['registration']}\n  Runtime: {report['runtime']} ({report['tools']} tools)")
+    elif mcp_ops:
+        print("Client connection unverified (--no-verify). Rerun init to verify it.")
+
     if args.ingest:
         from grag.ingest.code import ingest_code_paths
 
@@ -935,8 +939,7 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
     print(
         "\nDone. Next steps:\n"
         "  1. Restart your MCP client (Claude Code / Cursor / ...) so it "
-        "picks up the config;\n"
-        "     grag then starts automatically when the agent first uses it.\n"
+        "picks up the config.\n"
         + (
             ""
             if args.ingest

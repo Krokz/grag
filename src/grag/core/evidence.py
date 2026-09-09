@@ -41,12 +41,12 @@ COLUMNS = {
     "_expires_at": "STRING", "_superseded_by": "STRING", "_evidence_seq": "INT64",
 }
 # These cannot be dropped while retaining prose that they qualify.
-SAFETY_PROPS = frozenset({*COLUMNS, "_document_state", "_history_revision", "_evidence_visibility", "status"})
+SAFETY_PROPS = frozenset({*COLUMNS, "_document_state", "_source_state", "_history_revision", "_evidence_visibility", "status"})
 
 
 def exclusion_reason(node: NodeRecord, now: dt.datetime) -> str | None:
     props = node.properties
-    if props.get("_document_state") == "obsolete":
+    if props.get("_document_state") == "obsolete" or props.get("_source_state") == "obsolete":
         return "obsolete_document"
     # The small legacy convention is deliberate: task open/done/blocked and
     # arbitrary business statuses are not lifecycle filters.
@@ -261,6 +261,8 @@ def current_predicate(engine: Engine, table: str, alias: str) -> str:
         parts.append(f"NOT lower(trim(coalesce({state}, {legacy}, ''))) IN ['superseded','retracted','expired']")
     if "_review_state" in columns:
         parts.append(f"coalesce({alias}._review_state,'') <> 'disputed'")
+    if "_source_state" in columns:
+        parts.append(f"coalesce({alias}._source_state,'') <> 'obsolete'")
     if "_document_state" in columns:
         parts.append(f"coalesce({alias}._document_state,'') <> 'obsolete'")
     if "_expires_at" in columns:

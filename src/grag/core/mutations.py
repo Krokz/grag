@@ -27,7 +27,11 @@ from grag.core.mutate import (
     _upsert_edges,
     _upsert_nodes,
 )
-from grag.core.revisions import canonical_json, content_revision
+from grag.core.revisions import (
+    RELATIONSHIP_REVISION_PREFIX,
+    canonical_json,
+    content_revision,
+)
 from grag.core.types import (
     MutationSummary,
     UpsertEdge,
@@ -127,6 +131,12 @@ def _prepare(
     edges: list[UpsertEdge] = []
     checked: list[tuple[str, Any]] = []
     for edge in req.edges:
+        if edge.expected_revision not in (None, "absent") and not edge.expected_revision.startswith(RELATIONSHIP_REVISION_PREFIX):
+            raise ConflictError(
+                "Legacy relationship revision; nothing from this operation was saved",
+                code="revision_conflict",
+                hint="Read the relationship again for its portable r2: revision, then reconcile the edit and use a new operation_id. Exact retries of already committed operations still replay their original receipt.",
+            )
         if edge.type not in rels:
             raise SchemaError(
                 f"Unknown rel type '{edge.type}'",

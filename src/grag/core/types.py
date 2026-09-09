@@ -275,7 +275,9 @@ class UpsertEdge(BaseModel):
     to_key: Any
     properties: dict[str, Any] = Field(default_factory=dict)
     source: str | None = None
-    expected_revision: str | None = Field(default=None, pattern=r"^(absent|[0-9a-f]{64})$")
+    # Legacy tokens must still validate so exact persisted receipts can replay.
+    # A new guarded edit with a legacy token fails explicitly before any writes.
+    expected_revision: str | None = Field(default=None, pattern=r"^(absent|(?:r2:)?[0-9a-f]{64})$")
 
 
 class UpsertNodesRequest(BaseModel):
@@ -470,6 +472,7 @@ class IngestDocument(BaseModel):
     text: str
     source: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    source_file: str | None = None  # loader origin, including JSON/JSONL batches
 
 
 class IngestRequest(BaseModel):
@@ -483,6 +486,7 @@ class IngestRequest(BaseModel):
     # link backtick-mentioned code symbols to the code graph. False keeps the
     # flat chunk loader.
     sections: bool = False
+    sync_paths: list[str] = Field(default_factory=list)
 
 
 class IngestResponse(BaseModel):
@@ -497,6 +501,8 @@ class IngestResponse(BaseModel):
 
 class CodeIngestRequest(BaseModel):
     paths: list[str]
+    root: str | None = None
+    replace_scope: bool = False
     calls: bool = True
     max_file_kb: int = Field(default=1024, ge=1, le=32_768)
     # Skip the database writes for files whose content (and parse options)
@@ -511,6 +517,7 @@ class CodeIngestResponse(BaseModel):
     modules: int = 0
     classes: int = 0
     functions: int = 0
+    constants: int = 0  # Named Go package constants with unevaluated source expressions
     module_calls: int = 0  # TerraformModuleCall nodes (Terraform `module` blocks)
     edges: int = 0
     nodes_pruned: int = 0

@@ -287,13 +287,20 @@ def create_app(config: GragConfig) -> FastAPI:
 
     @app.exception_handler(GragError)
     async def grag_error_handler(_: Request, exc: GragError) -> JSONResponse:
-        from grag.core.errors import ConflictError, ResourceLimitError
+        from grag.core.errors import (
+            ConflictError,
+            QueryInterruptedError,
+            ResourceLimitError,
+            TransactionOutcomeUnknown,
+        )
 
         if isinstance(exc, ResourceLimitError):
             return JSONResponse(status_code=429 if exc.resource in {"pending_jobs", "active_operations"} else 413, content=exc.to_dict())
 
         if isinstance(exc, ConflictError):
             return JSONResponse(status_code=409, content=exc.to_dict())
+        if isinstance(exc, (QueryInterruptedError, TransactionOutcomeUnknown)):
+            return JSONResponse(status_code=503, content=exc.to_dict())
         if isinstance(exc, FreshnessError):
             return JSONResponse(status_code=503, content=exc.to_dict())
         if isinstance(exc, NotFoundError):
@@ -338,9 +345,12 @@ def create_app(config: GragConfig) -> FastAPI:
         )
         server_target = config.db_dir if config.db_dir is not None else config.db_path
         shutdown = service.shutdown_status() if service is not None else None
+        runtime = service.engine.runtime_info() if service is not None else None
         return {
-            "status": "shutting_down" if registry.closing or (shutdown and shutdown["state"] != "open") else "ok",
+            "status": ("shutting_down" if registry.closing or (shutdown and shutdown["state"] != "open")
+                       else "reopen_required" if runtime and runtime["writer_state"] != "ready" else "ok"),
             "version": grag.__version__,
+            "capabilities": {"ingestion_scope": 2, "snapshot_format": 2},
             "database_id": identity,
             "server_id": database_identity(server_target),
             "pid": os.getpid(),
@@ -352,6 +362,7 @@ def create_app(config: GragConfig) -> FastAPI:
             # None when auto-refresh is off; otherwise drift-refresh counters.
             "code_index": service.refresh_status() if service is not None else None,
             "shutdown": shutdown,
+            "engine": runtime,
         }
 
     @app.post(_SHUTDOWN_PATH, include_in_schema=False, status_code=202)
@@ -446,40 +457,17 @@ def create_app(config: GragConfig) -> FastAPI:
 
     @app.get("/api/export")
     def export_jsonl(request: Request, policy: ReadPolicyParam) -> StreamingResponse:
-        """Online backup: stream the portable JSONL export of the live database.
-
-        The CLI's `grag export` needs exclusive access to the .lbdb (single
-        writer); a serving process cannot be stopped for every backup, so
-        the same stream is offered here. Bearer-protected like every /api
-        route. Reads run on pooled connections, so writes are not blocked.
-        """
-        from grag.transfer import export_lines
+        """Capture one committed state before sending any success headers."""
+        from grag.api.snapshot import SnapshotResponse
 
         service = resolve(request)
         report = service.read_freshness(policy)
-        engine = service.engine
-
-        def body():
-            lines = export_lines(engine)
-            while True:
-                # StreamingResponse may advance the iterator on different pool
-                # threads. Keep each native read alive without a thread-local
-                # operation context spanning a yield or a slow network consumer.
-                with service.operation():
-                    line = next(lines, None)
-                if line is None:
-                    break
-                yield line + "\n"
-
-        name = resolve(request).config.db_path.stem or "grag"
-        return StreamingResponse(
-            body(),
-            media_type="application/x-ndjson",
-            headers={
-                "Content-Disposition": f'attachment; filename="{name}.jsonl"',
+        with service.operation():
+            return SnapshotResponse.capture(service.engine, headers={
+                "Content-Disposition": 'attachment; filename="grag.jsonl"',
+                "X-Grag-Snapshot-Format": "2",
                 "X-Grag-Freshness": json.dumps(report.model_dump(), separators=(",", ":")),
-            },
-        )
+            })
 
     @app.get("/api/graph/sample", response_model=GraphSample)
     def graph_sample(

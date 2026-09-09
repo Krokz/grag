@@ -311,6 +311,7 @@ def test_cli_init_server_url_writes_remote_config(tmp_path, monkeypatch):
                 "--server-url",
                 "https://grag.example.com",
                 "--no-skill",
+                "--no-verify",
             ]
         )
         == 0

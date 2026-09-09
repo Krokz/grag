@@ -297,7 +297,7 @@ def test_obsolete_chunks_with_authored_relationships_survive(engine, sections):
 def test_flat_reingest_removes_only_owned_chunk_relationships(engine):
     _ingest(engine, "# Guide\n\nBody.")
     result = _ingest(engine, "Replacement flat text.", sections=False)
-    assert result.nodes_pruned == 1 and not result.warnings
+    assert result.nodes_pruned == 3 and not result.warnings
     assert _rows(engine, "MATCH ()-[r:IN_SECTION]->() RETURN count(r)") == [[0]]
     assert _rows(engine, "MATCH (c:Chunk) RETURN c.text") == [
         ["Replacement flat text."]

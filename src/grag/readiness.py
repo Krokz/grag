@@ -29,6 +29,7 @@ def _probe(kind: str, config: GragConfig, *, prepare: bool, timeout: float) -> d
         result_path = root / "result.json"
         log_path = root / "probe.log"
         payload = {"kind": kind, "prepare": prepare,
+                   "statement_timeout_ms": config.statement_timeout_ms,
                    "embedder": config.embedder.model_dump() if config.embedder else None}
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "HF_HUB_DISABLE_TELEMETRY": "1",
                "DO_NOT_TRACK": "1"}
@@ -105,16 +106,19 @@ def install_ready(checks: list[dict]) -> bool:
     return all(not c["required"] or c["status"] == "ready" for c in checks)
 
 
-def _native_check(kind: str, prepare: bool) -> str:
+def _native_check(kind: str, prepare: bool, statement_timeout_ms: int = 30_000) -> str:
     from grag.core.engine import Engine
 
     with tempfile.TemporaryDirectory(prefix="grag-probe-db-") as temporary:
-        engine = Engine(GragConfig(db_path=Path(temporary) / "probe.lbdb"))
+        engine = Engine(GragConfig(db_path=Path(temporary) / "probe.lbdb", statement_timeout_ms=statement_timeout_ms))
         try:
             if engine.execute("RETURN 42 AS answer").rows != [[42]]:
                 raise RuntimeError("native query returned an unexpected result")
             if kind == "engine":
-                return "installed and usable; temporary database + Cypher query passed"
+                runtime = engine.runtime_info()
+                return ("installed and usable; temporary database + Cypher query passed; "
+                        f"backend={runtime['backend']}, Ladybug={runtime['version']}, "
+                        f"native statement timeout={runtime['statement_timeout_ms']} ms (0=disabled); completion timeout=0")
             extension = kind.upper()
             if prepare:
                 engine.load_extension(extension)
@@ -137,12 +141,16 @@ def _grammar_check(suffix: str, prepare: bool) -> str:
     from grag.ingest.code_ts import _SUFFIX_LANGUAGES, _build_parser
 
     module, factory, _ = _SUFFIX_LANGUAGES[suffix]
-    if module == "vue":
+    if module == "scripts":
         from grag.ingest.code_ts import parse_file
 
-        parse_file(".vue", Path("probe.vue"), '<script lang="ts">function probe() {}</script>',
-                   repo="probe", rel_path="probe.vue")
-        return "Vue TypeScript script extraction + parse passed (JS/TS grammars checked separately)"
+        sample = '<script lang="ts">function probe() {}</script>'
+        if suffix == ".astro":
+            sample = '---\nfunction server() {}\n---\n<script>function browser(x: string) {}</script>'
+        result = parse_file(suffix, Path("probe" + suffix), sample, repo="probe", rel_path="probe" + suffix)
+        if not result.functions:
+            raise ValueError("framework script probe produced no functions")
+        return f"{suffix} script extraction + parse passed (JS/TS grammars checked separately)"
     if module == "pack" and not prepare:
         import tree_sitter_language_pack as pack
         from tree_sitter import Parser
@@ -179,7 +187,7 @@ def _worker(payload: dict) -> dict:
     kind, prepare = payload["kind"], payload["prepare"]
     try:
         if kind in {"engine", "fts", "vector"}:
-            detail = _native_check(kind, prepare)
+            detail = _native_check(kind, prepare, payload.get("statement_timeout_ms", 30_000))
         elif kind == "model":
             detail = _model_check(payload["embedder"], prepare)
         elif kind.startswith("grammar:"):

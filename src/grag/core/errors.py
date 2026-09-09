@@ -38,6 +38,30 @@ class CypherError(GragError):
     code = "cypher_error"
 
 
+class QueryInterruptedError(GragError):
+    """Native execution was interrupted (including a cooperative deadline)."""
+    code = "query_interrupted"
+
+    def __init__(self):
+        super().__init__(
+            "Native query execution was interrupted.",
+            hint="Narrow the query or batch, or configure GRAG_STATEMENT_TIMEOUT_MS on the owning server and restart it. "
+            "For a mutation retry, keep the same operation_id and exact payload; an interrupt alone does not prove that nothing was saved.",
+        )
+
+
+class TransactionOutcomeUnknown(GragError):
+    """A completion failed; the writer must be reopened before another write."""
+    code = "transaction_outcome_unknown"
+
+    def __init__(self):
+        super().__init__(
+            "Transaction completion could not be confirmed; further writes are refused until the database is reopened.",
+            hint="Restart the owning grag server, preserving the database and sidecars. Replay the same operation_id with the exact payload to recover its receipt. "
+            "Without a receipt, read the stored state before retrying; the write may already have committed.",
+        )
+
+
 class ResourceLimitError(GragError):
     """Admission or application work exceeded a documented finite bound."""
     code = "resource_limit"

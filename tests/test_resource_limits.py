@@ -297,12 +297,12 @@ def test_response_size_error_has_matching_rest_mcp_code(tmp_path, monkeypatch):
         assert mcp.is_error
 
 
-def test_native_buffer_exhaustion_has_resource_guidance(engine):
-    class FullBuffer:
-        def execute(self, *args):
-            raise RuntimeError("Buffer manager exception: Unable to allocate memory! The buffer pool is full and no memory could be freed!")
+def test_native_buffer_exhaustion_has_resource_guidance(engine, monkeypatch):
+    def exhaust(*args):
+        raise RuntimeError("Buffer manager exception: Unable to allocate memory! The buffer pool is full and no memory could be freed!")
+    monkeypatch.setattr(engine._write_conn, "execute", exhaust)
     with pytest.raises(ResourceLimitError) as error:
-        engine._run(FullBuffer(), "RETURN 1", None)
+        engine.execute_write("RETURN 1")
     assert error.value.resource == "native_buffer_bytes"
     assert "GRAG_BUFFER_POOL_MB" in error.value.hint
 

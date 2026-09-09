@@ -49,10 +49,13 @@ they reuse its mapping and port. The configured stdio proxies connect to the own
 Windows harness restrictions may require [starting that owner in a separate
 terminal](../installation.md).
 
-Direct CLI `ingest` and `ingest-code` do not currently forward to the registered
-owner. While it is running, use MCP ingestion or REST instead. For offline CLI
-work, disconnect clients that could auto-start it, run `grag stop`, perform the
-command, then reconnect. A lock error is not evidence of corruption.
+In the development version after 0.8.0, CLI `remember`, `search`, `context`,
+`ingest` and `ingest-code` locate the selected database's registered owner and use
+its API, including its host and bearer token. They open the file directly only
+when no matching server is available. A direct stdio session that owns the file
+must be closed before changing to init's shared setup; an ownership error explains
+that step. A failed server request never falls back to opening a second writer.
+After upgrading, restart the owner before using the new ingestion scope options.
 
 There are two distinct ways to hold several projects, depending on whether they **relate**:
 
@@ -118,4 +121,4 @@ What the server does differently from a laptop:
 - **Remote proxy mode.** `grag mcp --server-url URL` (env `GRAG_SERVER_URL`) bridges stdio to the remote server, never spawns a local daemon, and when the server restarts it waits, reconnects and replays the MCP handshake — the client sees at most one failed tool call. It pins the server's `database_id` on first contact and refuses to silently bridge onto a different database. Plain `http://` to a non-loopback host is refused unless `GRAG_ALLOW_INSECURE_HTTP=1`.
 - **Ingest never stalls searches.** `ingest_code` is incremental: every file is parsed (cross-file `IMPORTS`/`CALLS` need the whole set) but only files whose content hash changed touch the write lock. Embeddings are produced by a background worker in the serving process (`/api/health` → `embedding`); neither ingest nor search embeds on the request thread. Long ingests go through `POST /api/jobs/ingest/code` (or `ingest_code(background=true)` + `job_status`) and return a job id.
 - **Specs become a graph.** `grag ingest --sections doc.md` (MCP: `ingest_docs`) turns the heading hierarchy into `Document → Section` nodes (`SUBSECTION_OF`, `NEXT_SECTION`), chunks each section's body under it (`Chunk -IN_SECTION-> Section`, so a hit always cites its section path), and links backtick-mentioned symbols that exist in the code graph (`MENTIONS_FUNCTION` / `MENTIONS_CLASS` / `MENTIONS_MODULE`). Empty `IMPLEMENTS` (Function→Section) / `IMPLEMENTS_CLASS` tables are defined for an agent to fill with the semantic spec↔code links.
-- **Online backup.** `GET /api/export` (CLI: `grag export --url URL -o backup.jsonl`) streams the JSONL export from the live server. Failed WAL replay requires offline `grag recover`; a server launch never silently chooses lossy recovery.
+- **Online backup.** `GET /api/export` (CLI: `grag export --url URL -o backup.jsonl`) captures one committed state including history and retry receipts, then streams the completed snapshot. Writes pause during capture, not during download; the CLI validates completion before publication. [Restore into a separate verified copy](recovery.md). Failed WAL replay requires offline `grag recover`; a server launch never silently chooses lossy recovery.

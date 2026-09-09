@@ -48,18 +48,18 @@ def _call_pairs(engine) -> set[tuple[str, str]]:
 def write_counter(monkeypatch):
     """Count node/edge upsert calls reaching the mutation layer."""
     calls = {"nodes": 0, "edges": 0}
-    real_nodes, real_edges = code_module.upsert_nodes, code_module.upsert_edges
+    real_nodes, real_edges = code_module.upsert_nodes, code_module._upsert_edges
 
     def nodes(engine, config, req):
         calls["nodes"] += len(req.nodes)
         return real_nodes(engine, config, req)
 
-    def edges(engine, config, req):
+    def edges(engine, config, req, **kwargs):
         calls["edges"] += len(req.edges)
-        return real_edges(engine, config, req)
+        return real_edges(engine, config, req, **kwargs)
 
     monkeypatch.setattr(code_module, "upsert_nodes", nodes)
-    monkeypatch.setattr(code_module, "upsert_edges", edges)
+    monkeypatch.setattr(code_module, "_upsert_edges", edges)
     return calls
 
 
@@ -95,18 +95,17 @@ def test_changed_file_rewrites_itself_and_relinks_unchanged_callers(
     assert _call_pairs(engine) == {("run", "helper")}
 
     # Add `later` to core.py: main.py is UNCHANGED, but its dangling call now
-    # resolves — the edge must appear without rewriting main.py's nodes.
+    # resolves — the edge and main.py's dependency-derived coverage must update.
     (pkg / "core.py").write_text(
         CORE_PY + "\n\ndef later() -> int:\n    return 1\n", encoding="utf-8"
     )
     write_counter["nodes"] = write_counter["edges"] = 0
     resp = ingest_code(engine, engine.config, req)
 
-    assert resp.files_unchanged == 1  # main.py skipped
+    assert resp.files_unchanged == 0  # caller coverage also changed
     assert _call_pairs(engine) == {("run", "helper"), ("run", "later")}
     main_id = f"{_repo_id(pkg)}:main.py"
-    # main.py's Module node was not rewritten (only core.py's + Repo + new fn).
-    assert write_counter["nodes"] == 1 + 1 + 2  # Repo + core Module + 2 Functions
+    assert write_counter["nodes"] == 1 + 2 + 3  # Repo + Modules + Functions
     assert _count(engine, "MATCH (f:Function) RETURN count(*)") == 3
     assert engine.execute(
         "MATCH (m:Module {id: $id}) RETURN count(m)", {"id": main_id}

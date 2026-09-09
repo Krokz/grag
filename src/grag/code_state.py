@@ -42,16 +42,18 @@ def saved_request(root: Path, encoded: str) -> CodeIngestRequest:
     """Never substitute defaults for a missing/corrupt saved indexing policy."""
     try:
         value = json.loads(encoded)
-        if not isinstance(value, dict) or set(value) != set(
-            CodeIngestRequest.model_fields
-        ):
+        if not isinstance(value, dict) or not {"paths", "calls", "max_file_kb", "incremental"}.issubset(value) or set(value) - set(CodeIngestRequest.model_fields):
             raise ValueError("missing indexing options")
         req = CodeIngestRequest.model_validate(value, strict=True)
-        if not req.paths or req.max_file_kb <= 0:
+        if req.root is None:
+            req.root = str(root)
+        elif Path(req.root) != root:
+            raise ValueError("saved root differs from its indexed root")
+        if req.max_file_kb <= 0:
             raise ValueError("empty scope or invalid file limit")
         for item in req.paths:
             path = Path(item)
-            if not path.is_absolute() or (path != root and path.parent != root):
+            if not path.is_absolute() or not path.is_relative_to(root):
                 raise ValueError("saved scope does not belong to its indexed root")
         return req
     except (ValueError, TypeError) as exc:
@@ -61,7 +63,7 @@ def saved_request(root: Path, encoded: str) -> CodeIngestRequest:
         ) from exc
 
 
-def index_records(engine: Engine) -> dict[str, dict]:
+def index_records(engine: Engine, *, include_inactive: bool = False) -> dict[str, dict]:
     tables = engine.execute("CALL SHOW_TABLES() RETURN name").rows
     if not any(row[0] == "Repo" for row in tables):
         return {}
@@ -90,16 +92,25 @@ def index_records(engine: Engine) -> dict[str, dict]:
                 {"paths": legacy_paths},
             ).rows
         }
+    def active(encoded: str | None, root: str) -> bool:
+        if include_inactive or not encoded:
+            return True
+        try:
+            value = json.loads(encoded)
+            return not isinstance(value, dict) or value.get("paths") != [] or bool(saved_request(Path(root), encoded).paths)
+        except (ValueError, GragError):
+            return True
+
     return {
         str(path): dict(zip(INDEX_COLUMNS, values, strict=True))
         for path, ingested, *values in rows
-        if path and (ingested is not None or path in legacy_roots)
+        if path and (ingested is not None or path in legacy_roots) and active(values[0], str(path))
     }
 
 
 def registered_repo_ids(engine: Engine) -> dict[str, str]:
     """Reuse persisted index identities, including after an explicit relocation."""
-    records = index_records(engine)
+    records = index_records(engine, include_inactive=True)
     if not records:
         return {}
     columns = {row[1] for row in engine.execute("CALL TABLE_INFO('Repo') RETURN *").rows}
@@ -144,7 +155,7 @@ def _head(root: Path) -> str:
 @bounded_sources
 def scan_sources(root: Path, req: CodeIngestRequest) -> SourceScan:
     from grag import __version__
-    from grag.ingest.code import _PARSERS, _walk
+    from grag.ingest.code import _PARSERS, PARSER_REVISION, _walk
 
     if not root.is_dir():
         raise GragError(
@@ -153,6 +164,7 @@ def scan_sources(root: Path, req: CodeIngestRequest) -> SourceScan:
         )
     head = _head(root)
     files: dict[str, str] = {}
+    go_metadata: dict[Path, bytes] = {}
     excluded: set[str] = set()
     errors: list[str] = []
     for walked_root, walked_file in _walk(
@@ -161,21 +173,27 @@ def scan_sources(root: Path, req: CodeIngestRequest) -> SourceScan:
         [],
         excluded=excluded,
         errors=errors,
+        root=req.root,
     ):
         if walked_file.suffix.lower() not in _PARSERS:
             continue
         file = walked_root.resolve() / walked_file.relative_to(walked_root)
         try:
             files[str(file)] = hashlib.sha256(read_source(file, req.max_file_kb * 1024)).hexdigest()
-        except OSError as exc:
+            if file.suffix.lower() == ".go":
+                from grag.ingest.go_modules import package_path
+
+                package_path(file, root, go_metadata)
+        except (OSError, UnicodeError) as exc:
             errors.append(f"Cannot read {file}: {exc}")
+    files.update({str(path): hashlib.sha256(raw).hexdigest() for path, raw in go_metadata.items()})
     if errors:
         raise GragError(
             errors[0],
             hint="Resolve the source access error before requiring fresh context.",
         )
     digest = hashlib.sha256(
-        f"grag-source-v1\0{__version__}\0{options_json(req)}".encode()
+        f"grag-source-v1\0{__version__}\0{PARSER_REVISION}\0{options_json(req)}".encode()
     )
     for name, content in sorted(files.items()):
         digest.update(json.dumps([name, content], ensure_ascii=True).encode())
@@ -200,22 +218,25 @@ def scope_requests(
     req: CodeIngestRequest,
     existing: dict[str, dict],
 ) -> dict[str, CodeIngestRequest]:
+    from grag.ingest.selection import path_roots
+
+    assignments = path_roots(input_paths, req.root, registered=list(roots.values()))
     scopes = {}
     for key, root in roots.items():
         paths = {
-            str(p.resolve())
-            for p in input_paths
-            if p.resolve() == root or (p.is_file() and p.resolve().parent == root)
+            str(p)
+            for p, selected in assignments.items()
+            if selected.resolve() == root
         }
         encoded = existing.get(str(root), {}).get("_index_options")
-        if encoded:
+        if encoded and not req.replace_scope:
             with suppress(
                 GragError
             ):  # An explicit ingest can replace an invalid policy.
                 paths.update(saved_request(root, encoded).paths)
         if str(root) in paths:
             paths = {str(root)}
-        scopes[key] = req.model_copy(update={"paths": sorted(paths)})
+        scopes[key] = req.model_copy(update={"paths": sorted(paths), "root": str(root), "replace_scope": False})
     return scopes
 
 
@@ -238,16 +259,6 @@ def verify_ingest(
                 raise GragError(
                     "Source changed during indexing, a file failed parsing, or the saved scope needs a full refresh."
                 )
-            if scan.excluded:
-                rows = engine.execute(
-                    "MATCH (m:Module) WHERE m._source IN $paths RETURN m._source LIMIT 1",
-                    {"paths": sorted(scan.excluded)},
-                ).rows
-                if rows:
-                    raise GragError(
-                        f"An indexed source now exceeds max_file_kb: {rows[0][0]}",
-                        hint="Increase max_file_kb or reconcile the excluded source explicitly.",
-                    )
             verified[key] = (scan.fingerprint.generation, None)
         except GragError as exc:
             verified[key] = (None, str(exc))

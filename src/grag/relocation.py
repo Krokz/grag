@@ -39,7 +39,7 @@ class GraphEdit:
 
 
 def plan_graph(engine: Engine, old: Path, new: Path) -> list[GraphEdit]:
-    records = index_records(engine)
+    records = index_records(engine, include_inactive=True)
     ids = registered_repo_ids(engine)
     moving = {
         root: rebase(root, old, new)
@@ -65,13 +65,14 @@ def plan_graph(engine: Engine, old: Path, new: Path) -> list[GraphEdit]:
         match = f"MATCH ()-[n:{table}]->()" if kind == "REL" else f"MATCH (n:{table})"
         # _source is location provenance; prose and arbitrary authored properties
         # are deliberately untouched. Code `path` can be absolute in older graphs.
-        props = {"_source"} & columns
+        props = {"_source", "_document_source", "_document_file", "_code_owner"} & columns
         if kind == "NODE" and table in {
             "Repo",
             "Module",
             "Class",
             "Function",
             "TerraformModuleCall",
+            "Constant",
         }:
             props |= {"path"} & columns
         for prop in sorted(props):
@@ -108,6 +109,8 @@ def plan_graph(engine: Engine, old: Path, new: Path) -> list[GraphEdit]:
         if record["_index_options"]:
             request = saved_request(Path(root), record["_index_options"])
             request.paths = [rebase(p, old, new) for p in request.paths]
+            if request.root:
+                request.root = rebase(request.root, old, new)
             params["policy"] = options_json(request)
             settings.append("r._index_options = $policy")
         if "_index_generation" in repo_columns:

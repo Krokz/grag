@@ -39,11 +39,16 @@ afterward; code freshness must verify the new location. Legacy indexes with no
 saved options still need one explicit ingest with the intended scope. Re-run
 `init --client <client>` for user-scope registrations; discovery/repair of linked
 skills and arbitrary client installations remains separate work. Existing document
-nodes survive relocation, but later document re-ingestion can produce new IDs
-after a move; document synchronization does not yet preserve their identity
-across relocation.
+nodes retain their identities after relocation and subsequent document re-ingestion
+in the development version after 0.8.0.
 
 ## Review and undo setup changes
+
+`grag init` installs the complete skill bundle: a short `SKILL.md` plus references
+for ingestion, memory history and operations. Agents load those procedures only
+when needed. Rerunning init upgrades grag-owned files; an unrelated reference-file
+collision is reported before applying changes. Removal retains modified references
+and preserves the bundle if its entrypoint was customized.
 
 Use `grag init --dry-run` (or `grag init --remove --dry-run`) to review the actual
 diffs before applying. Diffs include changed configuration values. Init validates

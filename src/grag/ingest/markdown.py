@@ -30,7 +30,7 @@ Ids are deterministic: `<doc-identity>#<slug/path>` for sections (the same
 `<section-id>@NNNN` for chunks. Current nodes and loader-owned relationships
 publish together in one transaction. Authored/unknown relationships survive;
 obsolete nodes still referenced by them are retained with a warning. Changing
-ingestion modes/labels does not reconcile all prior document structure.
+ingestion modes/labels reconciles earlier generated document structure.
 """
 
 from __future__ import annotations
@@ -56,17 +56,14 @@ from grag.core.types import (
     UpsertNodesRequest,
 )
 from grag.ingest.document_sync import (
-    mark_current,
+    DocumentSync,
     prepare_document_state,
     prepare_ownership,
-    prune_unreferenced_nodes,
-    replace_owned_edges,
 )
 from grag.ingest.loaders import (
     _chunk_text,
     _embed_pending,
     _normalized_source,
-    _source_identity,
     _source_slug,
 )
 
@@ -122,6 +119,7 @@ _CODE_LINK_TABLES = {
     "Function": ("MENTIONS_FUNCTION", "IMPLEMENTS"),
     "Class": ("MENTIONS_CLASS", "IMPLEMENTS_CLASS"),
     "Module": ("MENTIONS_MODULE", None),
+    "Constant": ("MENTIONS_CONSTANT", None),
 }
 
 _ATX_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
@@ -286,7 +284,7 @@ def _resolve_symbols(
         return out
     plain = sorted(n for n in names if "." not in n)
     dotted = sorted(n for n in names if "." in n)
-    for label in ("Function", "Class", "Module"):
+    for label in ("Function", "Class", "Module", "Constant"):
         if label not in tables:
             continue
         if plain:
@@ -299,7 +297,7 @@ def _resolve_symbols(
     for name in dotted:
         hits: list[tuple[str, str]] = []
         prefix, _, last = name.rpartition(".")
-        for label in ("Function", "Class"):
+        for label in ("Function", "Class", "Constant"):
             if label not in tables:
                 continue
             rows = engine.execute(
@@ -386,6 +384,7 @@ def _ingest_markdown(
     prepare_ownership(engine, generated_tables)
     prepare_document_state(engine, [DOCUMENT_LABEL, SECTION_LABEL, chunk_label])
 
+    sync = DocumentSync(engine, req)
     docs: list[UpsertNode] = []
     sections_out: list[UpsertNode] = []
     chunks: list[UpsertNode] = []
@@ -395,7 +394,7 @@ def _ingest_markdown(
     seen_identity: dict[str, int] = {}
 
     for doc in req.documents:
-        base_identity = _source_identity(doc.source, doc.text, doc.metadata)
+        base_identity = sync.identity(doc)
         n = seen_identity.get(base_identity, 0)
         seen_identity[base_identity] = n + 1
         identity = base_identity if n == 0 else f"{base_identity}~{n:04d}"
@@ -535,8 +534,8 @@ def _ingest_markdown(
         for batch in (docs, sections_out, chunks):
             if batch:
                 upsert_nodes(engine, config, UpsertNodesRequest(nodes=batch))
-                mark_current(engine, batch[0].label, [n.key for n in batch])
-        replace_owned_edges(engine, generated_tables, list(identities), warnings)
+                sync.mark(batch)
+        sync.replace_edges(warnings)
         for owner, edges in edges_by_owner.items():
             if edges:
                 _upsert_edges(
@@ -545,7 +544,7 @@ def _ingest_markdown(
                     UpsertEdgesRequest(edges=edges),
                     document_owner=owner,
                 )
-        pruned = _prune_document_graph(engine, chunk_label, identities, warnings)
+        pruned = sync.prune(warnings)
     return IngestResponse(
         label=chunk_label,
         nodes_created=len(chunks),
@@ -555,25 +554,3 @@ def _ingest_markdown(
         code_links=code_links,
         warnings=warnings,
     )
-
-
-def _prune_document_graph(
-    engine: Engine,
-    chunk_label: str,
-    identities: dict[str, set[str]],
-    warnings: list[str],
-) -> int:
-    """Authoritative sync per document identity: drop sections/chunks that
-    are no longer produced (including flat-loader chunks of the same file)."""
-    pruned = 0
-    for identity, desired in identities.items():
-        prefix = f"{identity}#"
-        for label in (SECTION_LABEL, chunk_label):
-            pruned += prune_unreferenced_nodes(
-                engine,
-                label,
-                "n.id STARTS WITH $prefix AND NOT n.id IN $keys",
-                {"prefix": prefix, "keys": sorted(desired)},
-                warnings,
-            )
-    return pruned

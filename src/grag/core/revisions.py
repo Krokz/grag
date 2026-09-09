@@ -17,6 +17,7 @@ from pydantic import TypeAdapter
 from grag.core.types import VECTOR_PROPS
 
 _JSON: TypeAdapter[Any] = TypeAdapter(Any)
+RELATIONSHIP_REVISION_PREFIX = "r2:"
 _REVISION_METADATA = {
     "_LABEL",
     "_TYPE",
@@ -26,7 +27,7 @@ _REVISION_METADATA = {
     "_created_at",
     "_document_owner",
     "_evidence_state", "_review_state", "_expires_at", "_superseded_by",
-    "_evidence_seq", "_document_state",
+    "_evidence_seq", "_document_state", "_source_state",
 }
 
 
@@ -41,11 +42,16 @@ def canonical_json(value: Any) -> str:
 
 
 def content_revision(value: dict) -> str:
+    # Relationship identity is selected by type and logical endpoint keys on
+    # the guarded upsert. Its content token must not depend on storage offsets.
+    # No endpoint lookup is needed, including for RETURN r alone or nested paths.
+    relationship = "_SRC" in value and "_DST" in value
     evidence = {
         k: v
         for k, v in value.items()
         if v is not None
         and k not in VECTOR_PROPS
+        and not (relationship and k in {"_SRC", "_DST"})
         and (not k.startswith("_") or k in _REVISION_METADATA)
     }
     # Older raw tables can contain non-finite floats; JSON's explicit encoding
@@ -56,7 +62,9 @@ def content_revision(value: dict) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    return hashlib.sha256(("grag-content-v1:" + encoded).encode()).hexdigest()
+    namespace = "grag-relationship-content-v2:" if relationship else "grag-content-v1:"
+    digest = hashlib.sha256((namespace + encoded).encode()).hexdigest()
+    return RELATIONSHIP_REVISION_PREFIX + digest if relationship else digest
 
 
 def annotate_revisions(value: Any) -> Any:

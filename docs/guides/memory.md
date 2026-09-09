@@ -1,5 +1,20 @@
 # Save and revise memory
 
+The CLI provides a small text-memory shortcut using the same selected
+graph as MCP:
+
+```bash
+grag remember "Retry transient failures twice" --id retry-policy
+grag search "retry" --json
+grag context Memory:retry-policy --freshness require
+```
+
+`remember` uses a searchable `Memory(id,text)` table by default; `--label`, `--source`
+and `--expected-revision` allow another compatible table, provenance and guarded
+updates. Without `--id`, it creates a UUID. These commands do not add MCP tools.
+The full schema-aware workflow below remains available for connected knowledge.
+
+
 Ask your agent to describe the schema first, reuse the project's labels, and save
 a decision with its reason and a source. For example:
 
@@ -14,8 +29,12 @@ provides storage and retrieval; the harness decides when to read or write.
 
 ## Atomic writes and retries
 
- Both upsert calls are atomic: an error
-commits none of that call's nodes or edges. `upsert_nodes` accepts an optional
+Both upsert calls commit their nodes, edges, history and receipt together.
+Validation or statement failures roll back the transaction. If native commit or
+rollback completion cannot be confirmed, `transaction_outcome_unknown` refuses
+further writes until reopen: restart the owning server, preserve the files and
+replay the same operation ID with the exact payload. Without a receipt, inspect
+stored state first; the write may already have committed. `upsert_nodes` accepts an optional
 `edges` array, using the `upsert_edges` shape; endpoints can be existing nodes or
 nodes in the same call. This also works through `POST /api/nodes/upsert` and
 Python `UpsertNodesRequest`. Schema definition stays a separate step.
@@ -38,7 +57,7 @@ Changing the payload while reusing its ID returns an `operation_id_conflict`.
 Use a new ID for a new intended edit. Ordinary upserts need no operation ID.
 
 To avoid overwriting another agent's work, first query a whole entity
-(`RETURN n`, or `RETURN a, r, b` for a relationship) and pass its computed
+(`RETURN n`, or `RETURN r` for a relationship) and pass its computed
 `_revision` as `expected_revision` on that upsert item. Use `"absent"` for
 create-only writes. All preconditions check the state before this batch's first
 write; a mismatch rejects the batch with `revision_conflict` (REST HTTP 409;
@@ -47,6 +66,19 @@ Guarded or retryable writes return a `revisions` map keyed by canonical entity I
 For untracked nodes, reverting to identical content can restore a previous token.
 History-tracked nodes also include their increasing sequence. `_revision` is computed metadata,
 so query the entity rather than a nonexistent `n._revision` column.
+
+Relationship revisions use `r2:` followed by a content hash. They survive logical
+export/restore even when native table and row IDs change. The upsert's relationship
+type and endpoint keys select the entity; the token guards its type, properties
+and provenance. Identical content on different endpoint pairs can share a token.
+This needs no endpoint lookup for `RETURN r`, including relationships nested in
+paths or maps. Duplicate relationships with the same type/endpoints still require
+reconciliation before an upsert.
+
+For new edits, legacy unprefixed relationship tokens return `revision_conflict`
+with a reread hint. Reconcile against the new `r2:` value and use a new operation ID.
+An exact retry of an already committed request still replays its saved receipt,
+including legacy revision strings. Node revision format and history are unchanged.
 
 **Keep a memory's correction history.** Add `"evidence": {}` to its upsert item
 to opt it in. On an existing node, supply `expected_revision`; grag preserves

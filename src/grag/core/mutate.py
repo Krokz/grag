@@ -599,7 +599,7 @@ def upsert_edges(
 
 def _upsert_edges(
     engine: Engine, config: GragConfig, req: UpsertEdgesRequest,
-    *, document_owner: str | None = None,
+    *, document_owner: str | None = None, code_owner: str | None = None,
 ) -> MutationSummary:
     """Caller holds serialized_writes; only document ingest supplies an owner."""
     warnings: list[str] = []
@@ -667,16 +667,14 @@ def _upsert_edges(
             create_sets.append(f"r.{PROVENANCE_SOURCE} = $src")
             match_sets.append(f"r.{PROVENANCE_SOURCE} = $src")
 
-        if DOCUMENT_OWNER_PROP in columns:
-            params["doc_owner"] = document_owner or ""
-            create_sets.append(f"r.{DOCUMENT_OWNER_PROP} = $doc_owner")
-            if document_owner is None:
-                # A public upsert adopts the edge as authored, even when its
-                # source is the document itself. Provenance is not ownership.
-                match_sets.append(f"r.{DOCUMENT_OWNER_PROP} = $doc_owner")
-        if document_owner is not None:
-            # Existing authored/legacy relationships retain their properties
-            # and provenance. The loader claims only edges it creates.
+        for owner_prop, owner in ((DOCUMENT_OWNER_PROP, document_owner), ("_code_owner", code_owner)):
+            if owner_prop in columns:
+                params[owner_prop] = owner or ""
+                create_sets.append(f"r.{owner_prop} = ${owner_prop}")
+                if document_owner is None and code_owner is None:
+                    match_sets.append(f"r.{owner_prop} = ${owner_prop}")
+        if document_owner is not None or code_owner is not None:
+            # Ingestion claims only new edges. Public upserts adopt existing edges.
             match_sets = []
 
         cypher = (

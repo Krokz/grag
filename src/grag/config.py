@@ -47,6 +47,7 @@ DEFAULT_EMBED_EXCLUDE_PROPS = (
     "meta",
     "path",
     "heading_path",
+    "code_coverage",
     "language",
     "git_commit",
     "git_branch",
@@ -92,7 +93,9 @@ class GragConfig(BaseModel):
     max_query_limit: int = 1000
     max_hops: int = 3
     default_token_budget: int = 2000
-    statement_timeout_ms: int = 30_000
+    # Cooperative native execution limit; 0 disables it. Transaction completion
+    # is allowed to finish independently so an interrupt cannot mask a commit.
+    statement_timeout_ms: int = Field(default=30_000, ge=0, le=2_147_483_647, strict=True)
     # Per-label diversity cap: max seeds a single label may occupy in the fused
     # top_k before promoting other labels. Prevents one large table (e.g. code
     # Functions) from crowding out others. Set <= 0 to disable.
@@ -150,7 +153,14 @@ class GragConfig(BaseModel):
 
     @classmethod
     def from_env(cls) -> GragConfig:
-        cfg = cls()
+        timeout = os.environ.get("GRAG_STATEMENT_TIMEOUT_MS")
+        if timeout is None:
+            cfg = cls()
+        else:
+            try:
+                cfg = cls(statement_timeout_ms=int(timeout))
+            except ValueError as exc:
+                raise ValueError("GRAG_STATEMENT_TIMEOUT_MS must be an integer from 0 to 2147483647; 0 disables the native execution deadline") from exc
         if p := os.environ.get("GRAG_DB_PATH"):
             cfg.db_path = Path(p)
         if d := os.environ.get("GRAG_DB_DIR"):
