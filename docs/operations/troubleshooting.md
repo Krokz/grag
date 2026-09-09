@@ -13,7 +13,7 @@ the client.
 | Windows refuses independent daemon startup | Run the exact `serve --with-mcp` command printed by grag in a separate terminal, keep it open, and reconnect. This avoids a harness killing the database owner on client disconnect. |
 | `Could not set lock`, including Windows error 33 | Another process owns the file. The CLI routes to registered owners. If this is a direct stdio owner, close it and run `init` for shared access. |
 | `UnicodeEncodeError` in a Windows terminal | In PowerShell, try `$env:PYTHONIOENCODING = "utf-8"` before launching grag. The same setting can help when output is redirected. Native handling of legacy console encodings remains incomplete. |
-| Unexpected duplicate modules or paths | Inspect the input roots and nested worktrees. The development version honors ignores and nested boundaries; use `--root` for selected files under one root. See [scope limits](../guides/code.md). |
+| Unexpected duplicate modules or paths | Inspect the input roots and nested worktrees. Grag honors ignores and nested boundaries; use `--root` for selected files under one root. See [scope limits](../guides/code.md). |
 | No TypeScript callers or missing Svelte code | These are [coverage limitations](../guides/code.md), not proof of absent code. Use source search. |
 | Slow first semantic ingest/search | Check model preparation and pending embeddings. Serving workers run in the background; one-shot CLI ingests still embed synchronously. Start with BM25 when assessing usefulness. |
 | Required-fresh read fails | Inspect `/api/index/status`, saved roots, errors and retry delays. Resolve moved paths or scope failures; a timeout does not cancel shared work. |

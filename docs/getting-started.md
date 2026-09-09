@@ -25,7 +25,7 @@ Git-ignored `.grag/project.json`, and configures an MCP connection and agent gui
 Use `grag init --client cursor` or `--client claude` when choosing explicitly.
 `grag init --dry-run` previews changes before applying.
 
-The development version after 0.8.0 also initializes the written MCP registration,
+Init also initializes the written MCP registration,
 lists its tools, and writes/reads one non-searchable `GragSetup:connection` record.
 It prints the registration, resolved command and selected database. Verification
 failure returns a nonzero exit code while preserving the saved configuration.
@@ -48,7 +48,7 @@ Ask the agent:
 > Use grag to index this project's source directory. Describe the schema and show
 > one function's name, source path and line range.
 
-Choose the intended source directory. The development version honors ignore rules
+Choose the intended source directory. Grag honors ignore rules
 and skips nested worktrees and symlinks. `grag init --ingest` combines setup and
 indexing; CLI ingestion uses the running owner when available.
 [Code ingestion](guides/code.md) lists language coverage and scope options.

@@ -40,7 +40,7 @@ saved options still need one explicit ingest with the intended scope. Re-run
 `init --client <client>` for user-scope registrations; discovery/repair of linked
 skills and arbitrary client installations remains separate work. Existing document
 nodes retain their identities after relocation and subsequent document re-ingestion
-in the development version after 0.8.0.
+since 0.9.0.
 
 ## Review and undo setup changes
 

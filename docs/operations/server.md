@@ -49,7 +49,7 @@ they reuse its mapping and port. The configured stdio proxies connect to the own
 Windows harness restrictions may require [starting that owner in a separate
 terminal](../installation.md).
 
-In the development version after 0.8.0, CLI `remember`, `search`, `context`,
+CLI `remember`, `search`, `context`,
 `ingest` and `ingest-code` locate the selected database's registered owner and use
 its API, including its host and bearer token. They open the file directly only
 when no matching server is available. A direct stdio session that owns the file

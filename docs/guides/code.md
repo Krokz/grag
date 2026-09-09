@@ -1,8 +1,7 @@
 # Index code
 
-The development version adds shared-owner CLI routing, source selection,
+Grag 0.9.0 adds shared-owner CLI routing, source selection,
 Python/JS/TS/Go navigation and Java/C# overload identities described below.
-These additions are not in the published 0.8.0 package.
 
 Both MCP and CLI ingestion use an existing registered server safely; without one,
 the CLI opens the local database. [Server ownership](../operations/server.md)

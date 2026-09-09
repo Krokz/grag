@@ -35,7 +35,7 @@ session cannot connect.
 
 ## Documentation scope
 
-These docs describe **grag 0.8.0**. They publish from the repository's `main`
+These docs describe **grag 0.9.0**. They publish from the repository's `main`
 branch; this is one maintained guide, not a separate documentation copy per release.
 Limitations are called out where they affect a workflow, including Windows setup,
 ingestion scope and language-specific edges.

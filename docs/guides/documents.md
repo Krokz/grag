@@ -32,7 +32,7 @@ Check ingestion `warnings` (or the background job result); the CLI prints them.
 
 ## Synchronize a source collection
 
-The development version (after 0.8.0) uses the same ignore and boundary policy as
+Document ingestion uses the same ignore and boundary policy as
 [code indexing](code.md). Re-ingesting a directory synchronizes successfully scanned
 sources, including deleted files and shrinking JSON/JSONL batches. It also reconciles
 switches between sections/flat mode and chunk labels. A failed or unreadable scan
