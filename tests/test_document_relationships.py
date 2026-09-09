@@ -476,26 +476,28 @@ def test_embedding_runs_after_publication_lock_is_released(
 def test_competing_document_ingests_publish_complete_versions(code, monkeypatch):
     _ingest(code, "# Guide\n\nUse `alpha`.")
     entered, release = threading.Event(), threading.Event()
+    # These events establish ordering; native ingest speed is not the contract.
+    timeout = 30
     real = code.execute_write
 
     def execute(query, *args, **kwargs):
         result = real(query, *args, **kwargs)
         if "DELETE r" in query and not entered.is_set():
             entered.set()
-            assert release.wait(5)
+            assert release.wait(timeout)
         return result
 
     monkeypatch.setattr(code, "execute_write", execute)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(_ingest, code, "# Guide\n\n## Earlier\n\nUse `alpha`.")
         try:
-            assert entered.wait(2)
+            assert entered.wait(timeout)
             second = pool.submit(_ingest, code, "# Guide\n\n## Latest\n\nNo mention.")
             assert not second.done()
         finally:
             release.set()
-        first.result(timeout=3)
-        second.result(timeout=3)
+        first.result(timeout=timeout)
+        second.result(timeout=timeout)
     assert _rows(code, "MATCH (s:Section) RETURN s.title ORDER BY s.title") == [
         ["Guide"],
         ["Latest"],

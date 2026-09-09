@@ -35,7 +35,9 @@ def _write(root: Path, name: str, filename: str = "a.py") -> Path:
     return file
 
 
-def _fresh(svc: GragService, timeout: int = 3000):
+def _fresh(svc: GragService, timeout: int = 30_000):
+    # Completion checks allow loaded native runners time to finish. Tests of
+    # deadline behavior pass their own short timeout explicitly.
     return svc.read_freshness(
         ReadPolicy(freshness="require", freshness_timeout_ms=timeout)
     )
@@ -270,19 +272,18 @@ def test_missing_registered_file_does_not_expand_to_its_parent(indexed):
 
 
 @pytest.mark.parametrize("already_indexed", [False, True])
-def test_size_exclusions_cannot_claim_retained_old_symbols_fresh(
+def test_size_exclusions_reconcile_generated_symbols_before_reporting_fresh(
     indexed, already_indexed
 ):
     svc, root = indexed
     svc.ingest_code(CodeIngestRequest(paths=[str(root)], max_file_kb=1))
     file = root / ("a.py" if already_indexed else "oversized.py")
     file.write_text("#" + "x" * 2048 + "\ndef changed():\n    pass\n")
-    if already_indexed:
-        with pytest.raises(FreshnessError):
-            _fresh(svc, timeout=80)
-    else:
-        assert _fresh(svc).status == "fresh"
-    assert _names(svc) == {"alpha"}
+    # M14 makes a size exclusion an intentional scope change. Wait for the
+    # completed reconciliation, rather than racing it against an 80 ms timeout.
+    assert _fresh(svc, timeout=30_000).status == "fresh"
+    assert _names(svc) == (set() if already_indexed else {"alpha"})
+    assert _root_status(svc, root)["pending_generation"] is None
 
 
 def test_backoff_grows_and_is_capped(indexed, monkeypatch):
@@ -668,7 +669,7 @@ def test_python_graph_reads_expose_freshness_and_require_it(indexed, surface):
     def read(mode):
         opts = {
             "freshness": mode,
-            "freshness_timeout_ms": 60 if mode == "wait" else 3000,
+            "freshness_timeout_ms": 60 if mode == "wait" else 30_000,
         }
         if surface == "schema":
             return svc.describe_schema(**opts)

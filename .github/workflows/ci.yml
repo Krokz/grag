@@ -113,7 +113,7 @@ jobs:
           PY
 
       - name: Verify Windows lifecycle and persistence regressions
-        # Report client, transaction and filesystem regressions before the matrix.
+        # Report client, transaction and filesystem regressions before the full suite.
         # The full suite below also checks this after the other DB workloads.
         if: runner.os == 'Windows'
         run: >-
@@ -121,6 +121,7 @@ jobs:
           tests/test_shared_agent_workflow.py
           tests/test_document_relationships.py
           tests/test_freshness.py::test_exception_after_commit_rechecks_without_repeating_ingest
+          tests/test_freshness.py::test_size_exclusions_reconcile_generated_symbols_before_reporting_fresh
           tests/test_recovery.py::test_init_verifies_actual_corrupt_database_and_keeps_original_files
           tests/test_skill.py
           tests/test_snapshot.py

@@ -44,8 +44,8 @@ explicit options apply to that saved scope. A partial or failed ingest cannot
 advance the last verified generation. Indexes created before this metadata existed
 report `unknown`: explicitly run `ingest_code` once with the intended scope and
 options to enroll them. Missing or relocated paths, parse/access failures, and
-missing registered files stay unverified with diagnostics. In the development
-version after 0.8.0, newly ignored or size-excluded files are reconciled as deliberate
+missing registered files stay unverified with diagnostics. Since 0.9.0,
+newly ignored or size-excluded files are reconciled as deliberate
 exclusions. `replace_scope=true` with an explicit root replaces its saved paths; an
 empty list unregisters it. Relocation still requires explicit reconciliation. `GRAG_AUTO_REFRESH_CODE=0` disables checking; direct Python
 services opt in with `service.enable_auto_refresh()`. A required-fresh read fails
