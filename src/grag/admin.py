@@ -745,11 +745,17 @@ def _request_graceful_shutdown(server: RunningServer) -> bool:
 
 
 def _wait_for_exit(pid: int) -> bool:
-    for _ in range(20):
+    # Service draining alone can take ten seconds, followed by native close
+    # and interpreter teardown. Keep stop bounded without declaring a healthy
+    # graceful shutdown a failure after just five seconds on a loaded runner.
+    deadline = time.monotonic() + 30.0
+    while True:
         if not _pid_alive(pid):
             return True
-        time.sleep(0.25)
-    return not _pid_alive(pid)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.25, remaining))
 
 
 def _signal_process(pid: int, *, force: bool) -> tuple[bool, str]:

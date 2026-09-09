@@ -326,6 +326,35 @@ def test_verified_stop_reports_registration_cleanup_failure(tmp_path, monkeypatc
     assert "could not be safely removed" in outcome.message
 
 
+@pytest.mark.parametrize("exit_after", [6.0, None])
+def test_verified_stop_waits_for_slow_exit_without_forcing(tmp_path, monkeypatch, exit_after):
+    from types import SimpleNamespace
+
+    db = tmp_path / "slow-stop.lbdb"
+    admin.write_pidfile(db, 41234, shutdown_token="stop-secret")  # noqa: S106
+    clock = [0.0]
+    signals = []
+    monkeypatch.setattr(admin, "time", SimpleNamespace(
+        monotonic=lambda: clock[0],
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    ))
+    monkeypatch.setattr(admin, "_pid_alive", lambda pid: exit_after is None or clock[0] < exit_after)
+    monkeypatch.setattr(admin, "probe_health", lambda *args: {
+        "status": "ok", "server_id": database_identity(db), "pid": os.getpid(),
+    })
+    monkeypatch.setattr(admin, "_request_graceful_shutdown", lambda server: True)
+    monkeypatch.setattr(admin, "_signal_process", lambda *args, **kwargs: signals.append(args))
+
+    outcome = admin.stop_server_result(db)
+
+    assert outcome.stopped is (exit_after is not None)
+    assert clock[0] == (30.0 if exit_after is None else exit_after)
+    assert admin.pidfile_path(db).exists() is (exit_after is None)
+    assert signals == []
+    if exit_after is None:
+        assert "has not exited yet" in outcome.message
+
+
 def test_verified_stop_rechecks_ownership_before_signal_fallback(
     tmp_path, monkeypatch
 ):
