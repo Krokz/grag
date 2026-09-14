@@ -51,7 +51,7 @@ def test_invalid_timeout_cli_does_not_create_database(tmp_path, monkeypatch, cap
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("ladybug_version", ["0.20.2", "0.20.3", "0.20.4"])
+@pytest.mark.parametrize("ladybug_version", ["0.20.2", "0.20.3"])
 def test_capi_workaround_preserves_native_limit_and_is_connection_local(monkeypatch, ladybug_version):
     from grag import native
 

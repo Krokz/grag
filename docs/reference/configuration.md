@@ -126,7 +126,7 @@ environment configuration rejects invalid integers before opening the database.
 `grag doctor` reports the actual Ladybug backend and tests the selected local timeout.
 The owning server's `/api/health` reports its `engine.backend`, version, effective
 `statement_timeout_ms`, `completion_timeout_ms` and `writer_state`. Recreate a Python
-Engine to apply configuration changes. Both pybind and Ladybug 0.20.4 (the pin in grag 0.10.0)
+Engine to apply configuration changes. Both pybind and Ladybug 0.20.3 (the pin in grag 0.10.0)
 C-API backend use native limits; grag disables that version's erroneous Python
 10 ms watchdog and synthetic range-query interrupt on its own connections only.
 

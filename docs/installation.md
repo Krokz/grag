@@ -128,7 +128,7 @@ error and see [troubleshooting](operations/troubleshooting.md).
 
 Without an embedder, everything works FTS-only (BM25 is native to the engine).
 
-**LadybugDB compatibility.** grag 0.10.0 pins LadybugDB 0.20.4 (0.9.0 pinned 0.20.3). grag disables the
+**LadybugDB compatibility.** grag 0.10.0 pins LadybugDB 0.20.3. grag disables the
 engine's cached-physical-plan fast path on every connection (`CALL
 enable_cached_prepared_statement='none'`, the upstream kill switch for the
 LadybugDB/ladybug#877 family of stale-re-execution bugs) and falls back to per-statement
@@ -138,6 +138,10 @@ opened by 0.19.1 (storage version 43). A rollback requires exporting with the
 newer compatible grag/Ladybug installation and importing into a fresh database.
 
 On the C-API backend, grag also binds integer list members with a consistent
-INT64 type. The upstream 0.20.4 Python wrapper still rejects mixed integer ranges
+INT64 type. The upstream 0.20.3 Python wrapper still rejects mixed integer ranges
 such as `[0, 128]` without this adaptation. Stored embedding bytes and cosine
 retrieval remain unchanged.
+
+The 0.20.4 upgrade is deferred: release qualification observed native process
+failures during Windows FTS preparation and shared-owner shutdown. Use grag's
+pinned dependency; installing a newer Ladybug wheel separately is unqualified.

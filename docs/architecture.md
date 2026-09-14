@@ -116,7 +116,7 @@ reread and reconciliation. See [memory writes](guides/memory.md).
 Each engine has one write connection and a reader pool (default maximum: four).
 Other threads read committed state while a transaction's own reads use its writer.
 Limits bound admitted operations and decoded query work; they are not a hard
-process-memory ceiling. grag 0.10.0 pins LadybugDB 0.20.4, with grag's prepared-plan and
+process-memory ceiling. grag 0.10.0 pins LadybugDB 0.20.3, with grag's prepared-plan and
 native timeout safeguards retained. Ordinary statements default to a cooperative
 30-second native limit; commit, rollback and checkpoint finish without that limit.
 An uncertain transaction outcome blocks further writes until reopen.

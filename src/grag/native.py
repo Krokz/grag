@@ -19,7 +19,7 @@ _LOCK = threading.Lock()
 _HANDLES: list[Any] = []  # Keep DLLs alive for the lifetime of native connections.
 _DIRECTORY = Path(__file__).parent / "_runtime"
 _DLLS = ("libcrypto-3-x64.dll", "libssl-3-x64.dll")
-_VERIFIED_CAPI_VERSIONS = {"0.20.2", "0.20.3", "0.20.4"}
+_VERIFIED_CAPI_VERSIONS = {"0.20.2", "0.20.3"}
 
 
 def connection_backend(connection: Any) -> str:
@@ -57,7 +57,7 @@ def prepare_parameters(connection: Any, parameters: dict[str, Any] | None) -> di
 def configure_query_timeout(connection: Any, milliseconds: int) -> None:
     """Use the native deadline on each grag-owned connection, without Python timers.
 
-    Ladybug 0.20.2 through 0.20.4's C-API wrapper interrupts after min(timeout, 10ms), and its
+    Ladybug 0.20.2 and 0.20.3's C-API wrapper interrupts after min(timeout, 10ms), and its
     outer Connection rejects two UNWIND ranges immediately when its Python flag
     is nonzero. The setter also configures the real native timeout. Clear ONLY
     those Python flags after the native setter succeeds; preserve native limits.

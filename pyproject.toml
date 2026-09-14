@@ -9,12 +9,14 @@ description = "Local-first, LLM-first graph knowledgebase: embedded Cypher engin
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = { text = "MIT" }
+# Avoid recursive license discovery in local development environments.
+license-files = ["LICENSE"]
 dependencies = [
-    # Exact for storage/native compatibility. 0.20.4 keeps storage v47 and fixes
-    # native lifetime/allocator defects. Python C-API timeout/list bugs remain.
+    # Exact for storage/native compatibility. Retain 0.20.3: 0.20.4 failed
+    # Windows FTS preparation and owner shutdown qualification.
     # Keep grag's typed parameters, timeout and prepared-plan safeguards. Qualify
     # the matching minor-version extension binaries on every supported platform.
-    "ladybug==0.20.4",
+    "ladybug==0.20.3",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "mcp>=2.0",

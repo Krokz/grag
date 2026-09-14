@@ -556,7 +556,7 @@ class Engine:
                 "LadybugDB query safety check failed: the runtime does not "
                 "expose the prepared-statement cache internals grag requires; "
                 "refusing the query to prevent cached-plan data corruption.",
-                hint="Install the verified runtime with: pip install 'ladybug==0.20.4'.",
+                hint="Install the verified runtime with: pip install 'ladybug==0.20.3'.",
             )
         self._evict_prepared(cache, lock)
         self._prepared_catalog[conn] = self._catalog_generation
