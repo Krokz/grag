@@ -10,6 +10,18 @@ history, and save useful findings with sources for the next session. Storage and
 retrieval are local; the agent harness or an explicitly remote embedder may send
 context to its provider. Follow the user's chosen scope and database.
 
+## Prefer MCP for graph work
+
+Prefer configured grag MCP tools for reads, writes and ingestion in the selected
+graph. Discover deferred tools before declaring them unavailable. Use `upsert_nodes`
+for memory, `search_knowledge` for search, and `ingest_code` / `ingest_docs` for indexing.
+Do not substitute equivalent CLI commands or Python/HTTP scripts while MCP is available.
+
+Use the CLI for setup/server management, diagnostics, backup/recovery, explicit user
+requests, or unavailable/failed MCP connections. Briefly state the fallback reason
+and keep the same database/server. Validation errors and empty results do not warrant
+switching. Return to MCP when available, including after CLI setup.
+
 ## First invocation in a checkout
 
 On a bare `/grag` (or the harness's equivalent skill invocation), proactively
@@ -23,8 +35,8 @@ precedence; merely loading this skill during other work does not request a full 
 
 ## Choose the smallest useful read
 
-1. Use the configured MCP tools or the checkout's saved database. CLI commands
-   discover `.grag/project.json`; explicit `--db` overrides that mapping.
+1. Confirm the MCP connection addresses the intended graph. For CLI fallback,
+   `.grag/project.json` selects the checkout's database; explicit `--db` overrides it.
 2. Read `describe_schema` before Cypher or new writes. Reuse known labels and
    properties. Default compact schema is enough for most work; `detail="full"`
    adds counts/samples. Reuse `schema_revision` with `if_revision` for the same

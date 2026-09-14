@@ -22,7 +22,8 @@ Retraction is retained history, not permanent deletion or task completion. Do no
 report data as erased after retraction. Restore through a guarded current-state
 patch, clearing the supersession pointer and reviewing expiry/dispute qualifiers.
 
-New in 0.10.0: optional CLI equivalents are `remember --track-history`,
+For explicit CLI use or MCP fallback (see the main skill), CLI equivalents since
+0.10.0 are `remember --track-history`,
 `search`, `context`, `inspect Label:key --json`, and
 `retire Label:key --expected-revision TOKEN`. `inspect` is an unfiltered whole-node
 query with a current revision, not budgeted context. `remember --reason` also

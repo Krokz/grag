@@ -146,6 +146,12 @@ def _validate_standalone_http_security(config: GragConfig, host: str) -> None:
 
 
 _INSTRUCTIONS = (
+    "Prefer these MCP tools for graph reads, writes and ingestion in the selected database; "
+    "discover deferred tools before treating them as unavailable. Do not substitute equivalent "
+    "grag CLI commands or Python/HTTP scripts when MCP is available. Use the CLI for setup, "
+    "server management, diagnostics, backup/recovery, explicit user requests, or unavailable/failed "
+    "MCP connections. State a fallback reason, keep the same database/server, and return to MCP "
+    "when available. Validation errors and empty results are not connection failures. "
     "Use grag to ground project questions. Read describe_schema once, then choose "
     "cypher_query with narrow projections for exact facts, or search_knowledge for fuzzy "
     "questions. Call get_context only for needed neighbors, selected evidence or paging. "

@@ -522,6 +522,16 @@ def plan_global_skill_ops(client: str = "auto", *, remove: bool = False) -> list
 # CLAUDE.md block
 # ---------------------------------------------------------------------------
 
+_MCP_GUIDANCE = (
+    "Prefer the registered grag MCP tools for graph reads, writes and ingestion; "
+    "discover deferred tools before falling back. Do not substitute equivalent CLI "
+    "commands or Python/HTTP scripts when MCP is available for this graph. "
+    "Use the CLI for setup/operations, an explicit user request, or unavailable/failed "
+    "MCP connections; state the fallback reason and keep the same database/server. "
+    "Validation errors and empty results are not connection failures. Return to MCP "
+    "when available.\n\n"
+)
+
 
 def _claude_md_block(
     db_path: Path,
@@ -538,6 +548,7 @@ def _claude_md_block(
             "Connect: `grag mcp --server-url "
             f"{server_url}` with `GRAG_API_TOKEN` exported; the graph is shared "
             "with the whole team, so writes land for everyone.\n\n"
+            f"{_MCP_GUIDANCE}"
             "Ground project answers in grag: `cypher_query` for exact facts, "
             "`search_knowledge` for discovery; request `freshness=\"require\"` when current code matters.  \n"
             "Code is indexed on the server (do not `ingest_code` local paths). "
@@ -551,6 +562,7 @@ def _claude_md_block(
         f"Database: `{db}`  \n"
         "Use the registered MCP connection to the shared database owner. "
         "BM25 works without an embedding model.\n\n"
+        f"{_MCP_GUIDANCE}"
         "Ground project answers in grag: `cypher_query` for exact facts, "
         "`search_knowledge` for discovery; request `freshness=\"require\"` when current code matters.  \n"
         "Index missing code scope with `ingest_code`. Save sourced facts with "

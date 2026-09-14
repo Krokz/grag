@@ -60,6 +60,20 @@ Restart or reconnect the MCP client. The configured proxy starts a shared local
 server on first use. `grag status` prints its address and log location. On Windows,
 follow the separate-terminal command if the harness prevents independent startup.
 
+!!! tip "MCP for everyday agent work"
+    Since 0.10.1, the skill, server instructions and generated `CLAUDE.md` explicitly
+    prefer MCP for graph reads, memory writes and ingestion. Agents should discover
+    deferred tools before falling back to the CLI. CLI setup and diagnostics remain
+    appropriate, as do explicit CLI requests and unavailable or failed MCP connections.
+    A fallback should explain why and keep the same graph; validation errors or empty
+    results do not call for switching interfaces. This is guidance, not enforcement.
+
+    Upgrading the package does not rewrite installed instructions. Rerun
+    `grag init --client claude` (or your client) in the project to refresh its skill
+    and managed guidance, then reconnect MCP. If you also installed a personal skill,
+    refresh it with `grag init --global-skill --client claude`; update every copy used
+    by your harness. Preview project changes with `--dry-run`.
+
 ## 3. Index the intended source
 
 !!! note "First-use skill setup in 0.10.0"
@@ -99,6 +113,8 @@ the truth of authored memories. Read [freshness](guides/freshness.md) and
 [memory corrections](guides/memory.md) when needed.
 
 ## Everyday commands
+
+For terminal use or an agent's CLI fallback:
 
 ```bash
 grag remember "Use a ten-minute cache" --id cache-policy

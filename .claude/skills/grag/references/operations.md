@@ -1,9 +1,13 @@
 <!-- grag-managed skill reference: operations -->
 # Setup, recovery and optional models
 
-Use the existing MCP tools first. CLI `remember`, `search`, `context`, `ingest` and
+Use MCP for graph work; discover deferred tools before treating them as unavailable.
+Use the CLI for operations without an MCP equivalent, explicit user requests, or
+unavailable/failed MCP connections. Report a fallback briefly and keep the same
+database/server; validation errors and empty results are not connection failures.
+Return to MCP when available. CLI `remember`, `search`, `context`, `ingest` and
 `ingest-code` resolve the checkout and forward to its registered owner when present.
-REST provides equivalent `/api/schema`, `/api/query`, `/api/search`, `/api/context`,
+For integrations or fallback, REST provides equivalent `/api/schema`, `/api/query`, `/api/search`, `/api/context`,
 `/api/schema/define`, `/api/nodes/upsert`, `/api/edges/upsert` and ingestion routes.
 Python uses `GragService(GragConfig(db_path=...))` and must close the service explicitly.
 

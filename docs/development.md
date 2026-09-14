@@ -99,6 +99,8 @@ Check these cases with actual tool activity and independently read back the grap
 
 | Case | Evidence to check |
 |---|---|
+| Connected MCP with CLI also permitted | Routine reads, writes and ingestion use MCP without the prompt naming a transport. Check actual calls, not just a connected badge. |
+| MCP unavailable; explicit CLI request | Explain an availability fallback and keep the intended graph; honor a user's CLI choice even when MCP is connected. |
 | Project skill, then personal skill in a new repo | `/grag` loads the operations reference and maps supported source once; a cited symbol exists and ignored source is absent. |
 | Fresh session with existing code or only authored memory | Existing records survive; no automatic widening, duplicate memory or forced scan. |
 | Explicit memory correction and review | Memory reference loads when needed; revision guards, source and agent attribution accompany the edit; earlier values remain queryable in history. |
