@@ -234,16 +234,35 @@ def main(argv: list[str] | None = None) -> int:
     remember.add_argument("--label", default="Memory")
     remember.add_argument("--source", default="grag remember")
     remember.add_argument("--expected-revision", help="guard a revision of an existing memory")
+    remember.add_argument("--track-history", action="store_true", help="retain correction history; creates only unless --expected-revision is supplied")
+    remember.add_argument("--reason", help="reason for this edit (also enables history)")
+    remember.add_argument("--operation-id", help="durable retry ID; requires --id and an identical payload on retry")
     remember.add_argument("--json", action="store_true")
+    inspect_node = sub.add_parser("inspect", help="read one whole node and its current revision (unfiltered; query response limits apply)")
+    inspect_node.add_argument("node_id", help="canonical Label:key")
+    inspect_node.add_argument("--freshness", choices=["allow_stale", "wait", "require"], default="allow_stale")
+    inspect_node.add_argument("--json", action="store_true")
+    retire = sub.add_parser("retire", help="retract a memory from current retrieval, preserving content, relationships and history")
+    retire.add_argument("node_id", help="canonical Label:key")
+    retire.add_argument("--expected-revision", required=True, help="current token from inspect; never 'absent'")
+    retire.add_argument("--source", help="source supporting retirement (omitted preserves provenance)")
+    retire.add_argument("--reason", help="reason for retiring this memory")
+    retire.add_argument("--operation-id", help="durable retry ID for this exact retirement")
+    retire.add_argument("--json", action="store_true")
     search = sub.add_parser("search", help="retrieve knowledge from the selected graph")
     search.add_argument("query")
     search.add_argument("--label", action="append", dest="labels")
     context = sub.add_parser("context", help="retrieve context around Label:key node IDs")
     context.add_argument("node_ids", nargs="+")
+    history_mode = context.add_mutually_exclusive_group()
+    history_mode.add_argument("--history", action="store_true", help="list a node's correction history")
+    history_mode.add_argument("--revision", type=int, help="read a historical snapshot by sequence, not a revision token")
+    context.add_argument("--history-before", type=int, help="continue history using its next_before cursor; requires --history")
     for retrieval in (search, context):
         retrieval.add_argument("--tokens", type=int, default=2000)
         retrieval.add_argument("--hops", type=int, default=1)
         retrieval.add_argument("--freshness", choices=["allow_stale", "wait", "require"], default="allow_stale")
+        retrieval.add_argument("--evidence", choices=["current", "all"], default="current", help="all includes obsolete or disputed evidence with its qualifiers")
         retrieval.add_argument("--json", action="store_true")
 
     status = sub.add_parser("status", help="inspect database, server and client registrations without opening the graph")
@@ -626,7 +645,7 @@ def main(argv: list[str] | None = None) -> int:
             except GragError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
-    elif args.cmd in ("ingest", "ingest-code", "remember", "search", "context"):
+    elif args.cmd in ("ingest", "ingest-code", "remember", "inspect", "retire", "search", "context"):
         from pydantic import ValidationError
 
         from grag.cli_graph import graph_command

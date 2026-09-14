@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from grag.config import GragConfig
 from grag.core.errors import ConfigurationError, GragError
 from grag.core.limits import validate_request
+from grag.core.types import UpsertNodesRequest
 
 _ROUTES = {
     "describe_schema": ("GET", "/api/schema"),
@@ -159,10 +160,18 @@ class GraphClient:
                 hint="Restart that server with the updated grag installation, then retry. No ingestion request was sent.",
             )
         method, path = _ROUTES[operation]
+        payload = req.model_dump(mode="json") if req is not None else {}
+        if isinstance(req, UpsertNodesRequest):
+            # Evidence is a patch: omitted fields preserve stored values, while
+            # explicit null clears selected fields. Do not serialize its defaults
+            # as null (state/review reject null; expiry/pointers would be erased).
+            for node, item in zip(req.nodes, payload["nodes"], strict=True):
+                if node.evidence is not None:
+                    item["evidence"] = node.evidence.model_dump(mode="json", exclude_unset=True)
         return self._request(
             method,
             path,
-            **({"json": req.model_dump(mode="json")} if req is not None else {}),
+            **({"json": payload} if req is not None else {}),
         )
 
     def __exit__(

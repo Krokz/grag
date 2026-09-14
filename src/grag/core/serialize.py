@@ -191,7 +191,7 @@ def pack_context(
         # alongside prose without deciding which statuses are retrievable.
         props = {k: v for k, v in node.properties.items()
                  if k in _CITATION_PROPS}
-        for key in ("body", "text", "summary", "rationale", "docstring", "description"):
+        for key in ("summary", "body", "text", "rationale", "docstring", "description", "question"):
             value = node.properties.get(key)
             if isinstance(value, str) and len(value) <= 512:
                 props[key] = value
@@ -255,8 +255,12 @@ def pack_context(
         if cost(build(kept_nodes, kept_edges)) > token_budget:
             node.properties.clear()
     priority = {
-        key: i for i, key in enumerate(("body", "text", "summary", "rationale", "docstring",
-                                       "description", "title", "name", "status", "signature"))
+        # Current handoff fields precede potentially historical narrative.
+        # This controls field packing, never task ranking or lifecycle truth.
+        key: i for i, key in enumerate(("summary", "release_status", "released_in", "release",
+                                       "priority", "next_step", "acceptance", "question",
+                                       "body", "text", "rationale", "docstring", "description",
+                                       "title", "name", "status", "signature"))
     }
     secondary = {"id", "path", "language", "is_method", "meta", "heading_path", "ingested_at", "git_commit", "git_branch"}
     excerpt_map: dict[tuple[str, str], list[TextExcerpt]] = {}

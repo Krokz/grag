@@ -65,6 +65,8 @@ async def shared_workflow(root):
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     if os.environ.get("TMPDIR"):
         env["TMPDIR"] = os.environ["TMPDIR"]
+    if os.environ.get("LBUG_PYTHON_BACKEND"):
+        env["LBUG_PYTHON_BACKEND"] = os.environ["LBUG_PYTHON_BACKEND"]
     http = build_opener(ProxyHandler({}))
     latencies = {}
     owned_process = None
@@ -81,6 +83,14 @@ async def shared_workflow(root):
         if not allow_error:
             assert not result.is_error and not text.startswith("ERROR:"), text
         return text
+
+    async def cli_call(*args, success=True):
+        result = await asyncio.to_thread(
+            subprocess.run, [*command, "--db", str(db), *args],
+            env=env, cwd=root, text=True, capture_output=True, timeout=45, check=False,
+        )
+        assert result.returncode == (0 if success else 1), (result.stdout, result.stderr)
+        return json.loads(result.stdout) if success else result.stderr
 
     def health():
         with http.open(f"http://127.0.0.1:{port}/api/health", timeout=10) as response:
@@ -102,7 +112,7 @@ async def shared_workflow(root):
             if not footer.get("pending_embeddings", 0) and status["idle"]:
                 return status
             await asyncio.sleep(0.1)
-        raise AssertionError("Embedding backlog did not drain within 120 seconds")
+        raise AssertionError(f"Embedding backlog did not drain within 120 seconds: status={status}, search={footer}")
 
     params = StdioServerParameters(command=command[0], args=[*command[1:], "--db", str(db), "mcp", "--auto-serve", "--port", str(port)], cwd=str(root), env=env)
 
@@ -180,12 +190,49 @@ async def shared_workflow(root):
                 # M17: the stdio -> HTTP relay preserves typed input schemas,
                 # conditional schema replies, and structured tool errors.
                 listed = {t.name: t for t in (await b.list_tools()).tools}
+                assert len(listed) == 10
                 assert "UpsertNode" in listed["upsert_nodes"].input_schema["$defs"]
                 schema = json.loads((await call(a, "describe_schema", {})).rsplit("\n---\n", 1)[-1])
                 cached = json.loads(await call(b, "describe_schema", {"if_revision": schema["schema_revision"]}))
                 assert cached["unchanged"] and cached["schema_revision"] == schema["schema_revision"]
                 invalid = await call(b, "upsert_nodes", {"nodes": [{"label": "Memory"}]}, allow_error=True)
                 assert json.loads(invalid.rsplit("\n---\n", 1)[-1])["code"] == "validation_error"
+                # M20: ordinary CLI commands share the real owner with both
+                # MCP clients; a protocol edit is visible before a guarded
+                # retirement, and retry receipts survive the owner's restart.
+                saved = await cli_call("remember", "Retry twice", "--label", "CLIEntry", "--id", "retry",
+                                       "--track-history", "--source", "design.md", "--json")
+                viewed = await cli_call("inspect", "CLIEntry:retry", "--json")
+                assert viewed["revision"] == saved["revision"]
+                revised = json.loads(await call(b, "upsert_nodes", {"nodes": [{
+                    "label": "CLIEntry", "key": "retry", "expected_revision": viewed["revision"],
+                    "properties": {"text": "Retry three times"}, "evidence": {"reason": "Reviewed retry policy"},
+                }]}))
+                stale_cli = await cli_call("retire", "CLIEntry:retry", "--expected-revision", saved["revision"], success=False)
+                assert "Revision conflict" in stale_cli
+                viewed = await cli_call("inspect", "CLIEntry:retry", "--json")
+                assert viewed["revision"] == revised["revisions"]["CLIEntry:retry"]
+                cli_retirement = ("retire", "CLIEntry:retry", "--expected-revision", viewed["revision"],
+                                  "--reason", "Requirement withdrawn", "--operation-id", "m20:retire", "--json")
+                cli_retired = await cli_call(*cli_retirement)
+                recalled = await call(a, "get_context", {"node_ids": ["CLIEntry:retry"], "hops": 0})
+                assert json.loads(recalled.rsplit("\n---\n", 1)[-1])["excluded_evidence"] == 1
+                cli_history = await cli_call("context", "CLIEntry:retry", "--history", "--json")
+                assert [entry["sequence"] for entry in cli_history["history"]["entries"]] == [3, 2, 1]
+                # M15: both harnesses share the owner's parse cache, but still
+                # refresh an unchanged caller when its missing target appears.
+                source_root = root / "source"
+                source_root.mkdir()
+                (source_root / "core.py").write_text("def helper():\n return 1\n", encoding="utf-8")
+                (source_root / "main.py").write_text("from core import later\ndef run():\n return later()\n", encoding="utf-8")
+                scope = {"paths": [str(source_root)], "root": str(source_root)}
+                assert json.loads(await call(a, "ingest_code", scope))["files_reused"] == 0
+                assert json.loads(await call(b, "ingest_code", scope))["files_reused"] == 2
+                (source_root / "core.py").write_text("def helper():\n return 1\ndef later():\n return 2\n", encoding="utf-8")
+                refreshed = json.loads(await call(b, "ingest_code", scope))
+                assert refreshed["files_reused"] == 1 and refreshed["files_unchanged"] == 0
+                callers = json.loads(await call(a, "cypher_query", {"cypher": "MATCH (f:Function)-[:CALLS]->(g:Function) RETURN f.name,g.name,g.line_start"}))
+                assert callers["rows"] == [["run", "later", 3]]
                 initial = await asyncio.gather(writer(a, "claude-shaped"), writer(b, "cursor-shaped"), call(a, "ingest_docs", {"paths": [str(docs)]}))
                 assert json.loads(initial[2])["documents"] == doc_count
                 first = await ready(a)
@@ -271,6 +318,10 @@ async def shared_workflow(root):
         if sys.platform == "win32":
             await asyncio.to_thread(start_windows_owner)
         async with connect() as session:
+            assert (await cli_call(*cli_retirement))["replayed"]
+            assert (await cli_call("inspect", "CLIEntry:retry", "--json"))["revision"] == cli_retired["revision"]
+            archived = await cli_call("context", "CLIEntry:retry", "--evidence", "all", "--json")
+            assert "Retry three times" in archived["context"] and "retracted" in archived["context"]
             assert json.loads(await call(session, "cypher_query", {"cypher": "MATCH (n:Memory) RETURN count(n)"}))["rows"] == [[20 * batches + 1]]
             assert json.loads(await call(session, "cypher_query", {"cypher": "MATCH (n:Document) RETURN count(n)"}))["rows"] == [[doc_count]]
             assert json.loads(await call(session, "upsert_nodes", batch("claude-shaped", 0, "updated")))["replayed"]
@@ -290,6 +341,7 @@ async def shared_workflow(root):
                   "compact_whole_entities": True,
                   "excerpt_paging_and_stale_hash": True,
                   "evidence_history_supersession_review_restart": True,
+                  "cli_mcp_memory_lifecycle_restart": True,
                   "tool_calls": {name: {"count": len(values), "median_ms": statistics.median(values),
                                         "p95_ms": percentile95(values), "samples_ms": values} for name, values in latencies.items()},
                   "limitations": "Scripted protocol clients, not actual Claude/Cursor UIs or autonomous LLM runs."}

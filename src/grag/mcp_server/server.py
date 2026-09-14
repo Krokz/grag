@@ -343,6 +343,8 @@ def cypher_query(
     """Run read-only Cypher with compact JSON columns/rows/row_count/truncated/freshness.
     Read describe_schema first; project only needed fields for exact lookups or counts.
     Use search_knowledge for fuzzy questions. This tool accepts no writes.
+    For task resumption, filter declared scope/status and use explicit priorities;
+    task IDs, mission numbers and relevance scores do not establish priority.
     Whole nodes/relationships include computed _revision and omit vectors/null columns;
     _revision is not a stored Cypher property. Explicit property/map projections remain
     exact, including nulls and vectors. Return endpoints with relationships for canonical
@@ -375,6 +377,7 @@ def search_knowledge(
     """Retrieve cited context for a fuzzy question: BM25 plus optional vectors, then graph
     expansion. Narrow labels when known; top_k controls seeds and hops controls neighbors.
     Use cypher_query projections for exact names/counts, get_context for selected IDs.
+    Resume work via exact status/scope/priority queries; relevance is not task order.
     Inspect the JSON footer: freshness, evidence_policy, truncated and omission counts.
     Current evidence excludes superseded/retracted/expired/disputed/obsolete nodes;
     evidence="all" includes them with qualifiers. Unreviewed evidence is not certified.
