@@ -79,7 +79,7 @@ to read or write, and may send retrieved context to its model provider.
 <span id="documentation-scope"></span>
 
 !!! info "Which version do these docs describe?"
-    This guide describes **grag 0.10.0** and deploys from `main`.
+    This guide describes **grag 0.10.1** and deploys from `main`.
     Features still in development are marked on the relevant page. This is one
     maintained guide rather than a separate copy for each release.
 

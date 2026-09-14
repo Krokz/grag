@@ -5,7 +5,7 @@ documents and authored knowledge, then returns relevant records and connections
 with citations. The harness decides what to ask, what to remember and how to
 answer the user. grag does not run an LLM or autonomously create a project ontology.
 
-This describes the implementation shipped in [grag 0.10.0](https://github.com/Krokz/grag/tree/v0.10.0).
+This describes the implementation shipped in [grag 0.10.1](https://github.com/Krokz/grag/tree/v0.10.1).
 The usual setup is **one database per checkout, one owning process, and any number
 of clients using that process**. BM25 works without an embedding model.
 
