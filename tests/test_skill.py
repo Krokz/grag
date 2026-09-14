@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from grag.cli import main
 from grag.project import apply_ops, plan_skill_ops, plan_skill_removal_ops
 from grag.project_files import ProjectConfigError
 
@@ -39,6 +40,84 @@ SKILL_PATHS = [
 # The copy shipped inside the wheel — `grag init` scaffolds this one into
 # user projects, so it must never drift from the harness copies above.
 PACKAGED_TEMPLATE = REPO_ROOT / "src" / "grag" / "assets" / "skill" / "SKILL.md"
+
+
+@pytest.mark.parametrize("client,directory", [
+    ("claude", ".claude"), ("cursor", ".cursor"), ("codex", ".agents"),
+    ("windsurf", ".codeium/windsurf"), ("zed", ".agents"),
+])
+def test_global_skill_install_preview_repeat_and_remove(tmp_path, monkeypatch, client, directory):
+    home, project = tmp_path / "home", tmp_path / "repo"
+    project.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.chdir(project)
+    # Global installation must bypass all database configuration, even invalid env.
+    monkeypatch.setenv("GRAG_BUFFER_POOL_MB", "not-a-number")
+    monkeypatch.setattr("grag.client.GraphClient", lambda *args: pytest.fail("opened a database"))
+    args = ["init", "--global-skill", "--client", client]
+    assert main([*args, "--dry-run"]) == 0
+    assert not home.exists()
+    assert main(args) == 0
+    target = home / directory / "skills/grag"
+    for source in PACKAGED_TEMPLATE.parent.rglob("*.md"):
+        assert (target / source.relative_to(PACKAGED_TEMPLATE.parent)).read_text() == source.read_text()
+    before = {p: p.stat().st_mtime_ns for p in target.rglob("*.md")}
+    assert main(args) == 0
+    assert {p: p.stat().st_mtime_ns for p in before} == before
+    assert list(project.iterdir()) == []
+    assert not list(home.rglob("*.lbdb"))
+    assert not list(home.rglob("*mcp*.json"))
+    assert main([*args, "--remove"]) == 0
+    assert list(target.rglob("*.md")) == []
+
+
+def test_global_auto_codex_does_not_create_a_claude_skill(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".codex").mkdir()
+    assert main(["init", "--global-skill"]) == 0
+    assert (tmp_path / ".agents/skills/grag/SKILL.md").exists()
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_global_claude_profile_discovery_install_and_remove(tmp_path, monkeypatch):
+    home, profile = tmp_path / "home", tmp_path / "work-profile"
+    profile.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(profile))
+    assert main(["init", "--global-skill"]) == 0
+    assert (profile / "skills/grag/SKILL.md").is_file()
+    assert (profile / "skills/grag/references/operations.md").is_file()
+    assert not (home / ".claude").exists()
+    assert main(["init", "--global-skill", "--client", "claude", "--remove"]) == 0
+    assert not list(profile.rglob("*.md"))
+
+
+def test_project_skill_discovery_includes_other_installed_harnesses(tmp_path, monkeypatch):
+    home, project = tmp_path / "home", tmp_path / "repo"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    (home / ".codeium/windsurf").mkdir(parents=True)
+    (home / ".config/zed").mkdir(parents=True)
+    apply_ops(plan_skill_ops(["claude"], project))
+    for directory in (".claude", ".windsurf", ".agents"):
+        assert (project / directory / "skills/grag/references/memory.md").is_file()
+    assert not list(home.rglob("*mcp*.json"))
+
+
+def test_global_collision_preserves_entire_existing_bundle(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    reference = tmp_path / ".cursor/skills/grag/references/memory.md"
+    reference.parent.mkdir(parents=True)
+    reference.write_text("My own memory procedures\n")
+    assert main(["init", "--global-skill", "--client", "cursor"]) == 1
+    assert list(tmp_path.rglob("*.md")) == [reference]
+    assert reference.read_text() == "My own memory procedures\n"
+
+
+@pytest.mark.parametrize("extra", [["--ingest-if-empty"], ["--no-mcp"], ["--server-url", "http://127.0.0.1:1234"]])
+def test_global_mode_refuses_project_flags(tmp_path, monkeypatch, extra):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert main(["init", "--global-skill", *extra]) == 1
+    assert list(tmp_path.iterdir()) == []
 
 
 def _frontmatter(text: str) -> dict:
@@ -70,6 +149,14 @@ def test_main_skill_stays_small_and_reference_links_are_packaged():
     links = re.findall(r"\]\((references/[^)]+)\)", text)
     assert links
     assert all((PACKAGED_TEMPLATE.parent / target).is_file() for target in links)
+
+
+def test_discovery_description_is_complete_for_single_line_frontmatter_readers():
+    text = PACKAGED_TEMPLATE.read_text()
+    # Cursor Agent 2026.01.28's discovery reads only the scalar's first line.
+    # Preserve the full description in that interface, not a YAML folding marker.
+    line = next(line for line in text.splitlines() if line.startswith("description:"))
+    assert line.partition(":")[2].strip() == _frontmatter(text)["description"]
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])

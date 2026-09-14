@@ -5,8 +5,18 @@
 not source bodies. Python uses stdlib AST. Other supported languages need the
 `gragdb[code]` extra. `ingest_docs` handles server-local Markdown/text and JSON/JSONL
 document records: JSON needs a list of `{text, source?, metadata?}` or a `documents`
-wrapper; JSONL needs one record per line. Arbitrary JSON fixtures/schemas are skipped
-with warnings. CSV is not supported;
+wrapper; JSONL needs one record per line. grag 0.10.0 adds explicit
+`json_mode="document"` (CLI `--json-mode document`) for ordinary .json schemas,
+contracts and fixtures. It validates syntax and indexes literal text with file
+citations and `meta` format/coverage/source_sha256; no schema validation, JSON
+property graph, field-level line citations or `$ref` resolution/fetching. All
+selected .json files use that mode, even record-shaped ones; split calls by intent.
+The default remains records, and JSONL is always records. Unsupported shapes in
+record mode are skipped with warnings. Document mode accepts UTF-8/BOM and at most
+64 nesting levels; existing 256-file/document, 2 MiB loaded-byte and mutation
+limits apply. Invalid files preserve unseen documents; resource limits abort.
+Long chunks may be partial JSON, so inspect the cited file for full structure.
+Read initial loader warnings as well as background job results. CSV is not supported;
 Markdown sections preserve hierarchy and code mentions. Ingest code first when
 those links are useful. Use `background=true` for large jobs; poll `job_status`
 until done and inspect result warnings. Queued/running/job ID is not success.
@@ -21,11 +31,25 @@ selected paths within one intended scope. Registered paths accumulate by default
 `replace_scope=true` with an explicit root replaces them. Empty paths then unregister
 that scope. `calls` and `max_file_kb` are saved for subsequent verification/refresh.
 
+grag 0.10.0 reuses unchanged parse summaries within the owning process,
+while reading source bytes and resolving current dependencies. `files_parsed` counts
+processed files including the `files_reused` subset; `files_unchanged` counts skipped
+graph writes. Reused callers can still need new relationships/coverage. Restart or
+cache eviction causes parsing again; it does not erase graph memory or prove freshness.
+
+Explicit file paths and `root` do not bypass ignore rules. Inspect the full policy,
+including later negations and excluded parent directories. File exceptions alone
+cannot reopen excluded parents. When the intended source needs an exception, scope
+`.gragignore` to that source and its parents; verify selected modules and warnings
+before claiming coverage. Broadly disabling ignores can include unrelated files.
+
 Re-ingestion reconciles generated nodes/edges, including newly excluded and removed
 source. Authored or unknown links can retain obsolete endpoints; inspect warnings,
 `_source_state` and `_document_state`. Current retrieval excludes obsolete nodes.
 Pre-ownership legacy links remain for explicit review. Do not assume they were
 removed or certified by a new scan. Caller-upserted relationships remain authored.
+Keep authored memory intact during scope changes; report stale prose separately
+unless the user requested its correction.
 
 Successful document-directory scans synchronize removed files and shrinking JSON
 batches. Failed/incomplete scans preserve unseen documents and warn. Changes between

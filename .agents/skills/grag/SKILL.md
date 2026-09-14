@@ -1,9 +1,6 @@
 ---
 name: grag
-description: >-
-  Query and maintain a local grag knowledge graph for project grounding,
-  decisions and agent memory. Use when grag is configured or a project .lbdb
-  exists, or when asked to build or query a graph knowledgebase.
+description: Query and maintain a local grag knowledge graph for project grounding, decisions and agent memory. Use when grag is configured or a project .lbdb exists, when invoked as grag in a new checkout, or when asked to build or query a graph knowledgebase.
 ---
 
 # grag
@@ -12,6 +9,17 @@ Use the project's graph to answer questions about its structure, decisions and
 history, and save useful findings with sources for the next session. Storage and
 retrieval are local; the agent harness or an explicitly remote embedder may send
 context to its provider. Follow the user's chosen scope and database.
+
+## First invocation in a checkout
+
+On a bare `/grag` (or the harness's equivalent skill invocation), proactively
+initialize and index the current project's source if its graph is absent, empty,
+or contains only grag's verified init marker. Follow the
+[first-use procedure](references/operations.md).
+Existing code, documents or authored memory means use that graph as it stands;
+do not automatically widen or rebuild it. Missing tools or a connection error
+are not proof of an empty graph. A specific user task or source scope takes
+precedence; merely loading this skill during other work does not request a full scan.
 
 ## Choose the smallest useful read
 
@@ -64,10 +72,20 @@ and `_DST` are not persistent identities.
 
 ## Save useful context
 
+For memory corrections, retirement, "continue", "resume" or "what next", load
+[memory](references/memory.md).
+Confirm the checkout/database, then use exact status and established priority/scope
+fields or a current priority decision. Search scores, task IDs and mission numbers
+are not priority. Fetch the chosen task's acceptance, next step and linked current
+decisions/questions within a budget. Missing scope or priority means uncertainty;
+`evidence="current"` does not itself mean a task is unfinished or a question unanswered.
+
 Reuse the schema and existing records. Save decisions and their reasons, corrections,
 open work and non-obvious findings with `source`; connect them to relevant code
 where an appropriate relationship exists. Prefer ingested code facts over copied
 versions/paths that can drift. Mark completed work done rather than duplicating it.
+Replace the current summary when state changes; use evidence history for prior text,
+not an ever-growing chronological body. Keep completion and release status distinct.
 
 `upsert_nodes` can include related `edges` in one atomic call. Put the primary key
 in `key`, never `properties`; omitted fields preserve values, null clears them.
@@ -85,8 +103,8 @@ replays the original result without undoing later edits; its revisions describe 
 old commit. A changed payload needs a new ID. Reconcile conflicts before a new edit.
 
 Add `evidence: {}` to start correction history; changing evidence on an existing
-node requires its revision. For review, expiry, supersession or historical paging,
-read [references/memory.md](references/memory.md).
+node requires its revision. Before corrections, reviews, expiry, supersession or
+history reads, load [references/memory.md](references/memory.md).
 
 ## Load detail only when needed
 

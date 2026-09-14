@@ -7,6 +7,52 @@ REST provides equivalent `/api/schema`, `/api/query`, `/api/search`, `/api/conte
 `/api/schema/define`, `/api/nodes/upsert`, `/api/edges/upsert` and ingestion routes.
 Python uses `GragService(GragConfig(db_path=...))` and must close the service explicitly.
 
+## First-use project mapping
+
+A user-level skill makes the invocation available before a repo has any grag
+files. One-time installation: `grag init --global-skill --client claude` (or
+`cursor`, `codex`, `windsurf`, `zed`). This installs instructions and references
+only; it does not bind every project to a global database. Reload the harness's
+skills if needed. Duplicate-name precedence depends on the harness: current
+Claude Code chooses a personal skill over a project copy. Update every installed
+copy you intend to use rather than assuming the closest file wins.
+
+For a bare skill invocation, resolve the current checkout and its existing
+database selectors first. Use the user's explicit database or scope when given;
+do not repurpose an unrelated user-scope MCP database. From the checkout, run:
+
+```sh
+grag init --client claude --ingest-if-empty
+```
+
+Use `--client cursor` in Cursor. In Codex or another harness whose MCP setup is
+already managed separately, use `--client codex --no-mcp --no-claude-md` instead.
+This still maps locally via the CLI. For Windsurf/Zed, whose init MCP registration
+is user-scoped, prefer that CLI-only form when a registration serves another repo;
+do not switch other sessions' database implicitly.
+
+The command resolves the checkout, checks full table counts and provenance of
+`GragSetup:connection`, and skips setup/indexing if other content already exists.
+Empty schema tables do not count as a map. Unknown counts, ownership conflicts,
+moved mappings and connection failures stop the check; report the actual error.
+Do not retry by selecting a new database or forcing `--ingest`.
+
+On `ingested`, inspect the returned counts, skips and parser coverage. Finish with
+a brief mapping summary and one useful entrypoint's file/line citation. While MCP
+is reconnecting, `grag search "<symbol>" --freshness require --json` can retrieve
+one through the CLI. Keep ingestion counts and parser coverage in their existing
+index metadata rather than duplicating them as authored memories. On `skipped`,
+continue with the existing graph. On
+`no_supported_code`, explain the reported exclusions/coverage; do not claim the
+project is mapped or keep rescanning. Ingestion respects ignore rules and file
+limits. Do not broaden ignores, install an embedder or invent a mandatory memory
+schema just for startup. Read relevant docs separately if the user's task needs them.
+
+New MCP registration may need a harness reconnect, but CLI indexing completes in
+the current session. Report that distinction. If the installed command lacks
+`--ingest-if-empty`, report that the newer version is needed instead of forcing
+an unconditional scan. These flags are available from 0.10.0.
+
 ## Select the right database and owner
 
 Local `grag init` stores a Git-ignored `.grag/project.json`. Explicit --db/--db-dir
@@ -36,6 +82,26 @@ its own identity instead of pretending the original moved.
 
 ## Connection and storage failures
 
+New in 0.10.0: `grag status --json` / `grag doctor --json` discover
+runtime/source paths, checkout mapping, saved client registrations/scopes,
+owner and skill copies without opening the graph or changing files. Doctor's
+`ready` is installation readiness only. Cached owner observations are not a new
+freshness check. Missing/moved/malformed configuration is not an empty graph.
+
+For an explicit connection investigation, `grag doctor --verify-client
+claude:project:grag` (or the exact Cursor/other ID shown in the report) launches
+that saved command and reads its existing graph through MCP. It sends no setup
+write, but startup can replay WAL and reads can refresh indexes. It requires a
+matching explicit local database; URL/implicit/directory targets stay unverified.
+Use `--db` to inspect another intended database. A passed probe is not a live GUI
+session test. Inspect `verification` separately from installation `ready`.
+
+Preview stale-launcher repairs with `init --dry-run --client CLIENT`; use
+`relocate OLD NEW --dry-run` for moves. Doctor does not apply repairs. Renamed or
+user/local registrations can need manual edits; init owns its `grag` entry only.
+Linked configurations retain their links. Do not silently switch a broken client
+to a fresh or partially recovered graph to make the check green.
+
 A reconnect failure alone does not identify a cause. Retry one transient tool error,
 then inspect `grag --db <file> status` and its daemon log. Confirm database, process
 and port. Use its shared owner for a lock error. Check paths/mapping after a move;
@@ -62,6 +128,13 @@ rebuilds embeddings in an openable database. Starts never silently choose lossy 
 Shutdown rejects new work, cancels queued jobs and drains active workers. After its
 grace period it may report a pending drain and retain the engine. A timeout does not
 mean the process stopped; inspect its log/registration before opening a second owner.
+
+New in 0.10.0: `index_inconsistent` identifies a persisted FTS failure,
+not invalid Cypher. Preserve a recovery copy, export its readable records, and
+import into a new database to rebuild derived indexes. Verify important memories,
+the failed write, search and restart before adopting the new path. Keep the originals;
+`reindex` rebuilds embeddings and does not repair FTS. Never silently replay a
+failed mutation as if its outcome were known.
 
 ## Verified backup and restore
 
