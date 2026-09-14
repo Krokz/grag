@@ -189,7 +189,20 @@ jobs:
           PY
 
       - name: twine check
-        run: twine check dist/*
+        run: |
+          python - <<'PY'
+          import glob, tarfile
+          from pathlib import PurePosixPath
+          allowed = {'src', 'ui', 'README.md', 'LICENSE', 'pyproject.toml',
+                     'hatch_build.py', 'scripts', 'PKG-INFO'}
+          with tarfile.open(glob.glob('dist/*.tar.gz')[0]) as archive:
+              paths = [PurePosixPath(member.name) for member in archive.getmembers()]
+          assert paths and all(not p.is_absolute() and '..' not in p.parts for p in paths)
+          assert all(len(p.parts) < 2 or p.parts[1] in allowed for p in paths)
+          assert not any('node_modules' in p.parts or '.grag' in p.parts or 'audits' in p.parts for p in paths)
+          print('Source archive contains only the intended release files')
+          PY
+          twine check dist/*
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@v7

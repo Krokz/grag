@@ -64,14 +64,14 @@ ignore-vcs = true
 # Keep local UI dependencies out while still including the built web bundle.
 exclude = ["/ui/node_modules", "/src/grag/_runtime"]
 include = [
-    "src/grag",
-    "src/grag/api/static",
-    "ui",
-    "README.md",
-    "LICENSE",
-    "pyproject.toml",
-    "hatch_build.py",
-    "scripts/build_windows_runtime.py",
+    "/src/grag",
+    "/src/grag/api/static",
+    "/ui",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+    "/hatch_build.py",
+    "/scripts/build_windows_runtime.py",
 ]
 
 [tool.pytest.ini_options]

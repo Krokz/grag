@@ -3,6 +3,10 @@
 Start with [Architecture](architecture.md) for component responsibilities,
 database ownership, request flows and persistence boundaries.
 
+Release source archives include only root-scoped project files. License discovery
+is limited to the project `LICENSE`; nested virtual environments and local audit
+files must stay outside distributions. The publication gate checks archive scope.
+
 **From source** (for development). Build the UI **first** — `pip install` needs the
 built bundle at `src/grag/api/static` (the wheel's force-include; see `pyproject.toml`):
 
