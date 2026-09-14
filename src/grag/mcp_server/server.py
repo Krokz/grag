@@ -286,6 +286,8 @@ def define_schema(
     """Create/reuse node and directed relationship tables; call before writing a new type.
     Reuse existing labels: near-duplicates are refused unless allow_similar=true.
     Node primary keys default to STRING id; declare a different type in properties.
+    Names use unquoted ASCII identifiers; reserved words (e.g. optional) get rename
+    hints. Tables and registry publish atomically.
     Properties support STRING, INT64, DOUBLE, BOOL, DATE, TIMESTAMP. searchable enables
     retrieval. Relationship endpoints must exist or be defined in this call.
     Returns the current compact schema. if_not_exists=true preserves existing tables.

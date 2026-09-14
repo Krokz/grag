@@ -274,7 +274,16 @@ def _similar_error(name: str, existing: str, kind: str) -> SchemaError:
 def define_schema(
     engine: Engine, config: GragConfig, req: DefineSchemaRequest, *, detail: SchemaDetail = "full",
 ) -> SchemaDocument:
-    _validate_request(req)
+    # Validate every name before the first DDL, and publish tables + registry
+    # together. Joining an ingest transaction does not imply a savepoint.
+    with engine.atomic_writes():
+        _validate_request(req)
+        return _define_schema(engine, config, req, detail=detail)
+
+
+def _define_schema(
+    engine: Engine, config: GragConfig, req: DefineSchemaRequest, *, detail: SchemaDetail,
+) -> SchemaDocument:
 
     tables = _table_index(engine)
     if META_TABLE not in tables:

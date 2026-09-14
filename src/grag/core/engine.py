@@ -461,12 +461,13 @@ class Engine:
 
     @contextmanager
     def write_transaction(self) -> Iterator[None]:
-        """Commit one DML operation atomically on the serialized writer.
+        """Commit one write operation atomically on the serialized writer.
 
         Reads on this thread share the writer and see their own changes;
         other threads keep reading committed state through the reader pool.
-        Prepare schema and expensive input parsing before entering. Nested
-        transactions are rejected rather than implying savepoint semantics.
+        DDL and registry writes can share the transaction. Do expensive input
+        parsing before entering. Nested transactions are rejected rather than
+        implying savepoint semantics.
         """
         with self._write_lock:
             if self._transaction_owner is not None:
