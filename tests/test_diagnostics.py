@@ -245,7 +245,7 @@ def test_passive_index_status_never_opens_an_unloaded_database_or_refreshes(tmp_
         assert http.get("/api/health").json()["capabilities"]["passive_diagnostics"] == 1
         observed = http.get("/api/index/status?db=first&check=false").json()
         assert observed["index"]["roots"] == [{"path": "/old/checkout"}]
-        assert observed["runtime"]["grag_module"].endswith("grag/__init__.py")
+        assert Path(observed["runtime"]["grag_module"]).parts[-2:] == ("grag", "__init__.py")
         second_result = http.get("/api/index/status?db=second&check=false").json()
         assert second_result["loaded"] is False
         assert second_result["database_id"] is None
