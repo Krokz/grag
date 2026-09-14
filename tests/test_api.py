@@ -97,7 +97,7 @@ def test_health(client):
     assert res.json() == {
         "status": "ok",
         "version": grag.__version__,
-        "capabilities": {"ingestion_scope": 2, "snapshot_format": 2},
+        "capabilities": {"ingestion_scope": 2, "snapshot_format": 2, "passive_diagnostics": 1},
         "database_id": database_identity(client.app.state.service.config.db_path),
         "server_id": database_identity(client.app.state.service.config.db_path),
         "pid": os.getpid(),

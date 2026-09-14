@@ -10,12 +10,19 @@ Skill-capable harnesses also get the packaged grag SKILL.md (the operating
 guidance that makes the MCP tools effective):
     claude   — project-root/.claude/skills/grag/SKILL.md
     cursor   — project-root/.cursor/skills/grag/SKILL.md
+    windsurf — project-root/.windsurf/skills/grag/SKILL.md
+    zed      — project-root/.agents/skills/grag/SKILL.md
     codex    — project-root/.agents/skills/grag/SKILL.md  (detected, no MCP config)
+
+Global skill installation uses the corresponding home directory; Windsurf's
+user-level skill location is ~/.codeium/windsurf/skills. Claude's personal skills
+follow CLAUDE_CONFIG_DIR when set.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -108,7 +115,7 @@ def _set_config(path: Path, section: str, entry: dict) -> WriteOp:
     return op
 
 
-def _stdio_entry(db_path: Path, port: int = 8471) -> dict:
+def _stdio_entry(db_path: Path, port: int = 8471, *, auto_embed: bool = True) -> dict:
     """Stdio entry with --auto-serve: starts grag serve --with-mcp if needed, then proxies.
 
     The proxy process holds no write lock, so the browser UI and LLM tools work
@@ -127,7 +134,7 @@ def _stdio_entry(db_path: Path, port: int = 8471) -> dict:
             str(port),
         ],
     }
-    if _fastembed_available():
+    if auto_embed and _fastembed_available():
         entry["env"] = {"GRAG_EMBED_PROVIDER": "fastembed"}
     return entry
 
@@ -172,6 +179,7 @@ def _mcp_entry(
     port: int,
     server_url: str | None,
     server_db: str | None,
+    auto_embed: bool = True,
 ) -> dict:
     if server_url:
         return (
@@ -180,7 +188,7 @@ def _mcp_entry(
             else _remote_url_entry(server_url, server_db)
         )
     if stdio:
-        return _stdio_entry(db_path, port)
+        return _stdio_entry(db_path, port, auto_embed=auto_embed)
     from grag.admin import _http_origin, find_server
 
     entry = _url_entry(port)
@@ -189,8 +197,6 @@ def _mcp_entry(
         origin = _http_origin(owner.host, owner.port)
         if origin:
             entry = {"url": f"{origin}{owner.mcp_path.rstrip('/')}/"}
-    import os
-
     if os.environ.get("GRAG_API_TOKEN"):
         entry["headers"] = {"Authorization": f"Bearer {_TOKEN_REF}"}
     return entry
@@ -208,10 +214,11 @@ def _op_claude(
     port: int,
     server_url: str | None = None,
     server_db: str | None = None,
+    auto_embed: bool = True,
 ) -> WriteOp:
     path = project_root / ".mcp.json"
     return _set_config(
-        path, "mcpServers", _mcp_entry(db_path, stdio, port, server_url, server_db)
+        path, "mcpServers", _mcp_entry(db_path, stdio, port, server_url, server_db, auto_embed)
     )
 
 
@@ -222,10 +229,11 @@ def _op_cursor(
     port: int,
     server_url: str | None = None,
     server_db: str | None = None,
+    auto_embed: bool = True,
 ) -> WriteOp:
     path = project_root / ".cursor" / "mcp.json"
     return _set_config(
-        path, "mcpServers", _mcp_entry(db_path, stdio, port, server_url, server_db)
+        path, "mcpServers", _mcp_entry(db_path, stdio, port, server_url, server_db, auto_embed)
     )
 
 
@@ -235,10 +243,11 @@ def _op_windsurf(
     port: int,
     server_url: str | None = None,
     server_db: str | None = None,
+    auto_embed: bool = True,
 ) -> WriteOp:
     path = Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
     return _set_config(
-        path, "mcpServers", _mcp_entry(db_path, stdio, port, server_url, server_db)
+        path, "mcpServers", _mcp_entry(db_path, stdio, port, server_url, server_db, auto_embed)
     )
 
 
@@ -247,10 +256,11 @@ def _op_zed(
     port: int = 8471,
     server_url: str | None = None,
     server_db: str | None = None,
+    auto_embed: bool = True,
 ) -> WriteOp:
     """Zed registrations use stdio; preserve existing JSONC comments/settings."""
     path = Path.home() / ".config" / "zed" / "settings.json"
-    entry = _mcp_entry(db_path, True, port, server_url, server_db)
+    entry = _mcp_entry(db_path, True, port, server_url, server_db, auto_embed)
     return _set_config(path, "context_servers", _zed_command(entry))
 
 
@@ -266,22 +276,27 @@ def _zed_command(entry: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def detect_clients(project_root: Path) -> list[str]:
+def _claude_config_dir() -> Path:
+    """Match Claude's profile override for personal skill discovery."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
+
+
+def detect_clients(project_root: Path, *, fallback: bool = True) -> list[str]:
     """Return the names of LLM clients whose config dirs are present.
 
     Falls back to ['claude'] (writes .mcp.json) when nothing is detected —
     .mcp.json is the most widely understood format and is harmless to create.
     """
     found: list[str] = []
-    if (project_root / ".claude").is_dir() or (Path.home() / ".claude").is_dir():
+    if (project_root / ".claude").is_dir() or _claude_config_dir().is_dir():
         found.append("claude")
     if (project_root / ".cursor").is_dir() or (Path.home() / ".cursor").is_dir():
         found.append("cursor")
-    if (Path.home() / ".codeium" / "windsurf").is_dir():
+    if (project_root / ".windsurf").is_dir() or (Path.home() / ".codeium" / "windsurf").is_dir():
         found.append("windsurf")
     if (Path.home() / ".config" / "zed").is_dir():
         found.append("zed")
-    return found or ["claude"]
+    return found or (["claude"] if fallback else [])
 
 
 def plan_mcp_ops(
@@ -293,6 +308,7 @@ def plan_mcp_ops(
     port: int = 8471,
     server_url: str | None = None,
     server_db: str | None = None,
+    auto_embed: bool = True,
 ) -> list[WriteOp | SkipOp]:
     """Plan MCP config write-ops.
 
@@ -315,17 +331,17 @@ def plan_mcp_ops(
     for client in clients:
         if client == "claude":
             ops.append(
-                _op_claude(project_root, db_path, stdio, port, server_url, server_db)
+                _op_claude(project_root, db_path, stdio, port, server_url, server_db, auto_embed)
             )
         elif client == "cursor":
             ops.append(
-                _op_cursor(project_root, db_path, stdio, port, server_url, server_db)
+                _op_cursor(project_root, db_path, stdio, port, server_url, server_db, auto_embed)
             )
         elif client == "windsurf":
-            ops.append(_op_windsurf(db_path, stdio, port, server_url, server_db))
+            ops.append(_op_windsurf(db_path, stdio, port, server_url, server_db, auto_embed))
         elif client == "zed":
             # Zed context_servers are stdio-only
-            ops.append(_op_zed(db_path, port, server_url, server_db))
+            ops.append(_op_zed(db_path, port, server_url, server_db, auto_embed))
     return ops
 
 
@@ -334,8 +350,10 @@ def plan_mcp_ops(
 # ---------------------------------------------------------------------------
 
 # Harnesses that read a project-level SKILL.md, keyed by init client.
-# windsurf/zed have no skill mechanism.
-_SKILL_DIRS = {"claude": ".claude", "cursor": ".cursor"}
+_SKILL_DIRS = {
+    "claude": ".claude", "cursor": ".cursor", "windsurf": ".windsurf",
+    "zed": ".agents", "codex": ".agents",
+}
 
 
 def _skill_template() -> str:
@@ -385,10 +403,7 @@ def _skill_paths(clients: list[str], project_root: Path) -> list[Path]:
     but reads the same skill format.
     """
     dirs = [_SKILL_DIRS[c] for c in clients if c in _SKILL_DIRS]
-    if (project_root / ".claude").is_dir() or (Path.home() / ".claude").is_dir():
-        dirs.append(".claude")
-    if (project_root / ".cursor").is_dir() or (Path.home() / ".cursor").is_dir():
-        dirs.append(".cursor")
+    dirs.extend(_SKILL_DIRS[c] for c in detect_clients(project_root, fallback=False))
     if (project_root / ".agents").is_dir() or (Path.home() / ".codex").is_dir():
         dirs.append(".agents")
     return [
@@ -415,10 +430,14 @@ def plan_skill_ops(clients: list[str], project_root: Path) -> list[WriteOp | Del
     template or a user-edited grag skill — frontmatter ``name: grag``). Any
     other SKILL.md is user content: the template is appended, never clobbered.
     """
+    return _plan_skill_writes(_skill_paths(clients, project_root))
+
+
+def _plan_skill_writes(paths: list[Path]) -> list[WriteOp | DeleteOp | SkipOp]:
     template = _skill_template()
     references = _skill_references()
     ops: list[WriteOp | DeleteOp | SkipOp] = []
-    for path in _skill_paths(clients, project_root):
+    for path in paths:
         # References precede the entrypoint so a fresh install doesn't advertise
         # files that have not been written yet. All operations use checked writes.
         ops.extend(_reference_ops(path.parent, references))
@@ -451,10 +470,14 @@ def plan_skill_removal_ops(
     appended to is restored to its pre-init content; anything else was
     modified by the user and is skipped with a manual-removal note.
     """
+    return _plan_skill_removals(_skill_paths(clients, project_root))
+
+
+def _plan_skill_removals(paths: list[Path]) -> list[DeleteOp | SkipOp | WriteOp]:
     template = _skill_template()
     references = _skill_references()
     ops: list[DeleteOp | SkipOp | WriteOp] = []
-    for path in _skill_paths(clients, project_root):
+    for path in paths:
         before = snapshot(path)
         if before.data is None:
             ops.extend(_reference_ops(path.parent, references, remove=True))
@@ -475,6 +498,24 @@ def plan_skill_removal_ops(
             continue  # a retained custom entrypoint may still need its references
         ops.extend(_reference_ops(path.parent, references, remove=True))
     return ops
+
+
+def plan_global_skill_ops(client: str = "auto", *, remove: bool = False) -> list[WriteOp | DeleteOp | SkipOp]:
+    """Install the portable bundle without any project/database registration."""
+    home = Path.home()
+    if client == "auto":
+        clients = detect_clients(home, fallback=False)
+        if (home / ".codex").is_dir() or (home / ".agents").is_dir():
+            clients.append("codex")
+        clients = clients or ["claude"]
+    else:
+        clients = [client]
+    directories = {**_SKILL_DIRS, "windsurf": ".codeium/windsurf"}
+    paths = list(dict.fromkeys(
+        (_claude_config_dir() if c == "claude" else home / directories[c]) / "skills/grag/SKILL.md"
+        for c in clients
+    ))
+    return _plan_skill_removals(paths) if remove else _plan_skill_writes(paths)
 
 
 # ---------------------------------------------------------------------------

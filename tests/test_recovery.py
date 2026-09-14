@@ -67,6 +67,30 @@ def _corrupt_wal(cfg):
         stream.write(b"\xff" * 16)  # invalid record after committed transactions
 
 
+def test_doctor_saved_launcher_reports_real_wal_failure_without_repair(cfg, tmp_path, monkeypatch):
+    import argparse
+
+    from grag import diagnostics
+
+    _corrupt_wal(cfg)
+    before = _files(cfg)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+    entry = {"command": sys.executable, "args": ["-m", "grag.cli", "--db", str(cfg.db_path), "mcp"],
+             "env": {"GRAG_EMBED_PROVIDER": "", "GRAG_AUTO_REFRESH_CODE": "0"}}
+    config_path = tmp_path / ".mcp.json"
+    config_path.write_text(json.dumps({"mcpServers": {"grag": entry}}))
+    config_before = config_path.read_bytes()
+    report, _, private = diagnostics.collect(argparse.Namespace(cmd="status", db=str(cfg.db_path), db_dir=None))
+    assert _files(cfg) == before
+    result = diagnostics.verify(report, private, "claude:project:grag", 30)
+    assert result["status"] == "failed", result
+    assert "Database replay failed" in result["detail"]
+    assert "separate copy" in result["hint"]
+    assert _files(cfg) == before
+    assert config_path.read_bytes() == config_before
+
+
 def _files(cfg):
     return {
         suffix: Path(f"{cfg.db_path}{suffix}").read_bytes()
@@ -430,7 +454,7 @@ def test_init_verifies_actual_corrupt_database_and_keeps_original_files(cfg, tmp
     before = _files(cfg)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-    monkeypatch.setattr("grag.project._stdio_entry", lambda db, port: {
+    monkeypatch.setattr("grag.project._stdio_entry", lambda db, port, **kwargs: {
         "command": sys.executable,
         "args": ["-m", "grag.cli", "--db", str(db), "mcp"],
         "env": {"GRAG_EMBED_PROVIDER": "", "GRAG_BUFFER_POOL_MB": "128"},

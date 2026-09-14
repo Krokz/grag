@@ -181,6 +181,19 @@ def test_remote_doctor_does_not_contact_provider(monkeypatch):
     assert next(c for c in checks if c["key"] == "model")["status"] == "unverified"
 
 
+def test_native_probe_preserves_hidden_pybind_import_failure(monkeypatch):
+    from ladybug import _backend
+
+    def missing():
+        raise ImportError("fixture missing dependent OpenSSL DLL")
+
+    monkeypatch.setattr(_backend, "_import_pybind_module", missing)
+    monkeypatch.setattr(readiness, "_native_check", lambda *a: "fixture fallback query passed")
+    result = readiness._worker({"kind": "engine", "prepare": False})
+    assert result["status"] == "ready"
+    assert "missing dependent OpenSSL DLL" in result["native"]["pybind_import_error"]
+
+
 def test_legacy_encoding_init_and_errors(tmp_path):
     project = tmp_path / "project-中文-🌍"
     project.mkdir()

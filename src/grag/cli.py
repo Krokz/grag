@@ -246,7 +246,8 @@ def main(argv: list[str] | None = None) -> int:
         retrieval.add_argument("--freshness", choices=["allow_stale", "wait", "require"], default="allow_stale")
         retrieval.add_argument("--json", action="store_true")
 
-    sub.add_parser("status", help="show whether a server is running for this database")
+    status = sub.add_parser("status", help="inspect database, server and client registrations without opening the graph")
+    status.add_argument("--json", action="store_true", help="machine-readable installation and registration discovery")
 
     start = sub.add_parser(
         "start",
@@ -327,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor.add_argument("--prepare", action="store_true", help="allow missing extension/model/grammar downloads; never opens the project DB")
     doctor.add_argument("--json", action="store_true", help="machine-readable install checks (exit 1 if required capabilities fail)")
     doctor.add_argument("--timeout", type=float, help="seconds per isolated probe (default 30; 300 with --prepare)")
+    doctor.add_argument("--verify-client", metavar="CLIENT:SCOPE:NAME", help="launch this saved registration and read its existing graph (may start an owner and refresh indexes); list ids with status")
 
     export = sub.add_parser(
         "export", help="capture a verified JSONL snapshot (including history and retry receipts)"
@@ -388,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument(
         "--client",
         default="auto",
-        choices=["auto", "claude", "cursor", "windsurf", "zed"],
+        choices=["auto", "claude", "cursor", "windsurf", "zed", "codex"],
         help="LLM client to configure (default: auto-detect)",
     )
     init.add_argument(
@@ -398,10 +400,19 @@ def main(argv: list[str] | None = None) -> int:
         help="port for the grag serve --with-mcp server (default: a per-project "
         "port derived from the database path, so projects don't collide)",
     )
-    init.add_argument(
+    init_ingest = init.add_mutually_exclusive_group()
+    init_ingest.add_argument(
         "--ingest",
         action="store_true",
         help="also run ingest-code on the current directory right away",
+    )
+    init_ingest.add_argument(
+        "--ingest-if-empty", action="store_true",
+        help="index the checkout only when its graph is empty or contains only the init verification record",
+    )
+    init.add_argument(
+        "--global-skill", action="store_true",
+        help="install only the user-level grag skill so it is available in new repos; no database or MCP registration",
     )
     init.add_argument(
         "--remove",
@@ -462,6 +473,22 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     from grag.project_files import ProjectConfigError
+
+    if args.cmd in {"doctor", "status"}:
+        import math
+
+        from grag.diagnostics import run as diagnostic_command
+
+        if args.cmd == "doctor" and args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout <= 0):
+            parser.error("doctor --timeout must be a finite positive number")
+        return diagnostic_command(args)
+
+    if args.cmd == "init" and args.global_skill:
+        try:
+            return _global_skill_command(args)
+        except (ProjectConfigError, OSError) as exc:
+            print(f"grag init: {exc}", file=sys.stderr)
+            return 1
 
     try:
         cfg = _config(args)
@@ -610,10 +637,6 @@ def main(argv: list[str] | None = None) -> int:
         except (GragError, ValidationError, OSError) as exc:
             print(f"grag {args.cmd}: {exc}", file=sys.stderr)
             return 1
-    elif args.cmd == "status":
-        from grag.admin import status_lines
-
-        print("\n".join(status_lines(cfg)))
     elif args.cmd == "start":
         from grag.admin import DaemonLifecycleError, start_daemon
 
@@ -658,22 +681,6 @@ def main(argv: list[str] | None = None) -> int:
         print(outcome.message)
         if not outcome.stopped:
             return 1
-    elif args.cmd == "doctor":
-        import json
-        import math
-
-        from grag.admin import doctor_lines
-        from grag.readiness import check_install, install_ready
-
-        if args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout <= 0):
-            parser.error("doctor --timeout must be a finite positive number")
-        checks = check_install(cfg, prepare=args.prepare, timeout=args.timeout)
-        ready = install_ready(checks)
-        if args.json:
-            print(json.dumps({"ready": ready, "checks": checks}))
-        else:
-            print("\n".join(doctor_lines(cfg, checks=checks)))
-        return 0 if ready else 1
     elif args.cmd == "export":
         # JSONL is a portable UTF-8 data stream, including supplementary Unicode.
         reconfigure = getattr(sys.stdout, "reconfigure", None)
@@ -775,7 +782,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             return _init_command(args, cfg)
-        except (ProjectConfigError, GragError, OSError) as exc:
+        except (ProjectConfigError, GragError, OSError, RuntimeError) as exc:
             print(f"grag init: {exc}", file=sys.stderr)
             return 1
     return 0
@@ -810,6 +817,10 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
     )
 
     project_root = find_root()
+    if args.ingest_if_empty and (args.server_url or cfg.server_url or args.remove):
+        raise ProjectConfigError("--ingest-if-empty needs a local checkout database and cannot be combined with --remove or a remote server.")
+    if args.client == "codex" and not args.no_mcp and not args.remove:
+        raise ProjectConfigError("Codex MCP registration is not managed by init. Use --client codex --no-mcp for local setup/CLI access, or --global-skill for the skill alone.")
     clients = (
         detect_clients(project_root) if args.client == "auto" else [args.client]
     )
@@ -894,7 +905,7 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
     ops: list[WriteOp | SkipOp | DeleteOp] = []
     mcp_ops = []
     if not args.no_mcp:
-        mcp_ops = plan_mcp_ops(clients, project_root, db_path, stdio=not args.url, port=port, server_url=server_url, server_db=args.server_db)
+        mcp_ops = plan_mcp_ops(clients, project_root, db_path, stdio=not args.url, port=port, server_url=server_url, server_db=args.server_db, auto_embed=not args.ingest_if_empty)
         ops.extend(mcp_ops)
     if not args.no_claude_md:
         ops.append(
@@ -916,6 +927,16 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
         preview_ops(ops)
         return 0
 
+    if args.ingest_if_empty:
+        from grag.onboarding import initial_mapping_needed
+
+        cfg.db_path = db_path
+        if db_path.exists() and not initial_mapping_needed(cfg):
+            import json
+
+            print(json.dumps({"status": "skipped", "reason": "existing_graph_content", "database": str(db_path)}))
+            return 0
+
     print("Writing:")
     apply_ops(ops)
 
@@ -928,7 +949,15 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
     elif mcp_ops:
         print("Client connection unverified (--no-verify). Rerun init to verify it.")
 
-    if args.ingest:
+    if args.ingest_if_empty:
+        import json
+
+        from grag.onboarding import ingest_if_empty
+
+        cfg.db_path = db_path
+        print("\nInitial project mapping:")
+        print(json.dumps(ingest_if_empty(cfg, project_root), ensure_ascii=False))
+    elif args.ingest:
         from grag.ingest.code import ingest_code_paths
 
         cfg.db_path = db_path
@@ -952,14 +981,32 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
         "picks up the config.\n"
         + (
             ""
-            if args.ingest
+            if args.ingest or args.ingest_if_empty
             else "  2. Index this repo (ask your agent to run ingest_code, "
             f"or run:\n       grag --db {db_path} ingest-code {project_root})\n"
         )
-        + f"  {'2' if args.ingest else '3'}. Browse the graph once the server "
+        + f"  {'2' if args.ingest or args.ingest_if_empty else '3'}. Browse the graph once the server "
         f"is up: http://127.0.0.1:{port}/\n"
         f"     (check with: grag --db {db_path} status)"
     )
+    return 0
+
+
+def _global_skill_command(args: argparse.Namespace) -> int:
+    from grag.project import apply_ops, plan_global_skill_ops, preview_ops
+    from grag.project_files import ProjectConfigError
+
+    if any((args.db, args.db_dir, args.port, args.ingest, args.ingest_if_empty,
+            args.server_url, args.server_db, args.url, args.no_mcp,
+            args.no_claude_md, args.no_skill, args.no_verify)):
+        raise ProjectConfigError("--global-skill supports --client, --dry-run and --remove only; it does not configure a project or database.")
+    ops = plan_global_skill_ops(args.client, remove=args.remove)
+    if args.dry_run:
+        preview_ops(ops)
+    else:
+        apply_ops(ops)
+        print("Global grag skill removed." if args.remove else
+              "Global grag skill installed. Open a repository and invoke /grag (or your harness's skill picker). No database was opened.")
     return 0
 
 

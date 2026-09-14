@@ -568,7 +568,9 @@ def create_server(
     (run() closes it)."""
     if registry is None:
         registry = ServiceRegistry(config)
-    server = _GragMCPServer("grag", instructions=_INSTRUCTIONS)
+    from grag import __version__
+
+    server = _GragMCPServer("grag", instructions=_INSTRUCTIONS, version=__version__)
 
     @server.tool(name="describe_schema", structured_output=False, description=_doc(describe_schema))
     @_mcp_result

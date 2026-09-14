@@ -188,7 +188,7 @@ def test_status_reports_running_server(tmp_path, monkeypatch):
     assert "9.9.9" in text
 
 
-def test_status_cleans_stale_pidfile(tmp_path, monkeypatch):
+def test_status_preserves_stale_pidfile(tmp_path, monkeypatch):
     db = tmp_path / "kb.lbdb"
     admin.run_dir().mkdir(parents=True, exist_ok=True)
     admin.pidfile_path(db).write_text(
@@ -197,7 +197,7 @@ def test_status_cleans_stale_pidfile(tmp_path, monkeypatch):
     monkeypatch.setattr(admin, "probe_health", lambda port, host="127.0.0.1": None)
     monkeypatch.setattr(admin, "_pid_alive", lambda pid: False)
     "\n".join(admin.status_lines(GragConfig(db_path=db)))
-    assert admin.read_pidfile(db) is None
+    assert admin.read_pidfile(db) is not None
 
 
 def test_stop_without_pidfile_reports_nothing_to_stop(tmp_path):
@@ -757,7 +757,7 @@ def test_stale_cleanup_failure_is_reported_truthfully(tmp_path, monkeypatch):
 
     assert outcome.stopped is False
     assert "could not be safely removed" in outcome.message
-    assert "could not be safely removed" in text
+    assert "stale pidfile retained" in text
     assert "removed a stale pidfile" not in text
 
 
@@ -1073,7 +1073,7 @@ def test_status_reports_mcp_off(tmp_path, monkeypatch):
         "find_server",
         lambda target: admin.ServerInfo(41001, "0.4", True, 123, mcp_enabled=False),
     )
-    monkeypatch.setattr(admin, "list_servers", lambda current_db=None: [])
+    monkeypatch.setattr(admin, "list_servers", lambda current_db=None, **kw: [])
     text = "\n".join(admin.status_lines(GragConfig(db_path=db)))
     assert "mcp:     off" in text
     assert "/mcp" not in text

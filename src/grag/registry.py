@@ -45,6 +45,13 @@ class ServiceRegistry:
             return []
         return sorted(f.stem for f in root.glob("*.lbdb"))
 
+    def peek(self, db: str | None = None) -> GragService | None:
+        """Inspect an already loaded owner without opening a database or workers."""
+        path = self.config.db_path if self.config.db_dir is None else self._resolve(db)
+        key = str(path if str(path) == ":memory:" else path.resolve())
+        with self._lock:
+            return self._services.get(key)
+
     @property
     def closing(self) -> bool:
         with self._lock:

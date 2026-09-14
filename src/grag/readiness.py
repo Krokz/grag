@@ -185,7 +185,21 @@ def _model_check(settings: dict[str, Any], prepare: bool) -> str:
 
 def _worker(payload: dict) -> dict:
     kind, prepare = payload["kind"], payload["prepare"]
+    native: dict = {}
     try:
+        if kind == "engine":
+            from grag.native import prepare_native_runtime
+
+            prepare_native_runtime()
+            # Ladybug's fallback swallows this ImportError. Preserve its cause
+            # in this isolated probe before testing the selected backend.
+            from ladybug import _backend
+
+            try:
+                module = _backend._import_pybind_module()
+                native["pybind_module"] = module.__file__
+            except ImportError as exc:
+                native["pybind_import_error"] = str(exc)
         if kind in {"engine", "fts", "vector"}:
             detail = _native_check(kind, prepare, payload.get("statement_timeout_ms", 30_000))
         elif kind == "model":
@@ -194,7 +208,13 @@ def _worker(payload: dict) -> dict:
             detail = _grammar_check(kind.split(":", 1)[1], prepare)
         else:
             raise ValueError(f"Unknown probe: {kind}")
-        return {"status": "ready", "detail": detail}
+        if kind == "engine":
+            module = sys.modules.get("ladybug._lbug_capi")
+            if module is not None:
+                native["capi_module"] = module.__file__
+                native["capi_library"] = getattr(getattr(module, "_LIB", None), "_name", None)
+            native["bundled_windows_runtime"] = str(Path(__file__).parent / "_runtime")
+        return {"status": "ready", "detail": detail, **({"native": native} if native else {})}
     except Exception as exc:  # noqa: BLE001 — diagnostic boundary; report all native/provider failures
         from grag.core.errors import GragError
 
@@ -206,7 +226,8 @@ def _worker(payload: dict) -> dict:
         )
         if isinstance(exc, GragError) and exc.hint:
             hint = ""
-        return {"status": "unavailable", "detail": f"{type(exc).__name__}: {exc} {hint}".strip()[:4096]}
+        return {"status": "unavailable", "detail": f"{type(exc).__name__}: {exc} {hint}".strip()[:4096],
+                **({"native": native} if native else {})}
 
 
 if __name__ == "__main__":

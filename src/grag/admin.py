@@ -540,12 +540,14 @@ def _health_verifies_registration(
 
 
 def _server_from_registration(
-    path: Path, data: dict, *, current_id: str | None = None
+    path: Path, data: dict, *, current_id: str | None = None, cleanup: bool = True
 ) -> RunningServer | None:
     pid = _int_field(data.get("pid"))
     if pid is None or pid <= 0:
         return None
     if not _pid_alive(pid):
+        if not cleanup:
+            return None
         removed = _remove_registration_if_matches(
             path, owner_pid=pid, shutdown_token=data.get("shutdown_token")
         )
@@ -586,7 +588,7 @@ def _server_from_registration(
     )
 
 
-def list_servers(current_db: Path | None = None) -> list[RunningServer]:
+def list_servers(current_db: Path | None = None, *, cleanup: bool = True) -> list[RunningServer]:
     """Every live grag server registered under ~/.grag/run/, system-wide.
 
     One pidfile per server target is written by ``grag serve``; entries whose
@@ -601,7 +603,7 @@ def list_servers(current_db: Path | None = None) -> list[RunningServer]:
         if data is None:
             continue
         try:
-            server = _server_from_registration(path, data, current_id=current_id)
+            server = _server_from_registration(path, data, current_id=current_id, cleanup=cleanup)
         except _RegistrationCleanupError:
             continue
         if server is not None:
@@ -668,17 +670,7 @@ def status_lines(config: GragConfig) -> list[str]:
         elif stale is not None and stale_pid is None:
             lines.append("  (pidfile is malformed; ignored)")
         elif stale_pid is not None and not _pid_alive(stale_pid):
-            removed = _remove_registration_if_matches(
-                pidfile_path(target),
-                owner_pid=stale_pid,
-                shutdown_token=stale.get("shutdown_token") if stale else None,
-            )
-            if removed:
-                lines.append("  (removed a stale pidfile from a previous run)")
-            else:
-                lines.append(
-                    "  (stale pidfile changed or could not be safely removed)"
-                )
+            lines.append("  (stale pidfile retained; inspection does not remove registrations)")
     log = log_path(target)
     if log.exists():
         lines.append(f"log:       {log}")
@@ -689,7 +681,7 @@ def status_lines(config: GragConfig) -> list[str]:
     else:
         lines.append("embedder:  off — FTS-only retrieval (set GRAG_EMBED_PROVIDER)")
 
-    servers = list_servers(current_db=target)
+    servers = list_servers(current_db=target, cleanup=False)
     if servers:
         lines.append(f"all grag servers on this system ({len(servers)}):")
         for s in servers:
@@ -1336,15 +1328,6 @@ def doctor_lines(config: GragConfig, *, checks: list[dict] | None = None) -> lis
     lines.append("")
     lines.extend(status_lines(config))
 
-    # Code-index staleness: prefer the running server (no lock contention);
-    # Offline diagnostics must never replay/checkpoint a user's database, even
-    # read-only native opens may replay a WAL or crash on corrupt files.
-    repo_rows: list[dict] | None = None
-    info = find_server(server_target(config))
-    if info is not None:
-        repo_rows = _repo_rows_http(info.port, info.host, config.api_token)
-    if repo_rows:
-        lines.append("")
-        lines.append("code index:")
-        lines.extend(_repo_staleness_lines(repo_rows))
+    # Graph reads can schedule refreshes. The CLI's richer diagnostic collector
+    # uses a capability-gated cached status endpoint or explicit MCP verification.
     return lines

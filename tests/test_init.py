@@ -42,6 +42,16 @@ def test_detect_clients_cursor(tmp_path, monkeypatch):
     assert "cursor" in detect_clients(tmp_path)
 
 
+def test_detect_project_only_windsurf_and_install_skill(tmp_path, monkeypatch):
+    from grag.project import plan_skill_ops
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
+    (tmp_path / ".windsurf").mkdir()
+    clients = detect_clients(tmp_path)
+    assert clients == ["windsurf"]
+    assert any(op.path == tmp_path / ".windsurf/skills/grag/SKILL.md" for op in plan_skill_ops(clients, tmp_path))
+
+
 def test_detect_clients_cursor_from_home_dir(tmp_path, monkeypatch):
     """A user-level ~/.cursor means the user runs Cursor — configure it even in
     a fresh project that has no .cursor dir yet."""
@@ -264,6 +274,15 @@ def test_stdio_entry_omits_embed_env_without_fastembed(tmp_path, monkeypatch):
     assert "env" not in entry
 
 
+@pytest.mark.parametrize("client", ["claude", "cursor", "windsurf", "zed"])
+def test_first_use_does_not_enable_embeddings_from_package_presence(tmp_path, monkeypatch, client):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr("grag.project._fastembed_available", lambda: True)
+    ops = plan_mcp_ops([client], tmp_path, tmp_path / "kb.lbdb", auto_embed=False)
+    entry = json.loads(ops[0].content)["context_servers" if client == "zed" else "mcpServers"]["grag"]
+    assert "env" not in (entry["command"] if client == "zed" else entry)
+
+
 def test_grag_bin_prefers_bare_name_for_global_install(monkeypatch):
     import grag.project as project
 
@@ -356,11 +375,12 @@ def test_skill_ops_claude_and_cursor_paths(tmp_path, monkeypatch):
         }
 
 
-def test_skill_ops_skip_clients_without_skill_support(tmp_path, monkeypatch):
+def test_skill_ops_windsurf_and_zed_paths(tmp_path, monkeypatch):
     from grag.project import plan_skill_ops
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "homeless")
-    assert plan_skill_ops(["windsurf", "zed"], tmp_path) == []
+    paths = {op.path for op in plan_skill_ops(["windsurf", "zed"], tmp_path) if op.path.name == "SKILL.md"}
+    assert paths == {tmp_path / ".windsurf/skills/grag/SKILL.md", tmp_path / ".agents/skills/grag/SKILL.md"}
 
 
 def test_skill_ops_include_agents_when_codex_present(tmp_path, monkeypatch):

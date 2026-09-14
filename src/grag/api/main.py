@@ -331,7 +331,16 @@ def create_app(config: GragConfig) -> FastAPI:
     # -- endpoints (contract: see grag.core.types docstring) --------------------
 
     @app.get("/api/index/status")
-    def index_status(request: Request, policy: ReadPolicyParam) -> dict:
+    def index_status(request: Request, policy: ReadPolicyParam, check: bool = True) -> dict:
+        if not check:
+            from grag.diagnostics import runtime_identity
+
+            name = request.query_params.get("db") or request.headers.get(DB_HEADER)
+            service = registry.peek(name)
+            return {"observed_only": True, "loaded": service is not None,
+                    "database_id": database_identity(service.config.db_path) if service else None,
+                    "runtime": runtime_identity(),
+                    "index": service.refresh_status(detail=True) if service else None}
         service = resolve(request)
         report = service.read_freshness(policy)
         detail = service.refresh_status(detail=True) or {"roots": [], "running": False}
@@ -350,7 +359,7 @@ def create_app(config: GragConfig) -> FastAPI:
             "status": ("shutting_down" if registry.closing or (shutdown and shutdown["state"] != "open")
                        else "reopen_required" if runtime and runtime["writer_state"] != "ready" else "ok"),
             "version": grag.__version__,
-            "capabilities": {"ingestion_scope": 2, "snapshot_format": 2},
+            "capabilities": {"ingestion_scope": 2, "snapshot_format": 2, "passive_diagnostics": 1},
             "database_id": identity,
             "server_id": database_identity(server_target),
             "pid": os.getpid(),
