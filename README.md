@@ -44,7 +44,7 @@ installs agent guidance, and configures a shared server that starts on first use
 `.gragignore`, and skips nested repositories/worktrees and symlinks. Choose the
 intended roots; see [scope and language coverage](https://krokz.github.io/grag/guides/code/).
 
-**Windows:** grag 0.9.0 Windows x64 wheels include the required OpenSSL DLLs.
+**Windows:** grag 0.9.0+ Windows x64 wheels include the required OpenSSL DLLs.
 Some agent harnesses require starting the shared server in a separate terminal.
 The [Windows installation notes](https://krokz.github.io/grag/installation/) cover
 that case, source builds and offline readiness checks.

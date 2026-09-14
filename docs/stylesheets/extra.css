@@ -3,10 +3,110 @@
   --md-code-font: ui-monospace, "SFMono-Regular", Consolas, monospace;
 }
 
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #14594f;
+  --md-accent-fg-color: #087b68;
+  --grag-surface: #f5f8f7;
+  --grag-border: #dce5e1;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #164b45;
+  --md-accent-fg-color: #72d9bb;
+  --md-typeset-a-color: #72d9bb;
+  --grag-surface: #202e30;
+  --grag-border: #3d5051;
+}
+
+.md-typeset {
+  font-size: 0.82rem;
+  line-height: 1.7;
+}
+
+.md-typeset > p,
+.md-typeset > ul,
+.md-typeset > ol {
+  max-width: 76ch;
+}
+
 .md-typeset h1 {
   color: var(--md-default-fg-color);
   font-weight: 700;
   letter-spacing: -0.035em;
+  margin-bottom: 1rem;
+  line-height: 1.2;
+}
+
+.md-typeset h2 {
+  font-size: 1.3rem;
+  font-weight: 650;
+  border-top: 1px solid var(--grag-border);
+  padding-top: 1.25rem;
+  margin-top: 2.1rem;
+  letter-spacing: -0.02em;
+}
+
+.md-typeset h3 {
+  font-weight: 650;
+  margin-top: 1.5rem;
+}
+
+.md-typeset :is(h2, h3, h4) {
+  scroll-margin-top: 7rem;
+}
+
+.md-typeset .grag-lead {
+  font-size: 1rem;
+  color: var(--md-default-fg-color--light);
+  max-width: 62ch;
+}
+
+.md-typeset .grag-eyebrow {
+  color: var(--md-typeset-a-color);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 0.5rem;
+}
+
+.md-typeset .grid.cards {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin: 1.2rem 0;
+}
+
+.md-typeset .grid.cards > ul > li {
+  background: var(--grag-surface);
+  border: 1px solid var(--grag-border);
+  border-radius: 0.5rem;
+  padding: 1.1rem;
+  box-shadow: none;
+}
+
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--md-typeset-a-color);
+  box-shadow: none;
+}
+
+.md-typeset .grid.cards p {
+  margin-block: 0.6rem;
+}
+
+.md-typeset .grid.cards a {
+  font-weight: 650;
+}
+
+.md-typeset .grag-route {
+  background: var(--grag-surface);
+  border-left: 3px solid var(--md-typeset-a-color);
+  border-radius: 0 0.35rem 0.35rem 0;
+  padding: 0.7rem 1rem;
+  margin: 1.2rem 0;
+}
+
+.md-typeset .grag-route p {
+  margin: 0;
 }
 
 .md-typeset .md-button {
@@ -14,6 +114,66 @@
   border-radius: 0.3rem;
 }
 
+.md-typeset .md-button:not(.md-button--primary) {
+  color: var(--md-typeset-a-color);
+  border-color: var(--md-typeset-a-color);
+}
+
 .md-typeset table:not([class]) {
   font-size: 0.75rem;
+  line-height: 1.55;
+  border-radius: 0.35rem;
+}
+
+.md-typeset table:not([class]) th {
+  background: var(--grag-surface);
+}
+
+.md-typeset table:not([class]) :is(td, th) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.md-typeset :is(.admonition, details) {
+  font-size: 0.77rem;
+  box-shadow: none;
+}
+
+.md-typeset details.question {
+  border-color: var(--grag-border);
+}
+
+.md-typeset details.question > summary {
+  background-color: var(--grag-surface);
+}
+
+.md-typeset details.question > summary::before,
+.md-typeset details.question > summary::after {
+  background-color: var(--md-typeset-a-color);
+}
+
+.md-typeset :is(pre, .highlight) {
+  border-radius: 0.35rem;
+}
+
+.md-typeset a:focus-visible,
+.md-typeset summary:focus-visible {
+  outline: 2px solid var(--md-accent-fg-color);
+  outline-offset: 3px;
+}
+
+@media (max-width: 600px) {
+  .md-typeset .grid.cards {
+    grid-template-columns: 1fr;
+  }
+
+  .md-typeset h1 {
+    font-size: 1.65rem;
+  }
+}
+
+@media print {
+  .md-typeset .grid.cards {
+    display: block;
+  }
 }

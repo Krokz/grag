@@ -1,6 +1,13 @@
 # Servers and multiple clients
 
-A server is never required — the CLI and library work directly on the `.lbdb` file. But when you want the browser UI or a shared MCP endpoint, grag can run one as a background daemon (a convenience front-end over the same embedded engine, not a database service you have to operate). Daemons — whether auto-served for an MCP client or started explicitly — register themselves, so you never have to hunt processes:
+Run one owner when you want a browser UI or several clients sharing a database.
+The CLI and Python library can also work directly while the file has no other owner.
+{ .grag-lead }
+
+## Start and manage a local server
+
+Auto-served and explicitly started daemons register themselves. Use the selected
+database's commands to manage them:
 
 ```bash
 grag --db ~/.grag/myproj.lbdb start    # launch in the background, frees the terminal
@@ -8,7 +15,7 @@ grag --db ~/.grag/myproj.lbdb restart  # relaunch (picks up new code after an up
 grag --db ~/.grag/myproj.lbdb status   # selected server status plus this user's registered servers
 grag --db ~/.grag/myproj.lbdb stop     # stop this database's server
 grag stop --all                        # stop this user's managed grag servers
-grag doctor                            # extras, embedder, server, code-index staleness
+grag doctor                            # install checks, selected owner and client discovery
 ```
 
 `grag start` binds a stable per-database port by default (pass `--port` to override, `--no-mcp` for UI+REST only) and inherits your environment, so `GRAG_EMBED_PROVIDER=fastembed grag start` carries the embedder into the daemon.
@@ -19,6 +26,8 @@ database close cleanly on every platform. After upgrading from grag 0.4.0, its
 older pidfiles cannot be health/PID-verified; inspect the PIDs shown by
 `grag status`, then use `grag stop --all --force` (or `grag restart --force` for
 one target) once. Stop/refusal failures return a non-zero exit code.
+
+### Clean shutdown
 
 Shutdown stops accepting work, marks queued jobs `cancelled`, and drains active
 ingestion, code verification, requests, and embedding before closing the database.
@@ -38,12 +47,18 @@ to inspect `state`, `engine_closed`, active operations, job outcomes, and the
 embedding worker. Repeated close calls wait on the same drain. A closed service
 or registry cannot be reused; create a new instance after shutdown completes.
 
+### Bind address and logs
+
 Binding the REST/UI server beyond loopback requires `GRAG_API_TOKEN`; grag now
 refuses an unauthenticated `--host 0.0.0.0`, `--host ::`, hostname, or LAN
 address. `restart` preserves the recorded host, port, and MCP mode unless you
 explicitly override them; a custom `--mcp-path` is preserved as well.
 
-Daemon output lands in `~/.grag/logs/<db>-<id>.log` (not /dev/null), so an embedding failure or startup crash is always diagnosable. `grag doctor` also reports, per ingested repo, whether the code index is behind git HEAD ("index is 3 commit(s) behind — re-run ingest-code").
+Daemon output lands in `~/.grag/logs/<db>-<id>.log`. Check it for embedding failures
+and startup crashes. In grag 0.10.0, status/doctor preserve stale
+registration files and inspect cached index observations without triggering
+refresh; explicit `stop` retains its stale-registration cleanup. See
+[installation discovery and client verification](troubleshooting.md#discover-the-installation-and-saved-client).
 
 ## One database owner, multiple harnesses
 
@@ -53,7 +68,7 @@ they reuse its mapping and port. The configured stdio proxies connect to the own
 Windows harness restrictions may require [starting that owner in a separate
 terminal](../installation.md).
 
-CLI `remember`, `search`, `context`,
+CLI `remember`, `search`, `context` (plus `inspect` and `retire` from 0.10.0),
 `ingest` and `ingest-code` locate the selected database's registered owner and use
 its API at the registered host. Set `GRAG_API_TOKEN` in the CLI environment when
 that owner requires authentication. They open the file directly only
@@ -64,7 +79,9 @@ After upgrading, restart the owner before using the new ingestion scope options.
 
 There are two distinct ways to hold several projects, depending on whether they **relate**:
 
-**A. Related projects → one shared `.lbdb`.** Ingest several repos into the same
+### Related projects: one shared database
+
+ Ingest several repos into the same
 database to query their separate `Repo` nodes together and link authored decisions
 across projects. Automatic cross-repo edges depend on parser coverage; Python,
 JS/TS and Go static resolution does not infer arbitrary cross-service calls.
@@ -79,7 +96,9 @@ MATCH (r1:Repo)-[:CONTAINS_REPO_MODULE]->(a:Module)-[:IMPORTS]->(b:Module)<-[:CO
 WHERE r1.id <> r2.id RETURN a.id, b.id
 ```
 
-**B. Unrelated projects → separate `.lbdb` files.** One file = one isolated universe (no shared entities, no cross-db queries), so a throwaway experiment never pollutes a real project's graph. This is the default local-first pattern: **one `.lbdb` per project, per developer**, each queryable locally with zero per-token retrieval cost. To serve many of them at once, opt into multi-db mode with `--db-dir`:
+### Unrelated projects: separate databases
+
+ One file = one isolated universe (no shared entities, no cross-db queries), so a throwaway experiment never pollutes a real project's graph. This is the default local-first pattern: **one `.lbdb` per project, per developer**, each queryable locally with zero per-token retrieval cost. To serve many of them at once, opt into multi-db mode with `--db-dir`:
 
 ```bash
 grag --db-dir ~/kb serve --with-mcp --port 8472  # shared REST/UI and MCP owner
@@ -110,7 +129,9 @@ Cursor / `.cursor/mcp.json` (per window, one header per project):
 
 The server is localhost-only by default, and db names are routing hints, not auth — resolution rejects absolute paths and `..`. Direct stdio (`grag --db knowledge.lbdb mcp`) opens the database itself and is suitable for a single client. Use init-generated auto-serve proxies for shared access.
 
-**HTTP security posture.** grag has a shared bearer-token boundary, with no
+## HTTP access and security
+
+ grag has a shared bearer-token boundary, with no
 per-user accounts or per-database permissions. Without a token, direct loopback
 callers are trusted. A Host-header allow-list (loopbacks plus the bind host)
 blocks DNS rebinding, and CORS grants no cross-origin access unless configured
@@ -138,6 +159,6 @@ grag init --server-url https://grag.example.com
 What the server does differently from a laptop:
 
 - **Remote proxy mode.** `grag mcp --server-url URL` bridges stdio to the remote server, never spawns a local daemon, and replays the MCP handshake after reconnecting. Repeated outages can exhaust retries; an interrupted tool call may need explicit retry or stored-state inspection. The proxy pins database identity and refuses a silent switch. Plain HTTP beyond loopback requires `GRAG_ALLOW_INSECURE_HTTP=1`.
-- **Background ingestion.** Code parsing and relationship resolution happen before atomic graph publication. Incremental updates include content, parser and dependency changes; unchanged files are still parsed. Queued ingestion lets the HTTP call return a job ID while other readers use committed data. Native resource contention and write-side work can still affect latency. By default, stored-node embeddings run on a separate worker; query embedding remains part of semantic search. Use `POST /api/jobs/ingest/code` or MCP `ingest_code(background=true)`, then poll the job.
+- **Background ingestion.** Code parsing and relationship resolution happen before atomic graph publication. Incremental updates include content, parser and dependency changes; files are still read and hashed; grag 0.10.0 reuses unchanged parses within an owner. Queued ingestion lets the HTTP call return a job ID while other readers use committed data. Native resource contention and write-side work can still affect latency. By default, stored-node embeddings run on a separate worker; query embedding remains part of semantic search. Use `POST /api/jobs/ingest/code` or MCP `ingest_code(background=true)`, then poll the job.
 - **Specs become a graph.** `grag ingest --sections doc.md` (MCP: `ingest_docs`) turns the heading hierarchy into `Document → Section` nodes (`SUBSECTION_OF`, `NEXT_SECTION`), chunks each section's body under it (`Chunk -IN_SECTION-> Section`), and links resolvable backtick-mentioned symbols in the code graph (`MENTIONS_FUNCTION` / `MENTIONS_CLASS` / `MENTIONS_MODULE` / `MENTIONS_CONSTANT`). Empty `IMPLEMENTS` (Function→Section) / `IMPLEMENTS_CLASS` tables are defined for an agent to fill with the semantic spec↔code links.
 - **Online backup.** `GET /api/export` (CLI: `grag export --url URL -o backup.jsonl`) captures one committed state including history and retry receipts, then streams the completed snapshot. Writes pause during capture, not during download; the CLI validates completion before publication. [Restore into a separate verified copy](recovery.md). Failed WAL replay requires offline `grag recover`; a server launch never silently chooses lossy recovery.

@@ -1,5 +1,10 @@
 # Code freshness
 
+Verify that registered code sources match the graph before relying on a citation.
+{ .grag-lead }
+
+## What gets checked
+
 Serving processes check the
 contents of supported files in each registered scope, plus Git HEAD when present.
 Plain folders work too; changes do not depend on modification timestamps. Checks
@@ -8,6 +13,8 @@ verification job. Normal reads trigger a check at most every
 `GRAG_AUTO_REFRESH_INTERVAL_S` seconds (default 30); failed work remains visible
 and retries on subsequent reads with exponential backoff, from 1 to 300 seconds.
 Waiting reads drive retries within their deadline. An idle server does not poll.
+
+## Choose a read policy
 
 MCP `describe_schema`, `cypher_query`, `search_knowledge`, and `get_context` accept
 `freshness` and `freshness_timeout_ms`. The corresponding Python service methods
@@ -26,6 +33,8 @@ the normal check interval, respect failure backoff, and leave shared work runnin
 after a timeout. For example, call `search_knowledge(query="where is X defined",
 freshness="require", freshness_timeout_ms=10000)` when an answer depends on edits.
 
+## Interpret the result
+
 Read responses include `freshness: {status, checked_at, timed_out}` in JSON or the
 MCP/text footer; JSONL export carries it in the `X-Grag-Freshness` header. Status is
 `fresh`, `checking`, `refreshing`, `stale`, `error`, `unknown`, or `disabled`.
@@ -37,6 +46,8 @@ does not imply that source files and graph capture form one atomic snapshot. Ins
 generation, saved options, error, and retry delay. It uses the selected database
 and normal authentication; anonymous `/api/health` exposes only the default
 database's summary counters and freshness under `code_index`.
+
+## Enroll and maintain a scope
 
 An explicit `ingest_code` saves its paths, `calls`, `max_file_kb`, `incremental`, and enclosing `root`
 options for later refreshes and restarts. File-only scopes stay file-only; partial

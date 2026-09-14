@@ -81,6 +81,32 @@ database files, and verifies ingestion, recall, corrections, fresh citations,
 retry handling, and memory after restarting MCP. It uses full-text search; local
 embeddings and language grammars may need an initial download before offline use.
 
+## Qualify skill behavior in a real harness
+
+SDK and packaging tests do not establish whether a model discovers a skill or
+loads its references. When changing the bundle, also use fresh authenticated
+Claude Code and Cursor sessions with a disposable repository and database.
+Keep the harness's normal permissions and approve only the fixture's grag tools
+and commands. Confirm the CLI inside the agent's shell and the written MCP
+launcher both resolve to the candidate installation; a login shell can change
+`PATH`. A successful login-status check alone does not prove model requests work.
+
+Check these cases with actual tool activity and independently read back the graph:
+
+| Case | Evidence to check |
+|---|---|
+| Project skill, then personal skill in a new repo | `/grag` loads the operations reference and maps supported source once; a cited symbol exists and ignored source is absent. |
+| Fresh session with existing code or only authored memory | Existing records survive; no automatic widening, duplicate memory or forced scan. |
+| Explicit memory correction and review | Memory reference loads when needed; revision guards, source and agent attribution accompany the edit; earlier values remain queryable in history. |
+| Explicit code scope change | Ingestion reference loads; registered paths match the request and authored memory survives. |
+| Overlapping skill directories | Observe the selected reference path; keep installed copies synchronized instead of assuming project precedence. |
+
+Record harness version, model, installation paths, prompts, tool calls and stored
+outcomes. A passing session is a behavioral sample, not a guarantee that every
+model follows every instruction. Keep essential storage/scope checks in grag's
+runtime. Stop the fixture's server and restore any temporary personal skill when
+finished. Never replace an existing personal bundle just to run this check.
+
 
 ## Checks and evaluation
 
@@ -130,6 +156,20 @@ README to installation, the first memory loop and links. Update the version on
 the overview page when the documented release changes. Review deployment changes
 through the same dev/main flow; documentation publication does not require a
 PyPI version bump or tag.
+
+### Keep pages easy to scan
+
+- Start a guide with its outcome and smallest useful example. Put language-specific
+  behavior and detailed contracts in the reference pages, linked where needed.
+- Use descriptive headings so the page outline and search results lead to an
+  answer. Keep tables focused on one family of commands or settings.
+- Use content tabs for equivalent alternatives, such as CLI/MCP or installers.
+  Use collapsible details for optional explanations; keep prerequisites and
+  recovery warnings visible.
+- Preserve existing page paths and heading anchors when moving content. Leave
+  a short explanation and link at an old target rather than duplicating the guide.
+- Preview desktop, narrow screens and both color schemes. Check search, tabs,
+  navigation and internal links after a strict build.
 
 ## Demo
 

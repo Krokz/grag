@@ -1,6 +1,11 @@
 # Resource limits
 
-Normal use needs no additional configuration. Requests are
+Bounded requests protect the local graph. Normal use needs no extra configuration.
+{ .grag-lead }
+
+## Requests and retrieval
+
+ Requests are
 limited to 2 MiB, upserts to 1,000 total nodes plus edges, and searches/context
 lookups to 64 seeds/IDs and 64 labels. Search shares a pool of at most 1,024
 candidates per modality across labels; narrowing labels gives each more room.
@@ -8,6 +13,8 @@ Neighborhood expansion shares 1,024 paths across seeds (at most 512 per seed)
 and reports `expansion_limited` when clipped. Exact cosine still scores the
 eligible vectors; hitting a work limit returns an error instead of silently
 sampling vectors or presenting partial ranking as exact.
+
+## Read work and response size
 
 Read operations share limits of 64 MiB of decoded-result JSON, 100,000 result
 rows and 4,096 statements. Lexical processing shares 4 MiB of text and 200,000
@@ -22,6 +29,8 @@ not a process-memory ceiling: native query execution and a single decoded value
 can allocate before Python checks them. The native buffer pool and statement
 timeout remain in force.
 
+## Jobs and source scans
+
 Each database admits at most 32 active operations and 16 running/queued jobs.
 A full queue returns `resource_limit`; poll existing jobs before resubmitting.
 Finished job history is bounded to 200 entries. Admission reserves room for
@@ -31,6 +40,12 @@ marked as truncated. Source scans share 256 MiB and
 100,000 directory/file entries across roots and verification passes. An incomplete
 scan never certifies freshness. Document batches accept at most 256 documents,
 with 2 MiB of loaded file content; narrow paths or split batches when needed.
+New in 0.10.0: explicit JSON document mode also limits nesting to 64
+levels. It indexes literal source text, not a resolved JSON Schema graph. Invalid
+files warn and prevent deletion synchronization; byte/batch limit failures abort
+ingestion. See [document formats](../guides/documents.md).
+
+## History and receipt capacity
 
 Authored history keeps at most 1,000 entries per node, 100,000 overall and a
 conservative 256 MiB storage allowance. Retry receipts keep at most 100,000

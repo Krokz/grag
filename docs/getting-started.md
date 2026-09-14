@@ -1,5 +1,9 @@
 # Your first session
 
+A first session is complete when your agent can retrieve a source citation and
+read back a saved decision.
+{ .grag-lead }
+
 ## 1. Install
 
 Use Python 3.10–3.14 and a stable command on PATH:
@@ -16,22 +20,37 @@ first-use downloads and offline preparation.
 
 ## 2. Connect an agent
 
-```bash
-grag init
-```
+=== "Auto-detect"
+
+    ```bash
+    grag init
+    ```
+
+=== "Claude Code"
+
+    ```bash
+    grag init --client claude
+    ```
+
+=== "Cursor"
+
+    ```bash
+    grag init --client cursor
+    ```
 
 Init detects Claude Code, Cursor, Windsurf or Zed, saves a checkout mapping in
 Git-ignored `.grag/project.json`, and configures an MCP connection and agent guidance.
 Use `grag init --client cursor` or `--client claude` when choosing explicitly.
 `grag init --dry-run` previews changes before applying.
 
-Init also initializes the written MCP registration,
-lists its tools, and writes/reads one non-searchable `GragSetup:connection` record.
-It prints the registration, resolved command and selected database. Verification
-failure returns a nonzero exit code while preserving the saved configuration.
-Use `--no-verify` for offline configuration preparation; readiness remains unverified.
-This checks the connection from your terminal environment. Reconnect the actual
-harness too: its environment and permissions can differ.
+??? info "What init verifies"
+
+    Init also initializes the written MCP registration, lists its tools, and writes/reads one non-searchable `GragSetup:connection` record.
+    It prints the registration, resolved command and selected database. Verification
+    failure returns a nonzero exit code while preserving the saved configuration.
+    Use `--no-verify` for offline configuration preparation; readiness remains unverified.
+    This checks the connection from your terminal environment. Reconnect the actual
+    harness too: its environment and permissions can differ.
 
 The default new database is `~/.grag/<project-name>-<checkout-id>.lbdb`. Run commands
 from anywhere inside the checkout to reuse that mapping. [Projects and relocation](guides/projects.md)
@@ -42,6 +61,18 @@ server on first use. `grag status` prints its address and log location. On Windo
 follow the separate-terminal command if the harness prevents independent startup.
 
 ## 3. Index the intended source
+
+!!! note "First-use skill setup in 0.10.0"
+    grag 0.10.0 adds `grag init --global-skill --client claude`
+    (use `cursor` or `codex` for those harnesses). Install it once to make the
+    grag skill available in new repositories, then invoke `/grag` or select the
+    skill in your harness. The instructions nudge the agent to run
+    `grag init --ingest-if-empty`: it maps the current checkout only when the graph
+    is absent, empty, or contains just the init verification marker. Existing
+    code, documents or authored memory suppress the automatic setup and scan.
+    This is agent guidance, so execution still depends on the harness's tool
+    permissions. [Project setup](guides/projects.md#skills-in-new-repositories)
+    covers installation, updates and removal.
 
 Ask the agent:
 

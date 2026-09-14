@@ -4,29 +4,37 @@ Start with BM25. Add embeddings when semantic questions justify the model downlo
 indexing time and memory on your workload. Exact cosine similarity measures vector
 similarity; it does not establish that a retrieved fact answers the question.
 
+## Enable a local model
+
 Install the optional extra using the same package manager/environment as grag:
 
 ```bash
 pip install 'gragdb[embed-local]'
 ```
 
-When `embed-local` is installed, a later `grag init` writes
+When `embed-local` is installed, a later ordinary `grag init` writes
 `GRAG_EMBED_PROVIDER=fastembed` into its MCP configuration. Preview that change
 with `grag init --dry-run`. An already running server keeps its previous settings
 until restarted.
 
-On macOS/Linux:
+The `init --ingest-if-empty` path in 0.10.0 skips this package-based
+selection. It uses any already configured provider; a bare first-use invocation
+does not enable one just because FastEmbed is installed.
 
-```bash
-GRAG_EMBED_PROVIDER=fastembed grag serve --with-mcp
-```
+=== "macOS / Linux"
 
-On PowerShell:
+    ```bash
+    GRAG_EMBED_PROVIDER=fastembed grag serve --with-mcp
+    ```
 
-```powershell
-$env:GRAG_EMBED_PROVIDER = "fastembed"
-grag serve --with-mcp
-```
+=== "PowerShell"
+
+    ```powershell
+    $env:GRAG_EMBED_PROVIDER = "fastembed"
+    grag serve --with-mcp
+    ```
+
+## Prepare for offline use
 
 The default model is `BAAI/bge-small-en-v1.5`. First use downloads model assets;
 size and startup time depend on the model/cache. It runs locally through ONNX
@@ -36,6 +44,8 @@ or cache-permission errors. With `HF_HUB_OFFLINE=1`, a failed cached load never
 falls back to a download. Use `grag doctor --prepare` with the same embedding
 settings, then `grag doctor`, to verify actual offline inference. A present cache
 directory is not sufficient. See [installation](../installation.md).
+
+## Background work and latency
 
 An initialized serving process (`serve`, `mcp`) runs a
 background worker for stored-node embeddings. Query embedding still runs as part
@@ -96,6 +106,8 @@ runtime for current results; these synthetic scores do not establish real-projec
 retrieval quality or a memory/latency guarantee.
 
 Two honest costs of the codec path: candidate generation for non-fp32 codecs is an O(rows) approximate scan (only pk + code bytes cross the wire; fp32 nodes are fetched for the 4·top_k rescore shortlist only) — that's the property `grag bench` measures, so no ANN index is involved. Without a background worker, searches embed lazily: at most `GRAG_MAX_EMBED_PER_SEARCH` (default 256) nodes per search call, with the remainder reported as `pending_embeddings` on the search response so agents know vector recall is still improving.
+
+### Native index policy
 
 Full-precision (`fp32`) retrieval uses an exact cosine scan, also O(rows × dimensions),
 with full records fetched only for the shortlist. Native HNSW acceleration remains

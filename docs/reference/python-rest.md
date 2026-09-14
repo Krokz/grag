@@ -33,7 +33,7 @@ The built-in OpenAPI schema lists the running server's endpoints and models.
 | `POST /api/ingest`, `POST /api/ingest/code` | Synchronous document or code ingestion. |
 | `POST /api/jobs/ingest`, `POST /api/jobs/ingest/code` | Queue ingestion; return HTTP 202 and a job record. |
 | `GET /api/jobs`, `GET /api/jobs/{job_id}` | List or inspect process-local job records. |
-| `GET /api/index/status` | Code freshness, registered roots and verification diagnostics. |
+| `GET /api/index/status` | Code freshness, registered roots and verification diagnostics. Development: `check=false` reads only an already loaded owner's cached observations/runtime; no database open or refresh. Require health capability `passive_diagnostics=1` before sending this to older servers. |
 | `GET /api/graph/sample`, `GET /api/graph/full` | Graph views within server response/work limits. |
 | `GET /api/export` | Stream a completed consistent format-2 snapshot; not ordinary response JSON. |
 | `GET /api/dbs` | List databases and the selected default. |

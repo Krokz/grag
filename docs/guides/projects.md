@@ -42,6 +42,54 @@ skills and arbitrary client installations remains separate work. Existing docume
 nodes retain their identities after relocation and subsequent document re-ingestion
 since 0.9.0.
 
+## Skills in new repositories
+
+grag 0.10.0 support a one-time user-level skill installation:
+
+```sh
+grag init --global-skill --client claude
+grag init --global-skill --client cursor
+grag init --global-skill --client codex
+```
+
+Choose the harnesses you use. This copies the full bundle without opening a
+database or editing any project or MCP registration. Claude uses
+`~/.claude/skills/grag`, Cursor `~/.cursor/skills/grag`, and Codex/Zed
+`~/.agents/skills/grag`. Windsurf uses `~/.codeium/windsurf/skills/grag`.
+When `CLAUDE_CONFIG_DIR` is set, Claude's personal bundle goes under that
+profile's `skills/grag` directory, including during removal.
+`--client auto` detects installed harness directories, falling back to Claude.
+Reload skills if your harness does not discover the new bundle immediately.
+Invocation varies: `/grag`, the skill picker, or Windsurf's `@grag`.
+
+A bare skill invocation instructs the agent to run `init --ingest-if-empty` for
+the current checkout. It checks full counts and the init marker's provenance,
+then indexes supported source only for an absent, empty or setup-only graph.
+Any other stored content skips both setup and indexing. Existing empty tables
+are allowed. Unknown counts and failures stop the check. The check is repeated
+after MCP verification; it is a first-use convenience, not an atomic claim on
+the graph across concurrent clients. Ingestion still uses the single shared owner.
+
+The agent should report skipped files or missing language support rather than
+claiming complete coverage. Ignore rules remain in force. This does not install
+models, invent a memory schema or automatically ingest every document. MCP may
+need reconnecting after setup; the CLI can finish the initial scan immediately.
+For Codex or a separately managed MCP configuration, use
+`grag init --client codex --no-mcp --no-claude-md --ingest-if-empty` for CLI access.
+Windsurf/Zed MCP registrations are user-scoped, so the skill avoids replacing an
+unrelated project's registration when using this local first-use path.
+
+Rerun the global install after upgrading grag and update existing local copies
+with ordinary `grag init` too. Duplicate-name precedence belongs to the harness:
+[Claude Code](https://code.claude.com/docs/en/skills) gives personal skills
+precedence over project skills, and [Cursor](https://cursor.com/docs/skills)
+also discovers compatibility directories such as `.claude/skills`. Do not assume
+the closest copy wins. Check the reference path in the agent's tool activity
+when diagnosing an outdated instruction.
+`grag init --global-skill --client claude --dry-run` previews the installation;
+add `--remove` to remove that global bundle. Removal preserves customized files.
+Global mode accepts only `--client`, `--dry-run` and `--remove` alongside the flag.
+
 ## Review and undo setup changes
 
 `grag init` installs the complete skill bundle: a short `SKILL.md` plus references

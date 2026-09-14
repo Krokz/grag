@@ -1,5 +1,19 @@
 # Backup and recovery
 
+Choose the path that matches the database's current state.
+{ .grag-lead }
+
+| Database state | Action |
+|---|---|
+| Opens normally | [Export and restore](#export-and-restore) |
+| Cannot open or replay WAL | [Recover a separate copy](#recover-a-database-that-cannot-open) |
+| FTS reports an inconsistent index | [Rebuild from readable records](#inconsistent-full-text-index) |
+| Have a version-1 export | [Review legacy limits](#older-exports) |
+
+!!! warning "Keep the recovery evidence"
+    Never delete the WAL or shadow file to force a database to open. Committed
+    writes may depend on them.
+
 ## Export and restore
 
 Use the same two commands for a local database or one already owned by a grag server:
@@ -15,12 +29,16 @@ database on a multi-db server and `GRAG_API_TOKEN` supplies authentication.
 A direct stdio session that owns the file must close first or use the shared server
 setup. Older servers without snapshot format 2 must be restarted with updated grag.
 
+### What an export includes
+
 Export captures one committed graph under the writer lock, including schema,
 provenance, source ownership, lifecycle state, saved ingestion options, evidence
 history and retry receipts. Writes wait during capture; delivery reads a completed
 temporary file and releases the database lock. Other graph reads remain available.
 The snapshot represents database state at capture, not a copy or verification of
 source files. A write committed afterward belongs to the live database only.
+
+### Verify the backup completed
 
 Format 2 ends with a completion record containing a SHA-256 checksum and record
 counts/digests per table. The CLI validates the full stream before publishing a
@@ -29,6 +47,8 @@ file and atomically replaces it only on success. A failed download leaves any
 previous backup intact. An abrupt process exit can leave `.NAME.partial-*` files;
 those are staging files, not completed backups. Checksums detect incomplete or
 changed bytes; they do not authenticate the author of a backup.
+
+### Restore into a new database
 
 `import` requires a **new local destination**. It validates the archive before
 creating a database, restores schema and records in one transaction in a separate
@@ -40,6 +60,8 @@ requires a filesystem supporting hard links (including normal local NTFS/APFS/ex
 There is no in-place restore or merge into a populated graph. The lower-level
 Python importer treats replay of the identical archive as a no-op, preserving edits
 made since that restore.
+
+### History and retry continuity
 
 Node content revisions, history sequence numbers and `r2:` relationship revisions
 survive equivalent logical restore. Relationship guards describe content and are
@@ -53,6 +75,8 @@ the snapshot are absent: restoring does not promise continuity beyond that point
 Restore creates no new authored review events and does not free receipt/history
 capacity. Historical relationship topology was never recorded.
 
+### What must be rebuilt or backed up separately
+
 Embeddings, indexes and runtime version stamps are excluded. Search rebuilds
 indexes and, with the same optional embedding configuration, vectors. The first
 search may therefore take longer or report pending embeddings. Paths and saved
@@ -61,6 +85,8 @@ and the explicit [relocation workflow](../guides/projects.md) if source paths mo
 Source files, client configuration, credentials and background-job state need their
 own backup. Restoring never repoints a running server or changes editor settings;
 review the copy, then deliberately select it with `--db` or `grag init`.
+
+### Type support and space requirements
 
 Externally created tables without grag provenance are supported for STRING, INT64,
 DOUBLE, BOOL, DATE and TIMESTAMP columns, including typed primary keys and duplicate
@@ -108,3 +134,27 @@ backup before pointing the server/client at that path. Keep the bundle, includin
 failed attempts. `grag reindex` can rebuild embeddings once a database opens; it
 cannot fix a failed open. The deprecated `GRAG_WAL_AUTO_RECOVER=1` no longer enables
 in-place lossy recovery, including in supervised deployments.
+
+## Inconsistent full-text index
+
+grag 0.10.0 reports `index_inconsistent` when the native engine says
+an FTS term is missing during a write. This is a derived-index failure, not a
+Cypher syntax error. A runtime upgrade alone does not repair an already damaged
+index. `grag reindex` rebuilds embeddings and does not repair FTS.
+
+1. Stop the affected database's clients/owner and [preserve a recovery copy](#recover-a-database-that-cannot-open).
+2. If that copy opens, export its records and restore into a new database:
+
+   ```sh
+   grag --db /path/to/recovered.lbdb export -o preserved-memory.jsonl
+   grag --db /path/to/rebuilt.lbdb import preserved-memory.jsonl
+   ```
+
+3. Read important memories, repeat the failed edit on the new copy, search for
+   the edited text, and verify it after a server restart.
+4. Adopt the verified path deliberately through `grag --db /path/to/rebuilt.lbdb init`.
+
+Restore preserves the supported authored graph, evidence history and retry receipts;
+derived indexes and embeddings are rebuilt. Review the [type and continuity limits](#type-support-and-space-requirements).
+Keep the original database, sidecars and export. A failed export or unsupported
+schema is not permission to discard records or delete the WAL.

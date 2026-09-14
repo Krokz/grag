@@ -23,22 +23,35 @@ theme:
         icon: material/brightness-7
         name: Switch to light mode
   features:
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
+    - navigation.indexes
+    - navigation.top
     - navigation.footer
+    - toc.follow
     - search.suggest
     - search.highlight
     - content.code.copy
+    - content.tabs.link
     - content.action.edit
 
 plugins:
-  - search
+  - search:
+      # Find identifiers and flags inside code expressions as well as prose.
+      separator: '[\s\-._=:/"]+'
 
 markdown_extensions:
   - admonition
   - attr_list
+  - md_in_html
   - tables
   - toc:
       permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.superfences:
@@ -57,26 +70,42 @@ extra_css:
   - stylesheets/extra.css
 
 nav:
-  - Overview: index.md
-  - Architecture: architecture.md
-  - Start here:
+  - Home: index.md
+  - Get started:
       - First session: getting-started.md
       - Installation and Windows: installation.md
-  - Use grag:
+  - Guides:
+      - guides/index.md
       - Index code: guides/code.md
+      - Select sources and ignores: guides/source-scope.md
       - Index documents: guides/documents.md
       - Save and revise memory: guides/memory.md
+      - History and evidence: guides/history.md
+      - Resume work: guides/resume.md
       - Retrieve context: guides/retrieval.md
       - Code freshness: guides/freshness.md
       - Optional embeddings: guides/embeddings.md
       - Projects and relocation: guides/projects.md
   - Operate:
+      - operations/index.md
       - Servers and multiple clients: operations/server.md
       - Troubleshooting: operations/troubleshooting.md
+      - Installation and client diagnostics: operations/diagnostics.md
       - Backup and recovery: operations/recovery.md
   - Reference:
+      - reference/index.md
       - MCP tools: reference/mcp.md
       - Python and REST: reference/python-rest.md
-      - Configuration and CLI: reference/configuration.md
+      - CLI commands: reference/cli.md
+      - Configuration: reference/configuration.md
+      - Schema conventions: reference/schema.md
+      - Writes and retries: reference/mutations.md
+      - Language support:
+          - reference/languages/index.md
+          - Python: reference/languages/python.md
+          - JavaScript and frameworks: reference/languages/javascript.md
+          - Go: reference/languages/go.md
+          - Java and C# identities: reference/languages/overloads.md
       - Resource limits: reference/limits.md
+  - Architecture: architecture.md
   - Development: development.md

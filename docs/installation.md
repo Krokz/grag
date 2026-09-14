@@ -1,10 +1,31 @@
 # Installation
 
-**From PyPI** (ships the web UI):
+Install a stable `grag` command, then connect it to your project.
+{ .grag-lead }
 
-```bash
-pip install gragdb
-```
+## Choose an installer
+
+=== "pipx"
+
+    ```bash
+    pipx install "gragdb[code]"
+    ```
+
+=== "uv"
+
+    ```bash
+    uv tool install "gragdb[code]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "gragdb[code]"
+    ```
+
+    Use a persistent environment for an MCP launcher.
+
+The package ships the web UI. Use plain `gragdb` for Python-only indexing.
 
 Python 3.10–3.14. Python 3.13 is the shared Windows/macOS version in the CI matrix.
 Linux, macOS, and Windows are all exercised in CI. For CLI + MCP use, prefer a
@@ -19,6 +40,8 @@ The libraries load from grag's own package directory. Source/editable Windows
 installs need the [runtime build step](development.md#windows-source-builds).
 Other platforms keep a small universal wheel without these DLLs.
 
+### Upgrading an older Windows install
+
 **Versions 0.8.0 and earlier do not include this fix.** A missing-OpenSSL error can
 appear as `Could not find lbug C API shared library`. Upgrade to 0.9.0 or later;
 an older doctor report saying “installed” does not prove native loading succeeds.
@@ -28,6 +51,8 @@ do not require manually downloading the separate C-API DLL used by grag's CI tes
 Human CLI output escapes characters a legacy terminal cannot represent. Saved
 configuration files and exported JSONL retain UTF-8, including Unicode paths and
 content. MCP protocol output remains separate from diagnostic messages.
+
+### If the harness cannot start a server
 
 Some Windows agent harnesses put MCP child processes in a Job Object that kills
 them on disconnect. grag requires permission to start an independent shared
@@ -57,6 +82,8 @@ For local models, set `GRAG_EMBED_PROVIDER=fastembed` and the intended model/dim
 before preparing. Set `FASTEMBED_CACHE_PATH` to a persistent writable cache if
 the default temporary cache may be cleaned. Doctor never installs Python extras.
 
+### What preparation downloads
+
 Preparation covers FTS, the optional legacy VECTOR extension, all grag-supported
 grammars when the code extra is installed, and the configured local model. It
 does not enable embeddings, ingest code, or send a remote embedding request.
@@ -65,6 +92,8 @@ language-pack grammars use the package's release host and per-user cache, report
 by doctor. Models use their configured provider's model host and FastEmbed cache.
 First use also logs preparation before a missing asset download. Cache/download
 errors retain the asset name and underlying cause.
+
+### Local storage and provider access
 
 Local storage and retrieval do not send graph contents to a hosted retrieval
 service. Your agent harness may send retrieved context to its model provider.
@@ -85,9 +114,13 @@ block normal FTS/exact-cosine use. Disabled extras and untested remote providers
 are explicit. `--timeout <seconds>` sets each probe's deadline (30 seconds by
 default, 300 with `--prepare`). Slow model preparation may need a longer deadline.
 
-Doctor also reports the selected server, and code-index staleness when that server
-is reachable. It never opens the project database itself, replays its WAL, repairs
-corruption, or certifies the completeness of saved memories. Preparation does not
+In grag 0.10.0, doctor also discovers client registrations, runtime
+paths and the selected owner. Cached index observations are available from owners
+that advertise passive diagnostics; ordinary inspection performs no graph reads
+or refreshes. Only explicit `--verify-client` starts a saved launcher and reads its
+existing graph, which can replay WAL or trigger refresh. Installation `ready` remains
+separate from that MCP result. See [installation discovery](operations/troubleshooting.md#discover-the-installation-and-saved-client).
+Doctor does not repair corruption or certify memory completeness. Preparation does not
 replace a damaged cached binary or reinstall a missing package. Retain the exact
 error and see [troubleshooting](operations/troubleshooting.md).
 
@@ -95,7 +128,7 @@ error and see [troubleshooting](operations/troubleshooting.md).
 
 Without an embedder, everything works FTS-only (BM25 is native to the engine).
 
-**LadybugDB compatibility.** This release pins LadybugDB 0.20.3. grag disables the
+**LadybugDB compatibility.** grag 0.10.0 pins LadybugDB 0.20.4 (0.9.0 pinned 0.20.3). grag disables the
 engine's cached-physical-plan fast path on every connection (`CALL
 enable_cached_prepared_statement='none'`, the upstream kill switch for the
 LadybugDB/ladybug#877 family of stale-re-execution bugs) and falls back to per-statement
@@ -103,3 +136,8 @@ eviction of the private prepared-statement cache on older runtimes. Do not downg
 database in place: a file opened by 0.20.x uses storage version 47 and cannot be
 opened by 0.19.1 (storage version 43). A rollback requires exporting with the
 newer compatible grag/Ladybug installation and importing into a fresh database.
+
+On the C-API backend, grag also binds integer list members with a consistent
+INT64 type. The upstream 0.20.4 Python wrapper still rejects mixed integer ranges
+such as `[0, 128]` without this adaptation. Stored embedding bytes and cosine
+retrieval remain unchanged.

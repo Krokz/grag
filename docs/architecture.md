@@ -5,7 +5,7 @@ documents and authored knowledge, then returns relevant records and connections
 with citations. The harness decides what to ask, what to remember and how to
 answer the user. grag does not run an LLM or autonomously create a project ontology.
 
-This describes the implementation shipped in [grag 0.9.0](https://github.com/Krokz/grag/tree/v0.9.0).
+This describes the implementation shipped in [grag 0.10.0](https://github.com/Krokz/grag/tree/v0.10.0).
 The usual setup is **one database per checkout, one owning process, and any number
 of clients using that process**. BM25 works without an embedding model.
 
@@ -42,11 +42,19 @@ configures the harness. Its default stdio proxy starts or connects to a shared
 leaves the owner available to the other clients. On Windows, a harness that denies
 independent daemon creation requires the printed separate-terminal server command.
 
+The first-use path in 0.10.0 adds a portable user-level skill and
+`init --ingest-if-empty`. The CLI checks full graph counts and the init marker,
+then uses the same GraphClient ingestion route only for an empty/setup-only graph.
+It adds no daemon or MCP tool; [first-use setup](guides/projects.md#skills-in-new-repositories)
+describes the eligibility check and harness discovery limits.
+
+### How clients reach the owner
+
 | Access mode | Database ownership |
 |---|---|
 | Init-generated MCP configuration | Each client has a stdio proxy; one shared server owns the file. |
 | Browser UI or direct HTTP MCP | Connects to the owning server. |
-| CLI `remember`, `search`, `context`, `ingest`, `ingest-code` | Uses a registered owner's REST API, or a configured remote server. Opens a local service only when no owner is selected. A failed server request never falls back to another writer. |
+| CLI `remember`, `inspect`, `retire`, `search`, `context`, `ingest`, `ingest-code` | Uses a registered owner's REST API, or a configured remote server. Opens a local service only when no owner is selected. A failed server request never falls back to another writer. |
 | Direct `grag --db file.lbdb mcp` | The stdio process owns the file; suitable for one client. |
 | Python `GragService(config)` | The Python host owns the file and must close the service it creates. It does not automatically attach to another owner. |
 | `--db-dir` server | One registry manages separate services/files. Database selectors route requests; there are no cross-database queries. |
@@ -77,6 +85,12 @@ domain-specific labels and keys; there is no mandatory memory vocabulary.
 `describe_schema` reports the current schema. Canonical node IDs use `Label:key`,
 not native row IDs.
 
+In grag 0.10.0, `define_schema` validates unquoted identifiers against
+the pinned native grammar and publishes DDL plus its registry in one writer
+transaction. Failed batches roll back their earlier tables and metadata; an
+enclosing transaction is joined without savepoints. Schema readers share the
+writer lock and do not observe half a batch. See [schema naming](guides/memory.md#predictable-schema-names).
+
 | Data | Lifetime and meaning |
 |---|---|
 | Authored memories | Facts, decisions, tasks and relationships persist in the selected database. Sources and optional correction history explain where a claim came from. |
@@ -102,7 +116,7 @@ reread and reconciliation. See [memory writes](guides/memory.md).
 Each engine has one write connection and a reader pool (default maximum: four).
 Other threads read committed state while a transaction's own reads use its writer.
 Limits bound admitted operations and decoded query work; they are not a hard
-process-memory ceiling. LadybugDB 0.20.3 is pinned, with grag's prepared-plan and
+process-memory ceiling. grag 0.10.0 pins LadybugDB 0.20.4, with grag's prepared-plan and
 native timeout safeguards retained. Ordinary statements default to a cooperative
 30-second native limit; commit, rollback and checkpoint finish without that limit.
 An uncertain transaction outcome blocks further writes until reopen.
@@ -115,11 +129,17 @@ the optional `code` extra supplies tree-sitter parsers. Resolution is conservati
 static analysis. Coverage diagnostics distinguish supported, unresolved and
 omitted constructs; missing edges are not proof of absence.
 
-Parsing happens before the graph transaction. The current incremental mode still
-parses the selected files to resolve relationships; content, parser and dependency
-changes determine which generated facts need rewriting. There is no persistent
-parse-result cache yet. Publication, pruning and successful scope metadata commit
-together. Unreadable or partial scans do not certify a complete index.
+Parsing happens before the graph transaction. grag 0.10.0 adds a bounded
+owner-local cache of parse summaries, keyed by source bytes, parser/version/options,
+repository identity and path. Copies keep resolver mutations out of cached summaries.
+The cache retains no source bodies or native syntax trees and clears on owner shutdown.
+Every scan still applies selection rules, reads source bytes and resolves current
+dependencies. Separate components in the existing stored fingerprint distinguish
+source changes from dependency-only module/edge updates. Legacy fingerprints cause
+one conservative rewrite. Publication, pruning and successful scope metadata commit
+together; cached parsing never certifies either publication or freshness. Unreadable
+or partial scans do not certify a complete index. See the code guide for cache limits
+and response counters.
 
 Serving reads trigger coalesced verification jobs for registered code scopes.
 `allow_stale` returns existing evidence while a due check runs; `wait` waits to a
@@ -127,6 +147,11 @@ deadline; `require` rejects the read if verification cannot finish. An idle serv
 does not poll continuously. Freshness certifies the code scope at `checked_at`,
 not the truth of memories or completion of embeddings. Document synchronization
 is explicit: rerun document ingestion after edits.
+
+New in 0.10.0: the file loader's explicit `json_mode="document"` validates
+ordinary JSON and hands its literal text, file provenance and source hash to the
+same document pipeline. This adds no semantic JSON graph or reference resolver;
+the default JSON/JSONL document-record format is preserved.
 
 Details: [code coverage](guides/code.md), [documents](guides/documents.md) and
 [freshness](guides/freshness.md).
@@ -169,6 +194,8 @@ partial replay requires an explicit choice. See [backup and recovery](operations
 
 Storage and retrieval are local by default. First-use extensions, grammars and
 optional models can need downloads; `doctor --prepare` prepares those assets.
+### Provider boundary
+
 The harness may send retrieved context to its model provider, and an explicitly
 remote embedder sends embedding input to its configured endpoint. Shared HTTP
 uses a bearer token when configured and requires one beyond loopback. Database

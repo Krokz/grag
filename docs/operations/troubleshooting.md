@@ -1,26 +1,81 @@
 # Troubleshooting
 
-Start with the exact client error, `grag status`, and the daemon log it prints.
-Check the executable, database path and port in the client's MCP registration.
-Another installation on PATH or another database can make a healthy server look
-like the wrong project. Restart the selected server after an upgrade and reconnect
-the client.
+Start with the exact client error and the log location printed by `grag status`.
+Then choose the symptom that matches what you see.
+{ .grag-lead }
 
-| Symptom | Check and next step |
-|---|---|
-| MCP fails to reconnect, but status shows a server | Verify the registration's launcher, database and port; exercise `describe_schema` through that client and inspect the log. Health alone does not verify its MCP connection. |
-| Windows reports a missing native library | See [Windows installation](../installation.md#windows). Windows x64 wheels from 0.9.0 bundle the runtime; 0.8.0 and earlier do not. Doctor verifies an actual native query. |
-| Windows refuses independent daemon startup | Run the exact `serve --with-mcp` command printed by grag in a separate terminal, keep it open, and reconnect. This avoids a harness killing the database owner on client disconnect. |
-| `Could not set lock`, including Windows error 33 | Another process owns the file. The CLI routes to registered owners. If this is a direct stdio owner, close it and run `init` for shared access. |
-| `UnicodeEncodeError` in a Windows terminal | Upgrade older installs: grag 0.9.0 escapes unsupported characters in human CLI output while preserving UTF-8 files and protocol data. If a third-party output path still fails, retain the traceback; PowerShell's `$env:PYTHONIOENCODING = "utf-8"` can help diagnose redirected output. |
-| Unexpected duplicate modules or paths | Inspect the input roots and nested worktrees. Grag honors ignores and nested boundaries; use `--root` for selected files under one root. See [scope limits](../guides/code.md). |
-| No TypeScript callers or missing Svelte code | Verify the `code` extra, selected roots, ignores and `Module.code_coverage`. Supported static calls and framework scripts are indexed in 0.9.0; unresolved constructs remain explicit [coverage limitations](../guides/code.md). Use source search for missing evidence. |
-| Slow first semantic ingest/search | Check model preparation and pending embeddings. Serving workers run in the background; one-shot CLI ingests still embed synchronously. Start with BM25 when assessing usefulness. |
-| Required-fresh read fails | Inspect `/api/index/status`, saved roots, errors and retry delays. Resolve moved paths or scope failures; a timeout does not cancel shared work. |
-| `query_interrupted` | Inspect the owner's `/api/health` engine backend and timeout. Narrow the query/batch or set `GRAG_STATEMENT_TIMEOUT_MS` on the owner and restart. Native deadlines are cooperative; zero disables ordinary statement deadlines. An interrupt does not prove a write was unsaved. |
-| `transaction_outcome_unknown` / `writer_state=reopen_required` | Restart the owning server, keeping database and sidecars. Retry the exact payload and original operation ID to recover its saved receipt; without a receipt, read stored state before retrying. Writes stay blocked until reopen. |
-| Resource limit | Follow the returned resource/hint: narrow labels/scope, split batches, or wait for existing jobs. See [limits](../reference/limits.md). |
-| Corrupted WAL / database cannot open | Stop its owners and preserve files. Follow [recovery](recovery.md); never delete WAL or shadow files to make it open. |
+```bash
+grag status
+grag doctor
+```
+
+Check the launcher, database path and port in the client's MCP registration.
+Restart the selected owner after an upgrade and reconnect the client.
+
+## Connection and Windows setup
+
+??? question "MCP fails to reconnect, but status shows a server"
+
+    Verify the registration's launcher, database and port; exercise `describe_schema` through that client and inspect the log. Health alone does not verify its MCP connection.
+
+??? question "Windows reports a missing native library"
+
+    See [Windows installation](../installation.md#windows). Windows x64 wheels from 0.9.0 bundle the runtime; 0.8.0 and earlier do not. Doctor verifies an actual native query.
+
+??? question "Windows refuses independent daemon startup"
+
+    Run the exact `serve --with-mcp` command printed by grag in a separate terminal, keep it open, and reconnect. This avoids a harness killing the database owner on client disconnect.
+
+??? question "`Could not set lock`, including Windows error 33"
+
+    Another process owns the file. The CLI routes to registered owners. If this is a direct stdio owner, close it and run `init` for shared access.
+
+??? question "`UnicodeEncodeError` in a Windows terminal"
+
+    Upgrade older installs: grag 0.9.0 escapes unsupported characters in human CLI output while preserving UTF-8 files and protocol data. If a third-party output path still fails, retain the traceback; PowerShell's `$env:PYTHONIOENCODING = "utf-8"` can help diagnose redirected output.
+
+## Indexing and retrieval
+
+??? question "Unexpected duplicate modules or paths"
+
+    Inspect the input roots and nested worktrees. Grag honors ignores and nested boundaries; use `--root` for selected files under one root. See [scope limits](../guides/code.md).
+
+??? question "No TypeScript callers or missing Svelte code"
+
+    Verify the `code` extra, selected roots, ignores and `Module.code_coverage`. Supported static calls and framework scripts are indexed in 0.9.0; unresolved constructs remain explicit [coverage limitations](../guides/code.md). Use source search for missing evidence.
+
+??? question "Slow first semantic ingest/search"
+
+    Check model preparation and pending embeddings. Serving workers run in the background; one-shot CLI ingests still embed synchronously. Start with BM25 when assessing usefulness.
+
+??? question "Required-fresh read fails"
+
+    Inspect `/api/index/status`, saved roots, errors and retry delays. Resolve moved paths or scope failures; a timeout does not cancel shared work.
+
+??? question "`query_interrupted`"
+
+    Inspect the owner's `/api/health` engine backend and timeout. Narrow the query/batch or set `GRAG_STATEMENT_TIMEOUT_MS` on the owner and restart. Native deadlines are cooperative; zero disables ordinary statement deadlines. An interrupt does not prove a write was unsaved.
+
+## Writes, limits and recovery
+
+### `transaction_outcome_unknown` / `writer_state=reopen_required`
+
+Restart the owning server, keeping database and sidecars. Retry the exact payload and original operation ID to recover its saved receipt; without a receipt, read stored state before retrying. Writes stay blocked until reopen.
+
+### Resource limit
+
+Follow the returned resource/hint: narrow labels/scope, split batches, or wait for existing jobs. See [limits](../reference/limits.md).
+
+### Corrupted WAL / database cannot open
+
+Stop its owners and preserve files. Follow [recovery](recovery.md); never delete WAL or shadow files to make it open.
+
+## Discover the installation and saved client
+
+A healthy server can still be the wrong project or use a different installation.
+The [diagnostics guide](diagnostics.md) covers runtime paths, saved registrations,
+read-only discovery, explicit MCP verification and repair previews. Installation
+readiness and the actual client connection are separate results.
 
 ## Optional embedding process exits
 

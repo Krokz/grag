@@ -1,25 +1,37 @@
 # Retrieve useful context
 
-1. Text properties get a native BM25 FTS index per searchable table. Search takes
-   up to `max(32, 4 * top_k)` lexical candidates per label. When hits span labels,
-   it reranks them with shared BM25 statistics over that shortlist (Unicode word
-   tokens and English Snowball stemming). Single-label hits keep native BM25.
-   Raw BM25 scores from separate indexes are never directly compared.
-2. With an embedder configured, the default `fp32` codec scans eligible vectors with exact cosine scoring. Optional compressed codecs generate an approximate shortlist, then rescore it with full-precision vectors. Rescoring cannot recover a relevant vector missed by that shortlist.
-3. Lexical and vector candidates are fused using reciprocal ranks. Equal scores
-   receive equal ranks; node IDs break final ties consistently. Label filters are
-   sets, so their order and duplicates cannot bias ranking or inflate counts.
-   Vector shortlists are retained per label until the diversity pass, which
-   promotes other labels after the configured cap and backfills unused slots.
-4. Selected seeds expand k hops through the graph and become cited context.
+Choose a read based on what you already know, then inspect its sources and limits.
+{ .grag-lead }
 
-Cross-label lexical scores use **candidate-pool statistics**, not full-corpus
-statistics. The native lexical/vector shortlists still bound recall; changing
-`top_k` can change those shortlists and their rankings. RRF scores express rank
-agreement, not confidence probabilities. Diversity can promote a lower-scoring
-label ahead of a deferred hit; set `GRAG_SEARCH_LABEL_CAP=0` for pure fused order.
+| What you need | Start with |
+|---|---|
+| An exact symbol, count or status | A projected `cypher_query` after checking the schema |
+| Discovery by topic | `search_knowledge`, narrowed to relevant labels |
+| Neighbors or evidence for known IDs | `get_context` |
+| Earlier memory revisions | [History and evidence](history.md) |
 
-**Context completeness and budgets.** Both retrieval calls return `truncated`,
+There is no required query sequence. Fetch more only when the evidence you have
+is insufficient.
+
+=== "CLI"
+
+    ```bash
+    grag search "retry policy" --tokens 800 --hops 0
+    grag context Memory:retry-policy --tokens 1600
+    ```
+
+=== "MCP"
+
+    ```python
+    search_knowledge(query="retry policy", labels=["Memory"], hops=0, token_budget=800)
+    get_context(node_ids=["Memory:retry-policy"], hops=1, token_budget=1600)
+    ```
+
+    Use the labels and IDs returned by your own graph.
+
+## Check completeness and budgets
+
+ Both retrieval calls return `truncated`,
 `omitted_nodes`, `omitted_edges`, `omitted_properties`, `included_node_ids`, and
 `expansion_limited`. MCP returns this metadata in a JSON footer after `---`,
 including for `get_context`. A truncated answer is partial evidence. Omission
@@ -35,7 +47,9 @@ make missing records and properties explicit. Returned edges always have both
 endpoints in the returned graph. Vector payloads and null properties are omitted
 by design and do not count as lost evidence.
 
-`token_budget` now covers the **complete compact response**: the larger of the
+### What the budget counts
+
+`token_budget` covers the **complete compact response**: the larger of the
 REST/Python JSON payload (including `seeds`, `subgraph`, context, and metadata)
 and the MCP text (including its footer). `response_token_estimate` reports that
 size; `token_estimate` measures only `context`. Both use `ceil(UTF-8 bytes / 4)`,
@@ -48,6 +62,8 @@ can cost more tokens than this estimate; count with your harness's tokenizer
 when enforcing a model context limit. Compared with v0.6.0, the same budget may
 return fewer records: `seeds` and `subgraph` now contain only packed records and
 properties, rather than an unbounded second copy of the retrieved graph.
+
+## Page a long property
 
 For a long memory, call `get_context` with one node id and `text_property`, such
 as `"body"` or `"text"` (check `describe_schema`). This mode skips expansion and
@@ -93,6 +109,8 @@ include the exact `text`. Use those coordinates and hash with the existing
 Excerpts may omit qualifications outside the selected window and may miss
 semantic-only matches. This adds no configuration or model dependency.
 
+### Current and retained evidence
+
 Search and context default to `evidence="current"`: explicitly superseded,
 retracted, expired, disputed, and retained obsolete document nodes are excluded
 before ranking and expansion. Use `evidence="all"` to inspect them. Legacy
@@ -102,6 +120,8 @@ evidence stays eligible; this is a selection policy, not a truth guarantee.
 Cypher remains unfiltered. The footer names `evidence_policy`;
 `excluded_evidence` counts encountered post-shortlist/path exclusions only,
 not every row filtered within the database.
+
+### Whole-entity Cypher replies
 
 Whole-entity Cypher replies (`RETURN n`, paths, lists and maps of entities)
 omit derived vector properties. MCP also omits null columns on whole entities;
@@ -141,3 +161,30 @@ not measure first-time download cost. See [optional embeddings](embeddings.md).
 
 See [code coverage](code.md), [embedding tradeoffs](embeddings.md), and
 [resource limits](../reference/limits.md).
+
+
+## How search ranks and expands
+
+
+1. Text properties get a native BM25 FTS index per searchable table. Search takes
+   up to `max(32, 4 * top_k)` lexical candidates per label. When hits span labels,
+   it reranks them with shared BM25 statistics over that shortlist (Unicode word
+   tokens and English Snowball stemming). Single-label hits keep native BM25.
+   Raw BM25 scores from separate indexes are never directly compared.
+2. With an embedder configured, the default `fp32` codec scans eligible vectors with exact cosine scoring. Optional compressed codecs generate an approximate shortlist, then rescore it with full-precision vectors. Rescoring cannot recover a relevant vector missed by that shortlist.
+3. Lexical and vector candidates are fused using reciprocal ranks. Equal scores
+   receive equal ranks; node IDs break final ties consistently. Label filters are
+   sets, so their order and duplicates cannot bias ranking or inflate counts.
+   Vector shortlists are retained per label until the diversity pass, which
+   promotes other labels after the configured cap and backfills unused slots.
+4. Selected seeds expand k hops through the graph and become cited context.
+
+Cross-label lexical scores use **candidate-pool statistics**, not full-corpus
+statistics. The native lexical/vector shortlists still bound recall; changing
+`top_k` can change those shortlists and their rankings. RRF scores express rank
+agreement, not confidence probabilities. Diversity can promote a lower-scoring
+label ahead of a deferred hit; set `GRAG_SEARCH_LABEL_CAP=0` for pure fused order.
+
+For [task resumption](resume.md), use explicit status, scope and priority queries.
+Search relevance is not task priority; `evidence="current"` does not imply unfinished
+work or unanswered questions.
