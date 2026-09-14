@@ -38,6 +38,21 @@ class CypherError(GragError):
     code = "cypher_error"
 
 
+class IndexConsistencyError(GragError):
+    """A persisted derived full-text index disagrees with its source rows."""
+    code = "index_inconsistent"
+
+    def __init__(self, message: str):
+        super().__init__(
+            message,
+            hint="Stop this database's clients and preserve a verified recovery copy. "
+            "Export that readable copy and import into a new database to rebuild derived indexes; "
+            "verify the failed write, search and restart before adopting it. "
+            "Keep the original database and WAL. grag reindex rebuilds embeddings, not FTS. "
+            "See https://krokz.github.io/grag/operations/recovery/#inconsistent-full-text-index.",
+        )
+
+
 class QueryInterruptedError(GragError):
     """Native execution was interrupted (including a cooperative deadline)."""
     code = "query_interrupted"

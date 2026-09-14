@@ -178,6 +178,16 @@ def test_vector_selection_filters_before_shortlist(engine,monkeypatch,codec):
     assert [s.node.id for s in seeds]==['Note:new']
     result=search_knowledge(engine,config,SearchRequest(query='cache policy',top_k=1,token_budget=3000))
     assert result.vector_status is None and result.included_node_ids==['Note:new']
+    # Generated integer direction codes must survive the native binding and
+    # persistence boundary for every codec, without changing candidate filters.
+    from grag.core.engine import Engine
+    stored=engine.execute("MATCH (n:Note {id:'new'}) RETURN n._emb_code").rows
+    assert stored[0][0] and all(0<=value<=255 for value in stored[0][0])
+    engine.close()
+    with Engine(config) as reopened:
+        assert reopened.execute("MATCH (n:Note {id:'new'}) RETURN n._emb_code").rows==stored
+        seeds=vectors.vector_candidates(reopened,config,'cache policy',['Note'],1,evidence_now=dt.datetime.now(dt.timezone.utc))
+        assert [s.node.id for s in seeds]==['Note:new']
 
 
 def test_history_page_cursor_and_old_snapshot_survive_restart(tmp_path):

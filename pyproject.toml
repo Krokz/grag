@@ -10,11 +10,11 @@ readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = { text = "MIT" }
 dependencies = [
-    # Exact for storage/native compatibility. 0.20.3 keeps storage v47 and fixes
-    # index/relationship/checkpoint defects; the Python C-API timeout bug remains.
-    # Keep grag's connection-local timeout and prepared-plan safeguards. Qualify
+    # Exact for storage/native compatibility. 0.20.4 keeps storage v47 and fixes
+    # native lifetime/allocator defects. Python C-API timeout/list bugs remain.
+    # Keep grag's typed parameters, timeout and prepared-plan safeguards. Qualify
     # the matching minor-version extension binaries on every supported platform.
-    "ladybug==0.20.3",
+    "ladybug==0.20.4",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "mcp>=2.0",

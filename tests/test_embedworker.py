@@ -135,3 +135,20 @@ def test_service_close_stops_worker(hybrid_service):
     hybrid_service.close()
     assert not worker.running
     assert hybrid_service.embed_worker is None
+
+
+def test_search_with_current_embeddings_does_not_wake_idle_worker(hybrid_service, monkeypatch):
+    _ingest_three(hybrid_service)
+    hybrid_service.start_background_embedding()
+    worker = hybrid_service.embed_worker
+    assert worker.wait_idle(timeout=20)
+    assert _pending(hybrid_service, 'Chunk') == 0
+    woke = []
+    real_wake = worker.wake
+    monkeypatch.setattr(worker, 'wake', lambda table=None: (woke.append(table), real_wake(table)))
+    for _ in range(3):
+        response = hybrid_service.search_knowledge(SearchRequest(query='graph', hops=0))
+        assert response.pending_embeddings == 0
+        assert response.vector_status is None
+    assert not woke
+    assert worker.status()['idle']

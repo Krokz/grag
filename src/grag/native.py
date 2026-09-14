@@ -19,6 +19,7 @@ _LOCK = threading.Lock()
 _HANDLES: list[Any] = []  # Keep DLLs alive for the lifetime of native connections.
 _DIRECTORY = Path(__file__).parent / "_runtime"
 _DLLS = ("libcrypto-3-x64.dll", "libssl-3-x64.dll")
+_VERIFIED_CAPI_VERSIONS = {"0.20.2", "0.20.3", "0.20.4"}
 
 
 def connection_backend(connection: Any) -> str:
@@ -26,17 +27,44 @@ def connection_backend(connection: Any) -> str:
     return "capi" if module == "ladybug._lbug_capi" else "pybind" if module == "ladybug._lbug" else "unknown"
 
 
+def prepare_parameters(connection: Any, parameters: dict[str, Any] | None) -> dict[str, Any]:
+    """Bind integer list members consistently on grag's C-API connections.
+
+    The verified wrapper chooses INT8/16/32/64 independently for Python ints,
+    then rejects lists crossing those ranges (including UINT8 embedding codes).
+    Its supported NumPy scalar path preserves an explicit INT64 type. Leave
+    scalar parameters, booleans, nulls and explicitly typed arrays unchanged;
+    never mutate caller payloads or the driver's global conversion functions.
+    """
+    if not parameters or connection_backend(connection) != "capi":
+        return parameters or {}
+
+    def convert(value: Any, *, member: bool = False) -> Any:
+        if member and type(value) is int:
+            import numpy as np
+
+            # Raises on overflow instead of silently wrapping a Python integer.
+            return np.int64(value)
+        if isinstance(value, (list, tuple)):
+            return [convert(item, member=True) for item in value]
+        if isinstance(value, dict):
+            return {key: convert(item) for key, item in value.items()}
+        return value
+
+    return {key: convert(value) for key, value in parameters.items()}
+
+
 def configure_query_timeout(connection: Any, milliseconds: int) -> None:
     """Use the native deadline on each grag-owned connection, without Python timers.
 
-    Ladybug 0.20.2/0.20.3's C-API wrapper interrupts after min(timeout, 10ms), and its
+    Ladybug 0.20.2 through 0.20.4's C-API wrapper interrupts after min(timeout, 10ms), and its
     outer Connection rejects two UNWIND ranges immediately when its Python flag
     is nonzero. The setter also configures the real native timeout. Clear ONLY
     those Python flags after the native setter succeeds; preserve native limits.
     No dependency files, global classes or unrelated connections are modified.
     """
     capi = connection_backend(connection) == "capi"
-    if capi and version("ladybug") not in {"0.20.2", "0.20.3"}:
+    if capi and version("ladybug") not in _VERIFIED_CAPI_VERSIONS:
         raise ConfigurationError("Unverified Ladybug C-API timeout implementation",
                                  hint="Install grag's pinned Ladybug runtime before using the C-API backend.")
     try:

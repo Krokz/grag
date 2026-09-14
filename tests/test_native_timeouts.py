@@ -45,11 +45,13 @@ def test_invalid_timeout_cli_does_not_create_database(tmp_path, monkeypatch, cap
 
     monkeypatch.setenv("GRAG_STATEMENT_TIMEOUT_MS", "-30")
     assert main(["--db", str(tmp_path / "absent.lbdb"), "status"]) == 1
-    assert "GRAG_STATEMENT_TIMEOUT_MS" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    # M25 keeps resolution failures in the diagnostic report on stdout.
+    assert "GRAG_STATEMENT_TIMEOUT_MS" in captured.out + captured.err
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("ladybug_version", ["0.20.2", "0.20.3"])
+@pytest.mark.parametrize("ladybug_version", ["0.20.2", "0.20.3", "0.20.4"])
 def test_capi_workaround_preserves_native_limit_and_is_connection_local(monkeypatch, ladybug_version):
     from grag import native
 

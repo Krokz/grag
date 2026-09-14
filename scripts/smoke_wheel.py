@@ -67,15 +67,16 @@ def timeout_gate(python: Path, root: Path, env: dict[str, str]) -> None:
     """
     checks = root / "timeout-tests"
     checks.mkdir()
-    for name in ("conftest.py", "test_native_timeouts.py"):
+    for name in ("conftest.py", "test_native_timeouts.py", "test_native_parameters.py",
+                 "test_evidence_lifecycle.py", "test_vectors.py", "test_native_fts.py"):
         shutil.copyfile(ROOT / "tests" / name, checks / name)
     subprocess.run([str(python), "-m", "pip", "install", "pytest>=8.0"], check=True, cwd=root, env=env)
     backends = ["pybind"]
     if os.name == "nt":
-        url = "https://github.com/LadybugDB/ladybug/releases/download/v0.20.3/liblbug-windows-x86_64.zip"
+        url = "https://github.com/LadybugDB/ladybug/releases/download/v0.20.4/liblbug-windows-x86_64.zip"
         with urllib.request.urlopen(url, timeout=120) as response:
             data = response.read()
-        assert hashlib.sha256(data).hexdigest() == "723ab361d12dc6d79cb57f58d6a34456006c98065cb5036c5b0f446fe768d83d"
+        assert hashlib.sha256(data).hexdigest() == "86bf916c2097b803e2ec2c82b8f0994a452e56e8a086e23bc9452797defd597f"
         archive = root / "capi.zip"
         archive.write_bytes(data)
         with zipfile.ZipFile(archive) as contents:
@@ -86,8 +87,11 @@ def timeout_gate(python: Path, root: Path, env: dict[str, str]) -> None:
         env = {**env, "LBUG_C_API_LIB_PATH": str(library)}
         backends.append("capi")
     for backend in backends:
-        subprocess.run([str(python), "-m", "pytest", "-q", str(checks)], check=True, cwd=root,
-                       env={**env, "LBUG_PYTHON_BACKEND": backend}, timeout=180)
+        # test_vectors supplies FakeEmbedder to the four codec cases. Its remote
+        # provider tests require an optional extra, absent from this clean wheel.
+        subprocess.run([str(python), "-m", "pytest", "-q", str(checks),
+                        "--ignore", str(checks / "test_vectors.py")], check=True, cwd=root,
+                       env={**env, "LBUG_PYTHON_BACKEND": backend}, timeout=300)
         print(f"wheel: {backend} native deadlines, commit, rollback, receipt replay and strict reopen passed")
 
 

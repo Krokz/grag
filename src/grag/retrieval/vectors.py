@@ -891,9 +891,12 @@ def vector_candidates(
             quota = min(quota, remaining_embeddings)
             embed_pending_nodes(engine, config, table, max_nodes=quota)
             remaining_embeddings -= quota
-    if worker is not None:
+    if worker is not None and any(
+        pending_embedding_count(engine, snapshot, table) for table in tables
+    ):
         # Never embed on the request thread when a worker exists; just make
-        # sure it is awake so the reported backlog shrinks.
+        # sure it is awake when there is work. Unconditional wakeups made
+        # searches repeatedly scan every table and report busy at zero backlog.
         worker.wake()
     query_prefix, _ = resolve_prefixes(cfg)
     q = np.asarray(

@@ -52,6 +52,7 @@ from grag.native import (
     configure_query_timeout,
     connection_backend,
     prepare_native_runtime,
+    prepare_parameters,
 )
 
 logger = logging.getLogger("grag")
@@ -552,7 +553,7 @@ class Engine:
                 "LadybugDB query safety check failed: the runtime does not "
                 "expose the prepared-statement cache internals grag requires; "
                 "refusing the query to prevent cached-plan data corruption.",
-                hint="Install the verified runtime with: pip install 'ladybug==0.20.3'.",
+                hint="Install the verified runtime with: pip install 'ladybug==0.20.4'.",
             )
         self._evict_prepared(cache, lock)
         self._prepared_catalog[conn] = self._catalog_generation
@@ -594,7 +595,7 @@ class Engine:
             # a setter failure after COMMIT being mistaken for a failed commit.
             self._set_timeout(conn, 0 if completion else None)
             commit_started = command == "COMMIT" and conn is self._write_conn
-            results = conn.execute(cypher, params or {})
+            results = conn.execute(cypher, prepare_parameters(conn, params))
             # The bindings return a list of QueryResults for multi-statement
             # strings; grag only ever sends one statement at a time.
             result = results[-1] if isinstance(results, list) else results
@@ -618,6 +619,10 @@ class Engine:
                 raise
             if str(exc).strip() == "Interrupted.":
                 raise QueryInterruptedError() from exc
+            if str(exc).startswith("Runtime exception: FTS index '") and "is inconsistent:" in str(exc):
+                from grag.core.errors import IndexConsistencyError
+
+                raise IndexConsistencyError(str(exc)) from exc
             if str(exc).startswith("Buffer manager exception:") and "buffer pool is full" in str(exc):
                 from grag.core.errors import ResourceLimitError
 
