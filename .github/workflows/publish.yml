@@ -193,7 +193,7 @@ jobs:
           python - <<'PY'
           import glob, tarfile
           from pathlib import PurePosixPath
-          allowed = {'src', 'ui', 'README.md', 'LICENSE', 'pyproject.toml',
+          allowed = {'src', 'ui', '.gitignore', 'README.md', 'LICENSE', 'pyproject.toml',
                      'hatch_build.py', 'scripts', 'PKG-INFO'}
           with tarfile.open(glob.glob('dist/*.tar.gz')[0]) as archive:
               paths = [PurePosixPath(member.name) for member in archive.getmembers()]
