@@ -45,6 +45,7 @@ def test_capi_integer_overflow_is_not_silently_wrapped(engine):
         pytest.skip("C-API integer conversion bound")
     from grag.core.errors import CypherError
 
-    with pytest.raises(CypherError, match=r"(large|overflow)"):
+    # NumPy uses "int too big to convert" on Windows and "too large" on POSIX.
+    with pytest.raises(CypherError, match=r"(large|big|overflow)"):
         engine.execute("RETURN $values", {"values": [0, 2**64]})
     assert engine.execute("RETURN 42").rows == [[42]]
