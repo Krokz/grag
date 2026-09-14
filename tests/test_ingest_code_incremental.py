@@ -105,7 +105,8 @@ def test_changed_file_rewrites_itself_and_relinks_unchanged_callers(
     assert resp.files_unchanged == 0  # caller coverage also changed
     assert _call_pairs(engine) == {("run", "helper"), ("run", "later")}
     main_id = f"{_repo_id(pkg)}:main.py"
-    assert write_counter["nodes"] == 1 + 2 + 3  # Repo + Modules + Functions
+    # Dependency-only main.py needs new coverage, not an unchanged run node.
+    assert write_counter["nodes"] == 1 + 2 + 2  # Repo + Modules + core Functions
     assert _count(engine, "MATCH (f:Function) RETURN count(*)") == 3
     assert engine.execute(
         "MATCH (m:Module {id: $id}) RETURN count(m)", {"id": main_id}

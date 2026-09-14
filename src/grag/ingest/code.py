@@ -482,7 +482,7 @@ for _suffix in _TREE_SITTER_SUFFIXES:
     _PARSERS[_suffix] = _tree_sitter_parser(_suffix)
 del _suffix
 SUPPORTED_SUFFIXES = tuple(_PARSERS)
-PARSER_REVISION = "m36-m37-bindings-identities-v1"
+PARSER_REVISION = "m15-dependency-fingerprints-v1"
 
 
 # --- resolution (IMPORTS / INHERITS / CALLS over the whole scanned set) ------------
@@ -623,7 +623,7 @@ def _prune_legacy_repos(engine: Engine, repos: dict[str, UpsertNode]) -> int:
 
 _REPO_STALENESS_COLUMNS = ("git_commit", "git_branch", "ingested_at")
 
-# Per-module fingerprint of (file bytes, parse options, parser revision),
+# Per-module fingerprint with separate parse and resolved-dependency components,
 # written outside the upsert path because reserved "_" props are grag-internal
 # and — unlike a declared STRING prop — never enter the FTS index or the
 # embedding text. A matching fingerprint on re-ingest means the file's nodes
@@ -800,8 +800,10 @@ def _ingest_code(
     successful_sources: set[str] = set()
     # Files whose fingerprint differs from the one recorded at their last
     # ingest (or every parsed file on a full run). Only these touch the write
-    # lock; unchanged files are parsed for cross-file resolution only.
+    # lock; unchanged parse summaries still participate in cross-file resolution.
     changed_sources: set[str] = set()
+    structural_sources: set[str] = set()
+    parse_hashes: dict[str, str] = {}
     new_hashes: dict[str, str] = {}
     stored_hashes = (
         _stored_ingest_hashes(engine, set(roots.values())) if req.incremental else {}
@@ -814,6 +816,8 @@ def _ingest_code(
         candidates.extend(_walk([Path(p) for p in scope.paths], req.max_file_kb,
                                 warnings, root=scope.root, errors=walk_errors))
     selected_sources.update(str(file) for _, file in candidates)
+    engine.code_parse_cache.retain_selected(set(roots), selected_sources)
+    files_reused = 0
 
     go_metadata: dict[Path, bytes] = {}
     for walked_root, walked_file in candidates:
@@ -832,8 +836,14 @@ def _ingest_code(
         repo_name = root.name or "repo"
         try:
             raw = read_source(file, req.max_file_kb * 1024)
-            source = raw.decode("utf-8")
-            parsed = parser(file, source, repo=repo, rel_path=rel_path, calls=req.calls)
+            digest = _ingest_hash(raw, calls=req.calls)
+            cache_key = (repo, str(file))
+            parsed = engine.code_parse_cache.get(cache_key, digest, parser) if req.incremental else None
+            reused = parsed is not None
+            if parsed is None:
+                source = raw.decode("utf-8")
+                parsed = parser(file, source, repo=repo, rel_path=rel_path, calls=req.calls)
+                engine.code_parse_cache.put(cache_key, digest, parser, parsed)
             if parsed.go is not None:
                 from grag.ingest.go_modules import package_path
 
@@ -843,11 +853,11 @@ def _ingest_code(
             parsed_modules.append(parsed)
             key = str(file)
             successful_sources.add(key)
+            files_reused += int(reused)
             parsed_hashes[key] = hashlib.sha256(raw).hexdigest()
-            digest = _ingest_hash(raw, calls=req.calls)
-            if not req.incremental or stored_hashes.get(key) != digest:
-                changed_sources.add(key)
-                new_hashes[key] = digest
+            parse_hashes[key] = digest
+            if not stored_hashes.get(key, "").startswith(f"v2:{digest}:"):
+                structural_sources.add(key)
         except (OSError, UnicodeDecodeError) as exc:
             warnings.append(f"skipped {file}: could not read ({exc})")
         except (SyntaxError, ValueError) as exc:
@@ -863,10 +873,8 @@ def _ingest_code(
     # Cross-module resolution: IMPORTS, INHERITS and CALLS need the whole
     # scanned set, so edges are built after every module is parsed.
     module_index: dict[str, list[str]] = {}
-    by_module: dict[str, _ParsedModule] = {}
     for pm in parsed_modules:
         mid = str(pm.module.key)
-        by_module[mid] = pm
         # Index both the repo-relative dotted path and the repo-qualified one:
         # when the repo dir IS the top package (repo "pkg" holding core.py),
         # absolute imports say "pkg.core" while the relative dotted is "core".
@@ -915,7 +923,6 @@ def _ingest_code(
             if target and target != mid:
                 add_edge("IMPORTS", "Module", mid, "Module", target, src)
 
-    from grag import __version__
     from grag.ingest.code_go import resolve as resolve_go
     from grag.ingest.code_js import resolve as resolve_js
     from grag.ingest.code_python import resolve as resolve_python
@@ -930,21 +937,21 @@ def _ingest_code(
     if any(pm.js_units or pm.framework for pm in parsed_modules):
         warnings.append("JS/TS relationship coverage is partial static analysis. Inspect Module.code_coverage for unresolved calls/imports and omitted framework scripts; empty edges do not prove absence.")
     # Dependencies can change relationships/coverage without editing the caller.
-    # Include Python bindings, JS exports and Go package/method-set changes.
+    # Include every resolver, including generic imports becoming ambiguous.
     derived: dict[str, list[Any]] = {}
-    for edge in [*js_edges, *go_edges, *python_edges]:
+    for edge in edges.values():
         derived.setdefault(str(edge.source), []).append([
             edge.type, edge.from_key, edge.to_key, edge.properties,
         ])
     for pm in parsed_modules:
-        if not pm.js_units and not pm.framework and pm.go is None and pm.python is None:
-            continue
         source = str(pm.module.source)
-        digest = hashlib.sha256(json.dumps([
-            parsed_hashes[source], __version__, PARSER_REVISION, req.calls,
+        resolution_hash = hashlib.sha256(json.dumps([
             pm.module.properties.get("code_coverage"),
             sorted(derived.get(source, []), key=lambda row: (row[0], row[1], row[2])),
         ], sort_keys=True).encode()).hexdigest()
+        # Dependency-only edits update module coverage and relationships, not
+        # unchanged declarations. Legacy hashes conservatively rewrite once.
+        digest = f"v2:{parse_hashes[source]}:{resolution_hash}"
         if not req.incremental or stored_hashes.get(source) != digest:
             changed_sources.add(source)
             new_hashes[source] = digest
@@ -992,17 +999,16 @@ def _ingest_code(
                     desired_by_label_source[label].setdefault(source, set()).add(
                         str(node.key)
                     )
-                to_write = [n for n in to_write if str(n.source) in changed_sources]
+                sources = changed_sources if label == "Module" else structural_sources
+                to_write = [n for n in to_write if str(n.source) in sources]
             if to_write:
                 summary = upsert_nodes(engine, config, UpsertNodesRequest(nodes=to_write))
                 warnings.extend(summary.warnings)
                 if label != "Repo":
                     engine.execute_write(f"MATCH (n:{label}) WHERE n.id IN $keys SET n._source_state='current'", {"keys": [n.key for n in to_write]})
 
-        # Pruning and edge writes are scoped to changed + deleted files. An edge
-        # is (re)written when its own file changed OR its target's file changed:
-        # a symbol added to B that an unchanged A already referenced gains its
-        # edge without rewriting all of A.
+        # Every resolved edge contributes to its owner's fingerprint. Adding a
+        # previously missing target changes that owner even on a parse-cache hit.
         removed_sources: set[str] = set()
         if not walk_errors:
             for key in roots:
@@ -1010,16 +1016,11 @@ def _ingest_code(
                                       {"prefix": f"{key}:"}).rows
                 removed_sources.update(str(row[0]) for row in rows if row[0] and str(row[0]) not in selected_sources)
         authoritative_sources = changed_sources | removed_sources
-        module_source = {mid: str(pm.module.source) for mid, pm in by_module.items()}
-
-        def owning_source(key: str) -> str | None:
-            return module_source.get(key.split("#", 1)[0])
-
         live_edges = [
             edge
             for edge in edges.values()
             if str(edge.source) in changed_sources
-            or owning_source(str(edge.to_key)) in changed_sources
+            and (not edge.type.startswith("CONTAINS_") or str(edge.source) in structural_sources)
         ]
         desired_edges = {
             (edge.type, str(edge.from_key), str(edge.to_key), str(edge.source))
@@ -1033,10 +1034,11 @@ def _ingest_code(
         )
         from grag.ingest.code_identity import retire_legacy_functions
 
-        retire_legacy_functions(engine, authoritative_sources, warnings)
+        structural_authority = structural_sources | removed_sources
+        retire_legacy_functions(engine, structural_authority, warnings)
         nodes_pruned = _prune_code_nodes(
             engine,
-            authoritative_sources=authoritative_sources,
+            authoritative_sources=structural_authority,
             desired_by_label_source=desired_by_label_source,
             warnings=warnings,
         )
@@ -1078,6 +1080,7 @@ def _ingest_code(
         nodes_pruned=nodes_pruned,
         edges_pruned=edges_pruned,
         files_parsed=len(successful_sources),
+        files_reused=files_reused,
         files_unchanged=len(successful_sources) - len(changed_sources),
         warnings=warnings,
     )
@@ -1114,6 +1117,7 @@ def ingest_code_paths(
             f"{resp.repos} repo(s), {resp.modules} module(s), {resp.classes} class(es), "
             f"{resp.functions} function(s), {resp.constants} constant(s), {resp.edges} edge(s) resolved; "
             f"{resp.files_unchanged}/{resp.files_parsed} file(s) unchanged (skipped); "
+            f"{resp.files_reused} parse(s) reused; "
             f"{resp.nodes_pruned} stale node(s) and {resp.edges_pruned} stale edge(s) "
             f"pruned in {target}."
         )

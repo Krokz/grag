@@ -25,7 +25,7 @@ def graph_command(args: argparse.Namespace, cfg: GragConfig) -> int:
     if args.cmd == "ingest":
         from grag.ingest.loaders import ingest_paths
 
-        print(ingest_paths(cfg, [Path(p) for p in args.paths], sections=args.sections))
+        print(ingest_paths(cfg, [Path(p) for p in args.paths], sections=args.sections, json_mode=args.json_mode))
         return 0
     if args.cmd == "ingest-code":
         from grag.ingest.code import ingest_code_paths

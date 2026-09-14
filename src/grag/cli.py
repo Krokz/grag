@@ -206,6 +206,10 @@ def main(argv: list[str] | None = None) -> int:
     ingest = sub.add_parser("ingest", help="ingest files into the graph")
     ingest.add_argument("paths", nargs="+", help="files or directories (.md/.txt/.json/.jsonl)")
     ingest.add_argument(
+        "--json-mode", choices=("records", "document"), default="records",
+        help="interpret .json as document records (default) or ordinary JSON source text; JSONL remains records",
+    )
+    ingest.add_argument(
         "--sections",
         action="store_true",
         help="section-aware Markdown ingest: Document/Section nodes from the "

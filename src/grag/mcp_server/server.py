@@ -455,6 +455,7 @@ def ingest_code(
     """Index local source structure, names, signatures, docstrings and file/line citations;
     source bodies stay in files. Incremental scans reconcile changed/removed generated
     nodes/edges while retaining authored links; check warnings and obsolete qualifiers.
+    Unchanged parses are reused within an owner; files_reused counts them, not skipped dependency checks.
     Python works by default; other supported languages/framework scripts need gragdb[code].
     Go also indexes Constant source expressions and basic interface method sets.
     Do not assume complete call/import resolution: inspect Module.code_coverage for JS/TS/Go;
@@ -480,11 +481,16 @@ def ingest_docs(
     sections: bool = True,
     label: str = "Chunk",
     background: bool = False,
+    json_mode: Literal["records", "document"] = "records",
 ) -> str:
     """Index local Markdown/text/JSON/JSONL documents with provenance. JSON expects a list
     of {text, source?, metadata?} records or a documents wrapper; JSONL one record per line.
-    Arbitrary JSON fixtures/schemas are skipped with warnings. sections=true preserves
-    heading structure for Markdown; other formats use flat chunks. label names the chunk table.
+    Use json_mode="document" for ordinary .json schemas/contracts/fixtures: validated literal
+    source text with file citations; no schema validation or reference resolution. This explicitly
+    treats record-shaped .json as one source document too; JSONL stays records. JSON is bounded
+    to 64 nesting levels and existing byte/batch limits. Invalid files warn and preserve unseen data.
+    sections=true preserves Markdown headings; JSON source text uses one preamble section.
+    label names the chunk table.
     Ingest code first to link mentioned symbols. Directory scans reconcile deleted documents;
     file updates replace generated content/links. Authored or unknown links can retain obsolete
     nodes; inspect warnings. Failed scans do not authorize deletion of unseen documents.
@@ -495,16 +501,18 @@ def ingest_docs(
 
     from grag.ingest.loaders import load_request
 
-    req, warnings, files_read = load_request([Path(p) for p in paths], label=label, sections=sections)
+    req, warnings, files_read = load_request([Path(p) for p in paths], label=label, sections=sections, json_mode=json_mode)
     if background:
         job = service.submit_ingest(req)
         payload = job.model_dump()
         payload["files_read"] = files_read
+        payload["json_mode"] = json_mode
         payload["warnings"] = warnings
         return json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
     resp = service.ingest(req)
     payload = resp.model_dump()
     payload["files_read"] = files_read
+    payload["json_mode"] = json_mode
     payload["warnings"] = [*warnings, *resp.warnings]
     return json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
 
@@ -670,10 +678,11 @@ def create_server(
         sections: bool = True,
         label: str = "Chunk",
         background: bool = False,
+        json_mode: Literal["records", "document"] = "records",
         ctx: Context | None = None,
     ) -> str:
         return ingest_docs(
-            _resolve_service(registry, ctx), paths, sections, label, background
+            _resolve_service(registry, ctx), paths, sections, label, background, json_mode
         )
 
     @server.tool(name="job_status", structured_output=False, description=_doc(job_status))

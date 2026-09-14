@@ -153,10 +153,11 @@ def test_ingest_code_is_idempotent(engine, tmp_path):
     second = ingest_code(engine, engine.config, req)
 
     # Same graph both times; the second run recognises every file as unchanged.
-    assert second.model_dump(exclude={"files_unchanged"}) == first.model_dump(
-        exclude={"files_unchanged"}
+    assert second.model_dump(exclude={"files_unchanged", "files_reused"}) == first.model_dump(
+        exclude={"files_unchanged", "files_reused"}
     )
     assert first.files_unchanged == 0
+    assert first.files_reused == 0 and second.files_reused == 2
     assert second.files_unchanged == second.files_parsed == 2
     for label, n in (("Repo", 1), ("Module", 2), ("Class", 2), ("Function", 4)):
         assert _count(engine, f"MATCH (n:{label}) RETURN count(*)") == n

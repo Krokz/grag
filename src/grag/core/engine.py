@@ -48,6 +48,7 @@ from grag.core.types import (
     Subgraph,
     make_node_id,
 )
+from grag.ingest.code_cache import ParseCache
 from grag.native import (
     configure_query_timeout,
     connection_backend,
@@ -116,6 +117,7 @@ class Engine:
         # Serialize code-ingest planning as well as publishing. Parsing stays
         # outside the write transaction, so ordinary writes can still proceed.
         self.code_ingest_lock = threading.RLock()
+        self.code_parse_cache = ParseCache()
         self._readers: queue.Queue = queue.Queue()
         self._readers_created = 0
         self._readers_lock = threading.Lock()
@@ -692,6 +694,7 @@ class Engine:
                 "writer_state": "reopen_required" if self._writer_recovery_required else "ready"}
 
     def close(self) -> None:
+        self.code_parse_cache.clear()
         # Flush the WAL to the main database file so that if the process is
         # restarted immediately there is no WAL to replay (and no replay failure
         # risk). Suppress failures: the write connection may already be closed or

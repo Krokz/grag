@@ -6,7 +6,7 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-from pathspec import GitIgnoreSpec
+from pathspec import GitIgnoreSpec, PathSpec
 
 from grag.core.errors import GragError
 from grag.core.limits import charge, read_source
@@ -86,9 +86,9 @@ class Selection:
     def __init__(self, root: Path):
         self.root = root
         self.policy_root = enclosing_root(root)
-        self._specs: dict[Path, list[GitIgnoreSpec]] = {}
+        self._specs: dict[Path, list[tuple[GitIgnoreSpec, PathSpec]]] = {}
 
-    def _rules(self, directory: Path) -> list[GitIgnoreSpec]:
+    def _rules(self, directory: Path) -> list[tuple[GitIgnoreSpec, PathSpec]]:
         if directory not in self._specs:
             specs = []
             for name in (".gitignore", ".gragignore"):
@@ -97,13 +97,15 @@ class Selection:
                     raise GragError(f"Ignore file must not be a symlink: {path}")
                 if path.exists():
                     try:
-                        specs.append(
-                            GitIgnoreSpec.from_lines(
-                                read_source(path, 1024 * 1024)
-                                .decode("utf-8")
-                                .splitlines()
-                            )
+                        files = GitIgnoreSpec.from_lines(
+                            read_source(path, 1024 * 1024)
+                            .decode("utf-8")
+                            .splitlines()
                         )
+                        # GitIgnoreSpec prioritizes direct file matches over
+                        # ancestor-directory matches. A directory being visited
+                        # is itself the target: later !*/ rules must beat *.
+                        specs.append((files, PathSpec(files.patterns)))
                     except (OSError, UnicodeError, ValueError) as exc:
                         raise GragError(
                             f"Cannot read ignore policy {path}: {exc}"
@@ -134,7 +136,8 @@ class Selection:
                 if not parent.is_relative_to(self.policy_root):
                     continue
                 name = child.relative_to(parent).as_posix() + ("/" if is_dir else "")
-                for spec in self._rules(parent):
+                for files, directories in self._rules(parent):
+                    spec = directories if is_dir else files
                     match = spec.check_file(name)
                     if match.include is not None:
                         ignored = match.include

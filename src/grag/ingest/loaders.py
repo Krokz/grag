@@ -18,12 +18,13 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Literal
 
 from pydantic import ValidationError
 
 from grag.config import GragConfig
 from grag.core.engine import Engine
-from grag.core.errors import ConfigurationError
+from grag.core.errors import ConfigurationError, ResourceLimitError
 from grag.core.limits import (
     MAX_REQUEST_BYTES,
     bounded_sources,
@@ -52,6 +53,8 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 _SUPPORTED_SUFFIXES = {".md", ".txt", ".json", ".jsonl"}
+JsonMode = Literal["records", "document"]
+_JSON_MAX_DEPTH = 64
 
 
 # --- public: ingest_documents ---------------------------------------------------
@@ -164,12 +167,17 @@ def _embed_pending(engine: Engine, config: GragConfig, label: str) -> None:
 
 
 @bounded_sources
-def load_paths(paths: list[Path], *, errors: list[str] | None = None) -> tuple[list[IngestDocument], list[str], int]:
+def load_paths(
+    paths: list[Path], *, errors: list[str] | None = None, json_mode: JsonMode = "records",
+) -> tuple[list[IngestDocument], list[str], int]:
     """Load .md/.txt/.json/.jsonl files (directories walked recursively).
 
     Returns (documents, warnings, files_read). Unreadable files and
     unsupported extensions are collected as warnings instead of failing.
+    json_mode=document treats each .json file as literal source text, not records.
     """
+    if json_mode not in ("records", "document"):
+        raise ConfigurationError("json_mode must be 'records' or 'document'.")
     documents: list[IngestDocument] = []
     warnings: list[str] = []
     files_read = 0
@@ -194,13 +202,13 @@ def load_paths(paths: list[Path], *, errors: list[str] | None = None) -> tuple[l
             )
             continue
         try:
-            loaded = _load_file(path, suffix)
+            loaded = _load_file(path, suffix, json_mode=json_mode)
         except FileNotFoundError:
             warnings.append(f"skipped {path}: file not found")
             if errors is not None:
                 errors.append(warnings[-1])
             continue
-        except (OSError, UnicodeDecodeError, ValueError, ValidationError) as exc:
+        except (OSError, UnicodeDecodeError, ValueError, ValidationError, RecursionError) as exc:
             warnings.append(f"skipped {path}: could not load ({exc})")
             if errors is not None:
                 errors.append(warnings[-1])
@@ -211,9 +219,11 @@ def load_paths(paths: list[Path], *, errors: list[str] | None = None) -> tuple[l
     return documents, warnings, files_read
 
 
-def load_request(paths: list[Path], *, sections: bool = False, label: str = "Chunk") -> tuple[IngestRequest, list[str], int]:
+def load_request(
+    paths: list[Path], *, sections: bool = False, label: str = "Chunk", json_mode: JsonMode = "records",
+) -> tuple[IngestRequest, list[str], int]:
     errors: list[str] = []
-    documents, warnings, count = load_paths(paths, errors=errors)
+    documents, warnings, count = load_paths(paths, errors=errors, json_mode=json_mode)
     if errors:
         warnings.append("Source scan incomplete; directory deletion synchronization was skipped.")
     return IngestRequest(documents=documents, sections=sections, label=label,
@@ -221,7 +231,7 @@ def load_request(paths: list[Path], *, sections: bool = False, label: str = "Chu
 
 
 def ingest_paths(
-    config: GragConfig, paths: list[Path], *, sections: bool = False
+    config: GragConfig, paths: list[Path], *, sections: bool = False, json_mode: JsonMode = "records",
 ) -> str:
     """Load .md/.txt/.json/.jsonl files and ingest them as chunked documents
     (or, with ``sections``, as Document/Section/Chunk graphs).
@@ -230,7 +240,7 @@ def ingest_paths(
     """
     from grag.client import GraphClient
 
-    req, warnings, files_read = load_request(paths, sections=sections)
+    req, warnings, files_read = load_request(paths, sections=sections, json_mode=json_mode)
     documents = req.documents
     with GraphClient(config) as client:
         resp = IngestResponse.model_validate(client.call("ingest", req))
@@ -250,6 +260,8 @@ def ingest_paths(
             f"node(s) pruned from label '{resp.label}' in {target}."
         )
     ]
+    if json_mode == "document":
+        lines.append("JSON mode: document (literal source text; references are not resolved).")
     warnings.extend(resp.warnings)
     if warnings:
         lines.append("Warnings:")
@@ -257,20 +269,33 @@ def ingest_paths(
     return "\n".join(lines)
 
 
-def _load_file(path: Path, suffix: str) -> list[IngestDocument]:
-    raw = read_source(path, MAX_REQUEST_BYTES)
-    charge("source_document_bytes", len(raw))
+def _load_file(path: Path, suffix: str, *, json_mode: JsonMode = "records") -> list[IngestDocument]:
+    try:
+        raw = read_source(path, MAX_REQUEST_BYTES)
+        charge("source_document_bytes", len(raw))
+    except ResourceLimitError as exc:
+        raise ResourceLimitError(
+            exc.resource, exc.limit,
+            hint="Split a large document into smaller source files, or select fewer files per ingest. Document byte limits are fixed.",
+        ) from exc
     text = raw.decode("utf-8")
     if suffix in (".md", ".txt"):
         return [IngestDocument(text=text, source=str(path))]
     if suffix == ".json":
+        if json_mode == "document":
+            text = text.removeprefix("\ufeff")  # accept UTF-8 BOMs without changing record imports
+            _validate_json_document(text)
+            return [IngestDocument(text=text, source=str(path), metadata={
+                "format": "json", "coverage": "source_text", "source_sha256": hashlib.sha256(raw).hexdigest(),
+            })]
         data = json.loads(text)
         if isinstance(data, dict) and "documents" in data:
             data = data["documents"]
         if not isinstance(data, list):
             raise ValueError(
                 ".json ingestion expects a list of {text, source?, metadata?} "
-                "or an object with a 'documents' list"
+                "or an object with a 'documents' list; for ordinary JSON use "
+                "json_mode='document' (CLI: --json-mode document)"
             )
         return [IngestDocument.model_validate(item) for item in data]
     docs: list[IngestDocument] = []
@@ -279,6 +304,38 @@ def _load_file(path: Path, suffix: str) -> list[IngestDocument]:
         if stripped:
             docs.append(IngestDocument.model_validate(json.loads(stripped)))
     return docs
+
+
+def _validate_json_document(text: str) -> None:
+    """Validate bounded JSON syntax, retaining source spelling instead of values.
+
+    Preflight depth outside strings before the recursive stdlib decoder. Numeric
+    lexemes stay strings during validation, avoiding overflow or huge-int conversion.
+    No normalization, schema validation, reference resolution or network access.
+    """
+    depth = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > _JSON_MAX_DEPTH:
+                raise ValueError(f"JSON document nesting exceeds {_JSON_MAX_DEPTH}; select a shallower source document")
+        elif char in "]}":
+            depth -= 1
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"{value} is not a JSON number")
+
+    json.loads(text, parse_int=str, parse_float=str, parse_constant=reject_constant)
 
 
 # --- chunking ---------------------------------------------------------------------

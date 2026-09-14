@@ -506,9 +506,9 @@ class CodeIngestRequest(BaseModel):
     calls: bool = True
     max_file_kb: int = Field(default=1024, ge=1, le=32_768)
     # Skip the database writes for files whose content (and parse options)
-    # match the hash recorded at their last ingest. Every file is still
-    # parsed so cross-file IMPORTS/CALLS/INHERITS resolve, but only changed
-    # files' nodes and edges touch the write lock. False forces a full rewrite.
+    # match the hash recorded at their last ingest. Reuse bounded owner-local
+    # parse summaries, then resolve dependencies across the current scope.
+    # False forces parsing and rewriting, bypassing parse reuse.
     incremental: bool = True
 
 
@@ -522,9 +522,11 @@ class CodeIngestResponse(BaseModel):
     edges: int = 0
     nodes_pruned: int = 0
     edges_pruned: int = 0
-    # Incremental accounting: files parsed this run, and how many of them
-    # were unchanged since their last ingest (their writes were skipped).
+    # files_parsed retains its historical count of successfully processed files,
+    # including reused parses. files_reused is the subset served from the cache;
+    # files_unchanged counts files whose graph writes were skipped.
     files_parsed: int = 0
+    files_reused: int = 0
     files_unchanged: int = 0
     warnings: list[str] = Field(default_factory=list)
 

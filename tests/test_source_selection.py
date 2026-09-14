@@ -28,6 +28,67 @@ def rows(engine, cypher):
     return engine.execute(cypher).rows
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("policy_file", [".gitignore", ".gragignore"])
+def test_ignore_all_can_reinclude_directories_and_terraform(tmp_path, explicit, policy_file):
+    """Directory negations must survive pruning for both scan entry points."""
+    import subprocess
+
+    from grag.ingest.selection import selected_files
+
+    root = tmp_path.resolve() / "repo"
+    root.mkdir()
+    subprocess.run(  # noqa: S603 — fixed git argv in an isolated fixture
+        ["git", "init", "-q", str(root)],  # noqa: S607
+        check=True, capture_output=True,
+    )
+    first = write(root, "terraform/main.tf", 'module "network" { source = "./modules/network" }\n')
+    second = write(root, "terraform/modules/network/main.tf", 'variable "region" {}\n')
+    private = write(root, "terraform/prod.tfvars", 'password = "fixture-only"\n')
+    write(root, "unrelated/private.py")
+    write(root, ".gitignore", "*\n")
+    paths = [first, second, private] if explicit else [root]
+
+    assert list(selected_files(paths, [])) == []
+    policy = "*\n!*/\n!*.tf\n"
+    write(root, policy_file, policy)
+    assert {p for _, p in selected_files(paths, [])} == {first, second}
+    if policy_file == ".gitignore":
+        result = subprocess.run(  # noqa: S603 — read-only oracle in the fixture
+            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"],  # noqa: S607
+            check=True, capture_output=True, text=True,
+        )
+        assert set(result.stdout.splitlines()) == {
+            p.relative_to(root).as_posix() for p in (first, second)
+        }
+
+
+def test_scoped_gragignore_keeps_other_files_and_terraform_cache_excluded(tmp_path):
+    from grag.ingest.selection import selected_files
+
+    root = tmp_path.resolve() / "repo"
+    root.mkdir()
+    (root / ".git").mkdir()
+    allowed = {
+        write(root, "terraform/main.tf"),
+        write(root, "terraform/modules/network/main.tf"),
+    }
+    for name in (
+        "terraform/prod.tfvars", "terraform/terraform.tfstate", "terraform/private.py",
+        "terraform/.terraform/modules/downloaded/main.tf", "unrelated/main.tf",
+    ):
+        write(root, name)
+    write(root, ".gitignore", "*\n")
+    # Re-including files alone cannot reopen a pruned parent directory.
+    write(root, ".gragignore", "!/terraform/**/*.tf\n")
+    assert list(selected_files([root], [])) == []
+    write(root, ".gragignore", (
+        "/terraform/**\n!/terraform/\n!/terraform/**/\n"
+        "!/terraform/**/*.tf\n/terraform/**/.terraform/\n"
+    ))
+    assert {p for _, p in selected_files([root], [])} == allowed
+
+
 def test_ignore_rules_nested_worktree_and_file_roots(engine, tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
