@@ -141,9 +141,9 @@ export function GraphCanvas({
       (!f ||
         n.id.toLowerCase().includes(f) ||
         JSON.stringify(n.properties).toLowerCase().includes(f));
-    // ForceGraph writes simulation coordinates onto each node. Preserve those
-    // object identities across graph merges so adding neighbors does not reset
-    // every existing node (especially the selected one) to a random position.
+    // ForceGraph writes simulation coordinates onto each node. Graph merges keep
+    // those coordinates when updating properties, so existing nodes do not
+    // jump back to random positions when neighbors or edited records arrive.
     const nodes = subgraph.nodes.filter(visible) as FgNode[];
     const ids = new Set(nodes.map((n) => n.id));
     const links = subgraph.edges

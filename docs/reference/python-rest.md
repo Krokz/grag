@@ -35,6 +35,7 @@ The built-in OpenAPI schema lists the running server's endpoints and models.
 | `GET /api/jobs`, `GET /api/jobs/{job_id}` | List or inspect process-local job records. |
 | `GET /api/index/status` | Code freshness, registered roots and verification diagnostics. Development: `check=false` reads only an already loaded owner's cached observations/runtime; no database open or refresh. Require health capability `passive_diagnostics=1` before sending this to older servers. |
 | `GET /api/graph/sample`, `GET /api/graph/full` | Graph views within server response/work limits. |
+| `POST /api/memories` | Development UI browse: optional label/query, browse/tasks/recent view, inactive evidence, offset and limit. Returns bounded summaries and pagination; never generates memories. |
 | `GET /api/graph/export` | Development UI topology download for full SVG export, outside the ordinary reply limit. No node bodies, vectors or revision history; not a backup. |
 | `GET /api/export` | Stream a completed consistent format-2 snapshot; not ordinary response JSON. |
 | `GET /api/dbs` | List databases and the selected default. |

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useResizable } from './hooks';
-import { api, hasToken, setDb, setToken, setUnauthorizedHandler, toFailure } from './api';
+import { api, hasToken, memoryApi, setDb, setToken, setUnauthorizedHandler, toFailure } from './api';
 import type {
   ApiFailure,
   GraphStats,
@@ -11,7 +11,7 @@ import type {
   SearchResponse,
   Subgraph,
 } from './types';
-import { mergeSubgraphs, neighborCypher, pkMapFromSchema } from './graph-utils';
+import { cypherLiteral, mergeSubgraphs, neighborCypher, pkMapFromSchema } from './graph-utils';
 import { SchemaPanel } from './components/SchemaPanel';
 import {
   GraphCanvas,
@@ -23,15 +23,23 @@ import { SearchBar, SearchPanel } from './components/SearchBar';
 import { Inspector } from './components/Inspector';
 import { setFreshnessMode } from './api';
 import type { FreshnessMode, FreshnessReport } from './types';
+import {MemoryPanel} from './components/MemoryPanel';
+import {HealthPanel} from './components/HealthPanel';
+import type {RecordIdentity} from './components/MemoryDetail';
+import {IndexFreshness} from './components/IndexFreshness';
 
 const EMPTY_GRAPH: Subgraph = { nodes: [], edges: [] };
 
 export default function App() {
+  const [screen,setScreen]=useState<'memories'|'graph'|'health'>('graph');
+  const [memoryFocus,setMemoryFocus]=useState<RecordIdentity|null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [readMode, setReadMode] = useState<FreshnessMode>('allow_stale');
   const [lastFreshness, setLastFreshness] = useState<FreshnessReport | null>(null);
   const [readNotice, setReadNotice] = useState('');
   const readEpoch = useRef(0);
+  const memoryScope = useRef(0);
+  const memoryReads = useRef(new Map<string,number>());
   const [dbs, setDbs] = useState<string[]>([]);
   const [db, setDbState] = useState<string | null>(null);
   const [dbsLoaded, setDbsLoaded] = useState(false);
@@ -145,6 +153,9 @@ export default function App() {
   }, []);
 
   const selectDb = useCallback((name: string) => {
+    readEpoch.current += 1;
+    memoryScope.current += 1;
+    setMemoryFocus(null);setSchema(null);
     setDb(name);
     setDbState(name);
   }, []);
@@ -153,6 +164,7 @@ export default function App() {
   useEffect(() => {
     if (!dbsLoaded) return;
     readEpoch.current += 1;
+    memoryScope.current += 1;memoryReads.current.clear();
     setRunning(false);
     setSearching(false);
     setGraph(EMPTY_GRAPH);
@@ -168,9 +180,11 @@ export default function App() {
     setReadNotice('');
     setLabelFilter(null);
     setFilter('');
+    setMemoryFocus(null);
     loadSchema();
-    loadSample();
   }, [dbsLoaded, db, readMode, loadSchema, loadSample]);
+
+  useEffect(()=>{if(dbsLoaded && screen==='graph' && !graph.nodes.length) void loadSample();},[dbsLoaded,screen,db,readMode,loadSample]);
 
   const runQuery = useCallback(
     async (cypher: string, mode?: ApplyMode) => {
@@ -276,13 +290,58 @@ export default function App() {
     [graph, selectedId],
   );
 
+  const exploreMemory=(node:NodeRecord)=>{
+    setGraph(g=>({nodes:[...g.nodes.filter(n=>n.id!==node.id),node],edges:g.edges}));
+    setScreen('graph'); setFilter(''); setLabelFilter(null); setSelectedId(node.id);
+    setFocusRequest(current=>({nodeId:node.id,revision:(current?.revision ?? 0)+1,keepStable:false}));
+  };
+  const inspectRecord=(node:NodeRecord)=>{
+    const pk=pkMap.get(node.label);
+    if(!pk) return;
+    setMemoryFocus({id:node.id,label:node.label,key:node.properties[pk]});setScreen('memories');
+  };
+
+  const beginMemorySave=useCallback(()=>{
+    const scope=memoryScope.current;
+    const client=memoryApi();
+    return async(identity:RecordIdentity)=>{
+      if(scope!==memoryScope.current) return;
+      // Older graph reads must not overwrite a newly committed edit.
+      ++readEpoch.current;
+      const sequence=(memoryReads.current.get(identity.id) ?? 0)+1;
+      memoryReads.current.set(identity.id,sequence);
+      const isCurrent=()=>scope===memoryScope.current && memoryReads.current.get(identity.id)===sequence;
+      setRunning(false);setSearching(false);setSchemaLoading(false);
+      setResult(null);setQueryError(null);setSearchResult(null);setSearchError(null);setAppliedNote(null);setSeeds(new Map());
+      try {
+        const pk=pkMap.get(identity.label);
+        if(!pk) throw new Error('The edited record has no known primary key.');
+        const response=await client.query(`MATCH (n:${identity.label}) WHERE n.${pk}=${cypherLiteral(identity.key)} RETURN n`);
+        if(!isCurrent()) return;
+        const updated=response.subgraph.nodes.find(n=>n.id===identity.id);
+        if(!updated) throw new Error('The edited record no longer exists.');
+        setGraph(g=>({...g,nodes:g.nodes.map(n=>n.id===updated.id?{...n,...updated}:n)}));
+        setReadNotice('');
+      } catch(e) {
+        if(!isCurrent()) return;
+        // The write succeeded; a failed readback must not leave known-old data
+        // in the canvas or turn a confirmed save into an ambiguous write.
+        setGraph(g=>({nodes:g.nodes.filter(n=>n.id!==identity.id),edges:g.edges.filter(e=>e.source!==identity.id && e.target!==identity.id)}));
+        setReadNotice(`Memory saved, but its graph view could not refresh: ${toFailure(e).message}`);
+      }
+    };
+  },[pkMap]);
+
   return (
     <div className="app">
       <header className="topbar">
         <span className="brand">
-          g<span>rag</span> · graph explorer
+          g<span>rag</span> · project memory
         </span>
-        <SearchBar searching={searching} onSearch={runSearch} />
+        <nav className="main-nav" aria-label="Main navigation">
+          {(['graph','memories','health'] as const).map(name=><button key={name} aria-current={screen===name?'page':undefined} onClick={()=>{setMemoryFocus(null);setScreen(name);}}>{name[0].toUpperCase()+name.slice(1)}</button>)}
+        </nav>
+        {screen==='graph' && <SearchBar searching={searching} onSearch={runSearch} />}
         <select
           className="db-select"
           aria-label="Code index freshness policy"
@@ -298,14 +357,11 @@ export default function App() {
           <option value="wait">Wait, allow stale</option>
           <option value="require">Require fresh code</option>
         </select>
-        {(lastFreshness || readNotice) && (
-          <span className="health" title={readNotice || `Last read: code index ${lastFreshness?.status}; checked ${lastFreshness?.checked_at ?? 'not yet'}.`}>
-            {lastFreshness ? `index: ${lastFreshness.status}${lastFreshness.timed_out ? ' (wait expired)' : ''}` : 'index not verified'}
-          </span>
-        )}
+        {screen==='graph' && dbsLoaded && <IndexFreshness key={`${db}:${readMode}`} lastRead={lastFreshness} readNotice={readNotice}/>}
         {dbs.length > 1 && db != null && (
           <select
             className="db-select"
+            aria-label="Selected database"
             value={db}
             onChange={(e) => selectDb(e.target.value)}
             title="database"
@@ -363,7 +419,7 @@ export default function App() {
         </div>
       )}
 
-      {(searchResult || searchError) && (
+      {screen==='graph' && (searchResult || searchError) && (
         <SearchPanel
           result={searchResult}
           error={searchError}
@@ -376,7 +432,11 @@ export default function App() {
         />
       )}
 
-      <div className="main" style={{ gridTemplateColumns: `${sidebarWidth}px 4px minmax(0, 1fr)` }}>
+      {screen==='graph' && readNotice && <div className="context-panel error-banner" role="alert">{readNotice}</div>}
+
+      {dbsLoaded && screen==='memories' && <MemoryPanel key={`${db}:${readMode}`} schema={schema} schemaError={readNotice} initial={memoryFocus} onExplore={exploreMemory} onRefreshSchema={loadSchema} onBeginSave={beginMemorySave}/>}
+      {dbsLoaded && screen==='health' && <HealthPanel key={`${db}:${readMode}`}/>}
+      {screen==='graph' && <div className="main" style={{ gridTemplateColumns: `${sidebarWidth}px 4px minmax(0, 1fr)` }}>
         <SchemaPanel
           schema={schema}
           loading={schemaLoading}
@@ -390,6 +450,7 @@ export default function App() {
         />
         <div className="center">
           <GraphCanvas
+            key={`${db}:${readMode}`}
             subgraph={graph}
             pkMap={pkMap}
             seeds={seeds}
@@ -406,11 +467,13 @@ export default function App() {
           />
           {selectedNode && (
             <Inspector
+              key={selectedNode.id}
               node={selectedNode}
               pkMap={pkMap}
               seed={seeds.get(selectedNode.id)}
               onClose={() => setSelectedId(null)}
               onExpand={expandNode}
+              onInspect={inspectRecord}
             />
           )}
           <div
@@ -433,7 +496,7 @@ export default function App() {
             height={consoleHeight}
           />
         </div>
-      </div>
+      </div>}
     </div>
   );
 }

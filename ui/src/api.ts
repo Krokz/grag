@@ -7,6 +7,7 @@ import type {
   QueryResponse,
   SchemaDocument,
   SearchResponse,
+  MemoryList, ContextResponse, MutationRequest, MutationResponse, IndexStatus, IndexObservation, JobSummary,
 } from './types';
 
 export class ApiError extends Error implements ApiFailure {
@@ -59,18 +60,18 @@ export function setUnauthorizedHandler(fn: (() => void) | null): void {
   onUnauthorized = fn;
 }
 
-function apiUrl(path: string): string {
-  if (!currentDb) return path;
+function apiUrl(path: string, db: string | null = currentDb): string {
+  if (!db) return path;
   const sep = path.includes('?') ? '&' : '?';
-  return `${path}${sep}db=${encodeURIComponent(currentDb)}`;
+  return `${path}${sep}db=${encodeURIComponent(db)}`;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, db: string | null = currentDb): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
   let res: Response;
   try {
-    res = await fetch(apiUrl(path), { headers, ...init });
+    res = await fetch(apiUrl(path, db), { headers, ...init });
   } catch {
     throw new ApiError(
       'cannot reach the grag server',
@@ -100,6 +101,23 @@ export function toFailure(e: unknown): ApiFailure {
   return { message: e instanceof Error ? e.message : String(e), hint: null, status: 0 };
 }
 
+/** Freeze database/policy for a mounted view, including ambiguous-write retries. */
+export function memoryApi() {
+  const db = currentDb;
+  const policy = {freshness: readMode, freshness_timeout_ms: 5000};
+  const post = <T>(path: string, body: unknown) => request<T>(path, {method:'POST', body:JSON.stringify(body)}, db);
+  return {
+    list: (options: Record<string, unknown>) => post<MemoryList>('/api/memories', {...policy, ...options}),
+    query: (cypher: string) => post<QueryResponse>('/api/query', {...policy, cypher, limit:100}),
+    context: (options: Record<string, unknown>) => post<ContextResponse>('/api/context',
+      {...policy, token_budget:8192, hops:0, evidence:'all', ...options}),
+    save: (body: MutationRequest) => post<MutationResponse>('/api/nodes/upsert', body),
+    index: () => request<IndexStatus>(`/api/index/status?freshness=${policy.freshness}&freshness_timeout_ms=5000`, undefined, db),
+    observeIndex: (signal: AbortSignal) => request<IndexObservation>('/api/index/status?check=false', {signal}, db),
+    jobs: () => request<{jobs: JobSummary[]}>('/api/jobs?limit=20', undefined, db),
+  };
+}
+
 export const api = {
   health: () => request<HealthResponse>('/api/health'),
 
@@ -112,8 +130,9 @@ export const api = {
       withReadPolicy(`/api/graph/sample?limit=${limit}${label ? `&label=${encodeURIComponent(label)}` : ''}`),
     ),
 
-  // Every user node and edge, unclamped — feeds the whole-database SVG export.
-  full: () => request<GraphSample>(withReadPolicy('/api/graph/full')),
+  // Complete topology from a captured download, outside ordinary query limits.
+  // Carries keys/labels/endpoints only; full properties are unnecessary for SVG.
+  full: () => request<GraphSample>(withReadPolicy('/api/graph/export')),
 
   query: (cypher: string, limit?: number) =>
     request<QueryResponse>('/api/query', {

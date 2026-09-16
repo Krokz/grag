@@ -5,7 +5,8 @@ documents and authored knowledge, then returns relevant records and connections
 with citations. The harness decides what to ask, what to remember and how to
 answer the user. grag does not run an LLM or autonomously create a project ontology.
 
-This describes the implementation shipped in [grag 0.10.1](https://github.com/Krokz/grag/tree/v0.10.1).
+This describes the current source checkout. The latest published baseline is
+[grag 0.10.1](https://github.com/Krokz/grag/tree/v0.10.1); the memory UI below is pending release.
 The usual setup is **one database per checkout, one owning process, and any number
 of clients using that process**. BM25 works without an embedding model.
 
@@ -64,6 +65,21 @@ is explicit and still requires a single owner. An optional HTTPS deployment uses
 the same server and proxy arrangement on another host; there is no separate
 distributed database layer. See [projects](guides/projects.md) and
 [servers and multiple clients](operations/server.md).
+
+### Browser memory workflow
+
+The browser's Memories view lists stored records through a bounded, schema-aware
+read in `memory_view.py`. It does not create concepts, decisions or a required
+memory schema. History inspection uses the existing context API; corrections and
+reviews use the existing node upsert with revision guards and retry receipts.
+The Graph view retains Cypher and relationship exploration, while Health observes
+the selected database's registered code roots, jobs and optional embedding worker.
+See [review memory in the UI](guides/ui.md).
+
+Full SVG export captures only node keys/labels and relationship endpoints to a
+temporary file under the serialized writer lock. The file is delivered after
+releasing native readers and the lock, so a slow download does not hold up writes.
+Ordinary query reply limits remain unchanged; this drawing is not a data backup.
 
 ## Responsibilities in the code
 

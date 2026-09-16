@@ -977,3 +977,106 @@ table.results td.cell-truncated:hover {
 .context-text {
   margin-top: 8px;
 }
+
+/* Memory workspace: a calm list and reading pane, with the explorer one click away. */
+.app > .memory-workspace, .app > .health-workspace { grid-row: 3; min-height: 0; overflow: auto; }
+.topbar { min-height: 58px; flex-wrap: wrap; padding-block: 8px; }
+.main-nav { display: flex; gap: 4px; }
+.main-nav button { background: transparent; border-color: transparent; color: var(--text-dim); }
+.main-nav button[aria-current="page"] { color: var(--accent); background: #133044; border-color: #28546d; }
+.eyebrow { color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; }
+.muted { color: var(--text-dim); font-size: 12px; }
+.warning { color: var(--warn); }
+.memory-workspace { display: flex; flex-direction: column; padding: 28px 32px 0; }
+.workspace-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+.workspace-heading h1 { font-size: 26px; font-weight: 600; letter-spacing: -.7px; margin: 5px 0; }
+.workspace-heading p { color: var(--text-dim); margin: 5px 0; }
+.memory-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.section-tabs { display: flex; gap: 4px; }
+.section-tabs button { background: transparent; color: var(--text-dim); border-color: transparent; }
+.section-tabs button[aria-pressed="true"], .section-tabs button[aria-selected="true"] { background: var(--panel-2); color: var(--text); border-color: #374758; }
+.memory-search { display: flex; gap: 5px; flex: 1; min-width: 220px; }
+.memory-search input { min-width: 100px; flex: 1; }
+select, textarea { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; }
+textarea { resize: vertical; }
+button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.checkbox { display: flex; gap: 6px; align-items: center; color: var(--text-dim); font-size: 12px; }
+.view-explainer { font-size: 12px; color: var(--text-dim); margin: 12px 0 18px; max-width: 1100px; }
+.memory-columns { display: grid; grid-template-columns: minmax(280px, 36%) minmax(0, 1fr); flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: 12px 12px 0 0; background: var(--panel); }
+.memory-list { overflow: auto; padding: 16px; border-right: 1px solid var(--border); }
+.list-heading { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; font-size: 12px; }
+.memory-card { display: block; text-align: left; width: 100%; white-space: normal; padding: 15px; margin-bottom: 8px; background: transparent; border-color: transparent; }
+.memory-card:hover { background: var(--panel-2); }
+.memory-card.selected { border-color: #28546d; background: #102735; }
+.card-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-dim); font-size: 11px; }
+.memory-card h2 { font-size: 15px; font-weight: 600; margin: 7px 0; overflow-wrap: anywhere; }
+.memory-card p { color: var(--text-dim); font-size: 12px; line-height: 1.6; margin: 7px 0 12px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.memory-card small { color: #8195a6; font-size: 10px; }
+.memory-empty { padding: 30px 12px; color: var(--text-dim); }
+.memory-empty h2 { font-size: 18px; color: var(--text); }
+.pagination { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-block: 16px; font-size: 11px; color: var(--text-dim); }
+.detail-placeholder { padding: 68px 48px; max-width: 600px; }
+.detail-placeholder h2 { font-size: 26px; font-weight: 500; line-height: 1.35; }
+.detail-placeholder p { color: var(--text-dim); line-height: 1.8; }
+.placeholder-steps { display: grid; gap: 18px; color: #738fa4; margin-top: 40px; font-size: 12px; }
+.memory-detail { padding: 28px 34px; overflow: auto; min-width: 0; }
+.detail-heading h2 { font-size: 23px; font-weight: 550; line-height: 1.4; margin: 5px 0; overflow-wrap: anywhere; }
+.record-id { flex-shrink: 0; min-height: 16px; line-height: 1.6; color: #7f94a5; font-size: 10px; display: block; overflow-wrap: anywhere; margin: 8px 0 18px; }
+.badges { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.evidence-badge { display: inline-block; padding: 2px 8px; font-size: 10px; border: 1px solid #324153; border-radius: 12px; }
+.detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 18px; }
+.record-section { border-top: 1px solid var(--border); padding: 18px 0; }
+.record-section h3 { font-size: 12px; text-transform: capitalize; color: #9fb4c4; margin: 0 0 10px; font-weight: 600; }
+.prose { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; font: inherit; }
+pre.prose { font: 12px/1.65 var(--mono); }
+.citation { display: flex; gap: 8px; align-items: start; flex-wrap: wrap; }
+.citation code, .citation a { font-size: 11px; overflow-wrap: anywhere; color: #9dc3df; flex: 1; min-width: 120px; }
+.citation button { font-size: 10px; }
+summary { cursor: pointer; color: var(--text-dim); font-size: 12px; padding-block: 4px; }
+.fact-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(105px,1fr)); gap: 8px; margin-block: 12px; }
+.fact-grid > div { background: var(--panel-2); padding: 10px; border-radius: 6px; }
+.fact-grid strong { display: block; font-size: 18px; }
+.fact-grid span { color: var(--text-dim); font-size: 10px; }
+.related-record { display: block; text-align: left; width: 100%; white-space: normal; margin-block: 7px; overflow-wrap: anywhere; }
+.related-record span, .related-record small { display: block; }
+.related-record small { margin-top: 5px; color: var(--text-dim); }
+.edit-memory { border: 1px solid #345268; background: #111f2b; padding: 18px; border-radius: 8px; margin-bottom: 18px; }
+.edit-memory h3 { margin: 0 0 12px; }
+.edit-memory fieldset { border: 0; padding: 0; min-width: 0; }
+.edit-memory label { display: grid; gap: 6px; margin-bottom: 14px; color: var(--text-dim); }
+.edit-memory input, .edit-memory textarea { width: 100%; }
+.edit-memory > button { margin-right: 8px; }
+.inline-error { background: var(--danger-bg); border: 1px solid #582d31; border-radius: 6px; color: var(--danger); padding: 12px; margin-block: 10px; overflow-wrap: anywhere; }
+.inline-error button { display: block; margin-top: 10px; }
+.save-notice { color: var(--ok); }
+.history-entry { padding: 16px 0; border-bottom: 1px solid var(--border); }
+.history-entry p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.history-entry > button { margin-top: 12px; }
+.snapshot { margin-top: 24px; border: 1px dashed #456278; border-radius: 8px; padding: 15px; }
+.health-workspace { padding: 32px; }
+.health-cards { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; }
+.health-cards section, .health-section { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); padding: 22px; }
+.health-cards h2 { font-size: 13px; color: var(--text-dim); font-weight: 500; margin: 0 0 16px; }
+.health-cards strong { font-size: 25px; font-weight: 550; text-transform: capitalize; }
+.health-cards p { color: var(--text-dim); }
+.health-cards .scope-id { font-size: 18px; overflow-wrap: anywhere; }
+.health-section { margin-top: 20px; }
+.health-section h2 { margin-top: 0; font-size: 17px; }
+.root-row { padding: 14px 0; border-top: 1px solid var(--border); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; overflow-wrap: anywhere; }
+.root-row small { display: block; color: var(--text-dim); }
+.insp-actions { flex-wrap: wrap; }
+@media(max-width: 1000px) {
+  .memory-workspace, .health-workspace { padding: 20px 16px 0; }
+  .memory-detail { padding: 22px; }
+  .topbar .brand { font-size: 13px; }
+  .topbar .health { font-size: 10px; }
+}
+@media(max-width: 760px) {
+  .memory-columns { display: block; overflow: auto; }
+  .memory-list { max-height: 48vh; border-right: 0; border-bottom: 1px solid var(--border); }
+  .memory-detail { overflow: visible; }
+  .workspace-heading h1 { font-size: 21px; }
+  .health-cards { grid-template-columns: 1fr; }
+  .detail-placeholder { padding: 24px; }
+  .topbar .brand { width: 100%; }
+}

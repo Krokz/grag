@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { NodeRecord } from '../types';
 import { colorForLabel } from '../graph-utils';
+import {Coverage, EvidenceBadges, SourceCitation} from './RecordFacts';
 
 interface Props {
   node: NodeRecord;
@@ -8,12 +9,13 @@ interface Props {
   seed: { score: number; match: string } | undefined;
   onClose: () => void;
   onExpand: (node: NodeRecord) => void;
+  onInspect: (node: NodeRecord) => void;
 }
 
-export function Inspector({ node, pkMap, seed, onClose, onExpand }: Props) {
+export function Inspector({ node, pkMap, seed, onClose, onExpand, onInspect }: Props) {
   const [copied, setCopied] = useState(false);
   const pk = pkMap.get(node.label);
-  const entries = Object.entries(node.properties).filter(([k]) => !k.startsWith('_'));
+  const entries = Object.entries(node.properties).filter(([k]) => !k.startsWith('_') && k !== 'code_coverage');
 
   const copyId = async () => {
     try {
@@ -52,7 +54,11 @@ export function Inspector({ node, pkMap, seed, onClose, onExpand }: Props) {
           <button onClick={() => onExpand(node)} title="double-click a node does the same">
             Expand neighbors
           </button>
+          <button onClick={() => onInspect(node)}>Evidence &amp; history</button>
         </div>
+        <EvidenceBadges node={node}/>
+        <SourceCitation source={node.properties._source} properties={node.properties}/>
+        <Coverage value={node.properties.code_coverage}/>
         {entries.length > 0 && (
           <table className="kv">
             <tbody>
@@ -65,7 +71,7 @@ export function Inspector({ node, pkMap, seed, onClose, onExpand }: Props) {
             </tbody>
           </table>
         )}
-        <pre className="raw">{JSON.stringify(node.properties, null, 2)}</pre>
+        <details><summary>Raw properties</summary><pre className="raw">{JSON.stringify(node.properties, null, 2)}</pre></details>
       </div>
     </div>
   );

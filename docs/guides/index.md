@@ -39,6 +39,7 @@ to the detailed contracts when they matter.
 | Control indexed files and ignore rules | [Source selection](source-scope.md) |
 | Index Markdown, PDFs or JSON | [Documents](documents.md) |
 | Review a memory's earlier versions | [History and evidence](history.md) |
+| Browse and correct memories in the browser | [Review memory in the UI](ui.md) |
 | Find the next unfinished task | [Resume work](resume.md) |
 | Verify a code citation is current | [Code freshness](freshness.md) |
 | Add semantic search | [Optional embeddings](embeddings.md) |

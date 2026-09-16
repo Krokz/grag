@@ -73,9 +73,11 @@ export function displayName(node: NodeRecord, pkMap: Map<string, string>): strin
 
 export function mergeSubgraphs(a: Subgraph, b: Subgraph): Subgraph {
   const nodes = new Map(a.nodes.map((n) => [n.id, n]));
-  for (const n of b.nodes) if (!nodes.has(n.id)) nodes.set(n.id, n);
+  // Incoming properties are authoritative, including omitted/cleared fields.
+  // Keep existing simulation coordinates while replacing the stored record.
+  for (const n of b.nodes) nodes.set(n.id, {...nodes.get(n.id), ...n});
   const edges = new Map(a.edges.map((e) => [e.id, e]));
-  for (const e of b.edges) if (!edges.has(e.id)) edges.set(e.id, e);
+  for (const e of b.edges) edges.set(e.id, {...edges.get(e.id), ...e});
   return { nodes: [...nodes.values()], edges: [...edges.values()] };
 }
 
@@ -83,7 +85,7 @@ function escapeCypherString(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
-function cypherLiteral(value: unknown): string {
+export function cypherLiteral(value: unknown): string {
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return `'${escapeCypherString(String(value))}'`;
 }

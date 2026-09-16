@@ -71,6 +71,7 @@ from grag.core.types import (
     UpsertNodesRequest,
     merge_subgraphs,
 )
+from grag.memory_view import MemoryList, MemoryListRequest
 
 if TYPE_CHECKING:
     from grag.embedworker import EmbedWorker
@@ -496,6 +497,12 @@ class GragService:
             return jobs
 
     # -- ui -----------------------------------------------------------------------------
+
+    @_operation
+    def list_memories(self, req: MemoryListRequest) -> MemoryList:
+        from grag.memory_view import list_memories
+
+        return list_memories(self.engine, self.config, req, self.read_freshness(req))
 
     @_operation
     def graph_sample(

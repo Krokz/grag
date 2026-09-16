@@ -81,6 +81,7 @@ nav:
       - Index documents: guides/documents.md
       - Save and revise memory: guides/memory.md
       - History and evidence: guides/history.md
+      - Review memory in the UI: guides/ui.md
       - Resume work: guides/resume.md
       - Retrieve context: guides/retrieval.md
       - Code freshness: guides/freshness.md

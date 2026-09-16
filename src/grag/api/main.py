@@ -58,6 +58,7 @@ from grag.core.types import (
     UpsertEdgesRequest,
     UpsertNodesRequest,
 )
+from grag.memory_view import MemoryList, MemoryListRequest
 from grag.registry import ServiceRegistry
 from grag.request_limits import RequestLimitMiddleware
 from grag.service import GragService
@@ -344,7 +345,9 @@ def create_app(config: GragConfig) -> FastAPI:
         service = resolve(request)
         report = service.read_freshness(policy)
         detail = service.refresh_status(detail=True) or {"roots": [], "running": False}
-        return {**detail, "freshness": report.model_dump()}
+        return {**detail, "freshness": report.model_dump(),
+                "database_id": database_identity(service.config.db_path),
+                "embedding": service.embedding_status()}
 
     @app.get("/api/health")
     def health() -> dict:
@@ -505,6 +508,10 @@ def create_app(config: GragConfig) -> FastAPI:
                 headers={"Content-Disposition": 'attachment; filename="grag-topology.json"'},
                 media_type="application/json",
             )
+
+    @app.post("/api/memories", response_model=MemoryList)
+    def list_memories(request: Request, req: MemoryListRequest) -> MemoryList:
+        return resolve(request).list_memories(req)
 
     # -- UI statics --------------------------------------------------------------
 
