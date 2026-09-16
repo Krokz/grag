@@ -25,6 +25,9 @@ jobs:
             python-version: "3.13"
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The retrieval quality corpus is a pinned historical git archive.
+          fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
@@ -129,6 +132,17 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+      - name: Gate retrieval cases against the pinned corpus
+        if: runner.os == 'Linux' && matrix.python-version == '3.14'
+        run: python tests/retrieval_judging.py --output retrieval-quality.json --check-baseline
+
+      - name: Keep retrieval quality evidence
+        if: always() && runner.os == 'Linux' && matrix.python-version == '3.14'
+        uses: actions/upload-artifact@v7
+        with:
+          name: retrieval-quality
+          path: retrieval-quality.json
 
       - name: Code navigation regressions
         # Exercise optional Go/Java/C# parsers on every OS/Python runner instead of

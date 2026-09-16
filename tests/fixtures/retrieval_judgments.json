@@ -1,0 +1,391 @@
+{
+  "version": 2,
+  "scope": "Development navigation judgments, grouped by natural language, controls and unsupported questions. Five added cases derive from existing source contracts before experiment outcomes; no independent human or held-out accuracy claim.",
+  "topics": {
+    "recovery": {
+      "criterion": "Find the separate-copy replay implementation or recovery procedure, including preservation and possible loss. Counting Git commits is irrelevant; transaction atomicity alone is insufficient.",
+      "targets": [
+        {
+          "source": "src/grag/recovery.py",
+          "symbols": [
+            "recover_database",
+            "_replay",
+            "_snapshot",
+            "_restore_snapshot"
+          ]
+        },
+        {
+          "source": "docs/operations/recovery.md",
+          "sections": [
+            "Recover a database that cannot open"
+          ]
+        },
+        {
+          "source": "docs/operations/troubleshooting.md",
+          "sections": [
+            "Corrupted WAL / database cannot open"
+          ]
+        }
+      ]
+    },
+    "repo_identity": {
+      "criterion": "Locate canonical-path-derived repository identity. Cypher identifier validation, ordinary JSON ingestion and ignore rules do not answer this question.",
+      "targets": [
+        {
+          "source": "src/grag/ingest/code.py",
+          "symbols": [
+            "_repo_id"
+          ]
+        },
+        {
+          "source": "docs/guides/code.md",
+          "sections": [
+            "Code graph relationships"
+          ]
+        }
+      ]
+    },
+    "concurrent_edits": {
+      "criterion": "Find revision guards or atomic mutation handling for competing edits, not merely concurrent readers.",
+      "targets": [
+        {
+          "source": "docs/reference/mutations.md",
+          "sections": [
+            "Writes and retries",
+            "Guard against competing edits"
+          ]
+        },
+        {
+          "source": "docs/architecture.md",
+          "sections": [
+            "How changes become durable"
+          ]
+        },
+        {
+          "source": "src/grag/core/mutate.py",
+          "symbols": [
+            "_upsert_nodes",
+            "upsert_nodes"
+          ]
+        }
+      ]
+    },
+    "packing": {
+      "criterion": "Find packing order or budget accounting. A general statement that context should be small is insufficient.",
+      "targets": [
+        {
+          "source": "src/grag/retrieval/packing.py",
+          "symbols": [
+            "pack_search_response",
+            "measure_response",
+            "retrieval_budget"
+          ]
+        },
+        {
+          "source": "src/grag/core/serialize.py",
+          "symbols": [
+            "pack_context"
+          ]
+        },
+        {
+          "source": "docs/guides/retrieval.md",
+          "sections": [
+            "Check completeness and budgets",
+            "What the budget counts",
+            "Evidence selection and query responses"
+          ]
+        }
+      ]
+    },
+    "native_vectors": {
+      "criterion": "Find the native HNSW crash policy and exact-scan alternative.",
+      "targets": [
+        {
+          "source": "src/grag/core/engine.py",
+          "symbols": [
+            "Engine._retire_native_vector_indexes"
+          ]
+        },
+        {
+          "source": "docs/guides/embeddings.md",
+          "sections": [
+            "Native index policy"
+          ]
+        }
+      ]
+    },
+    "retired_memory": {
+      "criterion": "Find evidence lifecycle exclusion (superseded/retracted/expired), not source-file ignore rules.",
+      "targets": [
+        {
+          "source": "src/grag/core/evidence.py",
+          "symbols": [
+            "exclusion_reason",
+            "current_predicate"
+          ]
+        },
+        {
+          "source": "docs/guides/retrieval.md",
+          "sections": [
+            "Current and retained evidence"
+          ]
+        },
+        {
+          "source": "docs/guides/memory.md",
+          "sections": [
+            "Retire from current answers"
+          ]
+        }
+      ]
+    },
+    "cosine": {
+      "criterion": "Find exact cosine scoring or its documented policy. Similar table names and schema suggestions are irrelevant.",
+      "targets": [
+        {
+          "source": "src/grag/retrieval/vectors.py",
+          "symbols": [
+            "_cosine_scores",
+            "_exact_scan"
+          ]
+        },
+        {
+          "source": "docs/guides/retrieval.md",
+          "sections": [
+            "How search ranks and expands"
+          ]
+        },
+        {
+          "source": "docs/guides/embeddings.md",
+          "sections": [
+            "Native index policy",
+            "Vector codecs and crash safety"
+          ]
+        }
+      ]
+    },
+    "absent_replication": {
+      "criterion": "This local graph has no Redis replication leader-election implementation. Report returned hits for manual rejection; do not infer supported functionality from their scores.",
+      "targets": []
+    },
+    "retry_receipt": {
+      "criterion": "Replaying the same operation ID returns its saved receipt; a changed payload conflicts.",
+      "targets": [
+        {
+          "source": "src/grag/core/mutations.py",
+          "symbols": [
+            "_receipt"
+          ]
+        },
+        {
+          "source": "docs/reference/mutations.md",
+          "sections": [
+            "Retry a possibly committed write"
+          ]
+        }
+      ]
+    },
+    "required_fresh": {
+      "criterion": "The require freshness policy verifies registered source state and fails when unverified.",
+      "targets": [
+        {
+          "source": "src/grag/refresh.py",
+          "symbols": [
+            "CodeIndexRefresher.read"
+          ]
+        },
+        {
+          "source": "docs/guides/freshness.md",
+          "sections": [
+            "Choose a read policy",
+            "Interpret the result"
+          ]
+        }
+      ]
+    },
+    "move_checkout": {
+      "criterion": "Explicit relocation updates paths while retaining graph identities and authored edges.",
+      "targets": [
+        {
+          "source": "src/grag/relocation.py",
+          "symbols": [
+            "relocate_checkout",
+            "plan_graph"
+          ]
+        },
+        {
+          "source": "docs/guides/projects.md",
+          "sections": [
+            "Move a checkout"
+          ]
+        }
+      ]
+    },
+    "page_text": {
+      "criterion": "Text paging uses offsets and a content hash; a changed property requires restarting.",
+      "targets": [
+        {
+          "source": "src/grag/retrieval/packing.py",
+          "symbols": [
+            "pack_text_page"
+          ]
+        },
+        {
+          "source": "docs/guides/retrieval.md",
+          "sections": [
+            "Page a long property"
+          ]
+        }
+      ]
+    },
+    "shared_owner": {
+      "criterion": "Clients share one owning server through stdio proxies or HTTP.",
+      "targets": [
+        {
+          "source": "src/grag/proxy.py",
+          "symbols": [
+            "run_proxy",
+            "_ensure_server"
+          ]
+        },
+        {
+          "source": "docs/operations/server.md",
+          "sections": [
+            "One database owner, multiple harnesses"
+          ]
+        }
+      ]
+    }
+  },
+  "queries": [
+    {
+      "id": "recovery-natural",
+      "topic": "recovery",
+      "query": "how does database recovery preserve committed writes",
+      "category": "natural",
+      "batch": "original"
+    },
+    {
+      "id": "recovery-keywords",
+      "topic": "recovery",
+      "query": "database recovery preserve committed writes",
+      "category": "control",
+      "batch": "original"
+    },
+    {
+      "id": "recovery-symbol",
+      "topic": "recovery",
+      "query": "recover_database",
+      "exact_symbol": "recover_database",
+      "category": "control",
+      "batch": "original"
+    },
+    {
+      "id": "repo-natural",
+      "topic": "repo_identity",
+      "query": "how does code ingestion identify repositories",
+      "category": "natural",
+      "batch": "original"
+    },
+    {
+      "id": "repo-keywords",
+      "topic": "repo_identity",
+      "query": "code ingestion repo key same named directories",
+      "category": "control",
+      "batch": "original"
+    },
+    {
+      "id": "repo-symbol",
+      "topic": "repo_identity",
+      "query": "_repo_id",
+      "exact_symbol": "_repo_id",
+      "category": "control",
+      "batch": "original"
+    },
+    {
+      "id": "concurrent-edits",
+      "topic": "concurrent_edits",
+      "query": "how are concurrent memory edits guarded",
+      "category": "natural",
+      "batch": "original"
+    },
+    {
+      "id": "context-budget",
+      "topic": "packing",
+      "query": "how is context packed within a token budget",
+      "category": "natural",
+      "batch": "original"
+    },
+    {
+      "id": "native-vectors",
+      "topic": "native_vectors",
+      "query": "why are native vector indexes disabled",
+      "category": "natural",
+      "batch": "original"
+    },
+    {
+      "id": "retired-memory",
+      "topic": "retired_memory",
+      "query": "how are superseded memories excluded from search",
+      "category": "natural",
+      "batch": "original"
+    },
+    {
+      "id": "vector-similarity",
+      "topic": "cosine",
+      "query": "how are vector similarities calculated",
+      "category": "natural",
+      "batch": "original"
+    },
+    {
+      "id": "absent-keywords",
+      "topic": "absent_replication",
+      "query": "Redis replication leader election",
+      "category": "unsupported",
+      "batch": "original"
+    },
+    {
+      "id": "absent-natural",
+      "topic": "absent_replication",
+      "query": "how does grag choose a Redis replication leader",
+      "category": "unsupported",
+      "batch": "original"
+    },
+    {
+      "id": "retry-receipt",
+      "topic": "retry_receipt",
+      "query": "A response was lost after saving a memory. How can I retry without overwriting later edits?",
+      "category": "natural",
+      "batch": "contracts-before-experiments"
+    },
+    {
+      "id": "required-fresh",
+      "topic": "required_fresh",
+      "query": "How can I refuse an answer if the source files have changed since indexing?",
+      "category": "natural",
+      "batch": "contracts-before-experiments"
+    },
+    {
+      "id": "move-checkout",
+      "topic": "move_checkout",
+      "query": "I moved a checkout to another folder. How do I keep its graph links and memories?",
+      "category": "natural",
+      "batch": "contracts-before-experiments"
+    },
+    {
+      "id": "page-text",
+      "topic": "page_text",
+      "query": "How do I fetch the rest of a long memory without mixing two edited versions?",
+      "category": "natural",
+      "batch": "contracts-before-experiments"
+    },
+    {
+      "id": "shared-owner",
+      "topic": "shared_owner",
+      "query": "Can two coding assistants use the same database without fighting over the file lock?",
+      "category": "natural",
+      "batch": "contracts-before-experiments"
+    }
+  ],
+  "corpus_commit": "205b38e9074cb4a2d92302c724c2e1947482a8ab",
+  "source_policy": "Fresh independent graphs per scope, canonical fixture://grag/ provenance, deterministic repo identity and fixed ingestion timestamps; all variants ingest the same git archive. No gold or audit files are indexed."
+}

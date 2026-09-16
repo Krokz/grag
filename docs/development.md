@@ -244,3 +244,76 @@ reports synthetic recall@10, mean query/encoding time, peak-RSS growth and code
 bytes per codec. The workflow evaluator separately reports end-to-end latency,
 packed evidence and token cost. Keep optional models lazy and preserve query,
 work and response limits when changing these paths.
+
+### Judge retrieval before tuning it
+
+`tests/retrieval_judging.py` evaluates source-navigation judgments against a pinned
+commit using `git archive`. Questions, tests, audit notes and authored answer
+memories remain outside the searchable corpus. A shallow clone must first fetch
+the commit named in `tests/fixtures/retrieval_judgments.json`.
+
+```bash
+python tests/retrieval_judging.py --output retrieval.json --check-baseline
+```
+
+The runner builds separate disposable graphs for code-only and code-plus-docs
+retrieval. Test-only logical source URIs, repository identity and timestamps make
+IDs, searchable metadata and citation lengths independent of the extraction
+directory. Citations are checked against the archived files. Reports record
+source, judgment and searchable-graph hashes, candidate discovery, rank,
+selection and whether a useful citation survives two budgets and hop counts.
+
+Each reply is graded twice. The original mixed gold accepts a known code symbol
+**or** a named documentation section; adding docs gives that criterion more
+reachable targets, so its gain is not proof of better code navigation. The separate
+`code_navigation` and `code_summary` metrics use only the existing code-symbol
+targets, identical in both corpus scopes and recorded under `code_gold_sha256`.
+They distinguish selected/expanded code before packing from cited code actually
+delivered as a seed or neighbor. Document citations cannot satisfy code gold.
+Seed labels and mention-link inventories help investigate displacement and missing
+connections; a packed mention edge alone does not establish causal improvement.
+
+Use `--hops 0 1 2` for an additional expansion diagnostic: a chunk can need two
+hops through its section to reach a mentioned function. This produces a different
+case matrix, so compare it separately from the default 0/1-hop CI baseline.
+
+Natural questions, keyword/symbol controls and unsupported questions are scored
+separately. CI compares each case with `tests/fixtures/retrieval_baseline.json`:
+losing a known useful candidate, first result, selected rank or delivered citation
+fails even if another case improves. Mixed and fixed-code metrics are checked
+independently: a documentation win cannot hide a code-navigation loss.
+Unsupported-query hit counts remain
+diagnostics: matching text is not a claim that the question is answerable, and
+empty retrieval is not an abstention requirement. Inspect saved replies before explicitly
+refreshing a baseline with `--write-baseline`; changing gold or corpus hashes is
+an incompatible comparison, not an automatic reset. CI retains the full report.
+Passing this gate prevents measured regressions; known misses remain visible
+and do not become successful answers merely because the baseline passes.
+
+Ranking experiments live only in `tests/retrieval_variants.py`. Use
+`--variant fields`, `fields_weighted`, `table_rrf` or `table_rrf_scaled` to compare
+them without changing production. `--embeddings` evaluates the configured default
+BGE-small model from its local cache, with downloads disabled and embedding
+completion required; `--vector-only` separates vector recall from hybrid fusion.
+The report records model asset hashes. Install the embedding extra and prepare
+the cache separately before running that optional arm.
+
+For the fixed `top_k=8` benchmark, `--embeddings --variant fusion_top8` and
+`fusion_top16` restrict each modality to its top 8 or 16 unique finite-scored hits
+before the existing RRF and label cap. Boundary ties use canonical ID order.
+Compare delivered citations and individual losses, including vector-only hits
+cut off before fusion; a narrower list can also remove label diversity. These are
+evaluation-only variants, not production settings. In these reports `candidate_hit`
+includes the lexical shortlist plus fused survivors, so a lost vector candidate
+can reflect this cutoff rather than failure of the embedding search itself.
+
+These are development judgments of known useful navigation targets, including
+related query variants and cases written from existing source contracts before
+examining experiment results. They are not exhaustive relevance labels, independent
+human grading or a held-out accuracy benchmark. Inspect replies for qualifications
+and alternative answers. The single corpus is documentation-rich; questions share
+its development/failure-investigation context and vocabulary. The experiment is
+not blinded or authored independently of that context, and says nothing measured
+about repositories with sparse documentation. Neither successful navigation nor smaller replies establishes
+correct agent answers or whole-session token savings. Those require matched
+agent runs with independent task grading and complete usage accounting.
