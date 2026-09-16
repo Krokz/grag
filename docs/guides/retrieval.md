@@ -56,6 +56,12 @@ make missing records and properties explicit. Returned edges always have both
 endpoints in the returned graph. Vector payloads and null properties are omitted
 by design and do not count as lost evidence.
 
+Development: under budget pressure, additional selected code results can keep
+their source, line range and lifecycle qualifiers while omitting their docstrings.
+The leading result still gets its short preview. Omitted docstrings remain stored;
+read the cited source or request `get_context(text_property="docstring")` for detail.
+Expanded neighbors and authored memory prose keep their existing packing policy.
+
 ### What the budget counts
 
 `token_budget` covers the **complete compact response**: the larger of the

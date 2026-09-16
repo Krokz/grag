@@ -54,7 +54,7 @@
       "queries": 12,
       "candidate_hit": 5,
       "top1_useful": 1,
-      "packed_navigation_hit": 2,
+      "packed_navigation_hit": 3,
       "selected_hit_at_8": 3,
       "unanswerable_with_hits": 0
     },
@@ -126,7 +126,7 @@
       "queries": 12,
       "candidate_hit": 5,
       "top1_useful": 1,
-      "packed_navigation_hit": 1,
+      "packed_navigation_hit": 3,
       "selected_hit_at_8": 3,
       "unanswerable_with_hits": 0
     },
@@ -357,8 +357,8 @@
       "queries": 12,
       "candidate_hit": 5,
       "top1_useful": 1,
-      "packed_navigation_hit": 2,
-      "useful_cited_seed_ids": 2,
+      "packed_navigation_hit": 3,
+      "useful_cited_seed_ids": 3,
       "useful_cited_expansion_ids": 0,
       "prepack_relevant_ids": 3,
       "prepack_expansion_ids": 0,
@@ -453,8 +453,8 @@
       "queries": 12,
       "candidate_hit": 5,
       "top1_useful": 1,
-      "packed_navigation_hit": 1,
-      "useful_cited_seed_ids": 1,
+      "packed_navigation_hit": 3,
+      "useful_cited_seed_ids": 3,
       "useful_cited_expansion_ids": 0,
       "prepack_relevant_ids": 8,
       "prepack_expansion_ids": 7,
@@ -501,8 +501,8 @@
       "queries": 12,
       "candidate_hit": 5,
       "top1_useful": 0,
-      "packed_navigation_hit": 0,
-      "useful_cited_seed_ids": 0,
+      "packed_navigation_hit": 1,
+      "useful_cited_seed_ids": 1,
       "useful_cited_expansion_ids": 0,
       "prepack_relevant_ids": 1,
       "prepack_expansion_ids": 0,
@@ -753,13 +753,13 @@
       "budget": 4000,
       "candidate_hit": true,
       "top1_useful": false,
-      "packed_navigation_hit": false,
+      "packed_navigation_hit": true,
       "selected_first_useful": 7,
       "has_hits": true,
       "code_navigation": {
         "candidate_hit": true,
         "top1_useful": false,
-        "packed_navigation_hit": false,
+        "packed_navigation_hit": true,
         "selected_first_useful": 7
       }
     },
@@ -1247,13 +1247,13 @@
       "budget": 4000,
       "candidate_hit": true,
       "top1_useful": false,
-      "packed_navigation_hit": false,
+      "packed_navigation_hit": true,
       "selected_first_useful": 8,
       "has_hits": true,
       "code_navigation": {
         "candidate_hit": true,
         "top1_useful": false,
-        "packed_navigation_hit": false,
+        "packed_navigation_hit": true,
         "selected_first_useful": 8
       }
     },
@@ -1285,13 +1285,13 @@
       "budget": 4000,
       "candidate_hit": true,
       "top1_useful": false,
-      "packed_navigation_hit": false,
+      "packed_navigation_hit": true,
       "selected_first_useful": 8,
       "has_hits": true,
       "code_navigation": {
         "candidate_hit": true,
         "top1_useful": false,
-        "packed_navigation_hit": false,
+        "packed_navigation_hit": true,
         "selected_first_useful": 8
       }
     },
@@ -2678,7 +2678,7 @@
       "code_navigation": {
         "candidate_hit": true,
         "top1_useful": false,
-        "packed_navigation_hit": false,
+        "packed_navigation_hit": true,
         "selected_first_useful": 3
       }
     },

@@ -125,6 +125,8 @@ def pack_context(
     Retrieval supplies a measure that includes its entire response envelope.
     Under pressure, reserve half the available space for seed-first topology,
     then fill citations and cross-node evidence before secondary metadata.
+    Additional code seeds can enter without a docstring; the first result
+    keeps its short preview, and later filling still considers whole docstrings.
     Property values stay whole. Optional exact excerpts are separately marked
     partial evidence; the omitted full STRING remains available through paging.
     """
@@ -192,6 +194,13 @@ def pack_context(
         props = {k: v for k, v in node.properties.items()
                  if k in _CITATION_PROPS}
         for key in ("summary", "body", "text", "rationale", "docstring", "description", "question"):
+            # A cited code seed is usable before its docstring fits. Keep
+            # the leading result's preview and ordinary memory prose, but do
+            # not make extra code pointers/edges pay for prose up front.
+            if (key == "docstring" and node.id != nodes[0].id and node.id in (seed_ids or [])
+                    and isinstance(props.get(PROVENANCE_SOURCE), str) and props[PROVENANCE_SOURCE]
+                    and type(props.get("line_start")) is int and props["line_start"] > 0):
+                continue
             value = node.properties.get(key)
             if isinstance(value, str) and len(value) <= 512:
                 props[key] = value

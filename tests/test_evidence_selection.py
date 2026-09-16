@@ -124,6 +124,34 @@ def test_code_citations_keep_the_range_before_ids_and_metadata():
         assert node.properties['docstring']
 
 
+def test_code_neighbors_fit_with_complete_citations_before_extra_docstrings():
+    nodes = [NodeRecord(
+        id=f'Function:repo-{"a" * 64}:src/example.py#{name}', label='Function',
+        properties={'name': name, 'id': 'x' * 2000, 'line_start': 10 + i,
+                    'line_end': 11 + i, '_source': 'src/example.py', '_source_state': 'current',
+                    'docstring': 'short primary preview' if i == 0 else 'detail ' * 50},
+    ) for i, name in enumerate(['first', 'second', 'third', 'fourth'])]
+    edges = [EdgeRecord(id=f'edge-{i}', type='CALLS', source=n.id, target=nodes[0].id)
+             for i, n in enumerate(nodes[1:], 1)]
+    graph = Subgraph(nodes=nodes, edges=edges)
+    result = search(graph, 'first', budget=700, ids=[n.id for n in nodes])
+    assert result.included_node_ids == [n.id for n in nodes[:2]]
+    assert [(e.source, e.target) for e in result.subgraph.edges] == [(nodes[1].id, nodes[0].id)]
+    first, neighbor = result.subgraph.nodes
+    assert first.properties['docstring'] == nodes[0].properties['docstring']
+    assert 'docstring' not in neighbor.properties
+    for original, packed in zip(nodes, result.subgraph.nodes, strict=False):
+        for prop in ['_source', 'line_start', 'line_end', '_source_state']:
+            assert packed.properties[prop] == original.properties[prop]
+    assert result.truncated and result.omitted_properties
+    assert result.response_token_estimate <= 700
+    # Stored prose is unchanged and a larger follow-up returns it in full.
+    assert graph.nodes[1].properties['docstring'] == 'detail ' * 50
+    full = pack_context_response(graph, 30_000, [n.id for n in nodes])
+    assert not full.truncated
+    assert full.subgraph.nodes[1].properties['docstring'] == nodes[1].properties['docstring']
+
+
 def test_evaluator_refuses_fabricated_excerpt_even_if_it_contains_gold_words(tmp_path):
     body=long_body()
     source=tmp_path/'notes.md'
