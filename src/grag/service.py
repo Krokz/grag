@@ -553,11 +553,12 @@ class GragService:
     def graph_full(
         self, *, freshness: FreshnessMode = "allow_stale", freshness_timeout_ms: int = 5000,
     ) -> GraphSample:
-        """Every user node and edge, unclamped — for whole-database exports.
+        """Every user node and edge, subject to normal reply/work limits.
 
         Unlike ``graph_sample`` this ignores ``max_query_limit`` on purpose:
-        the UI's full-graph SVG export needs the mass of the graph, not a
-        window into it. Internal ``_``-prefixed tables are still dropped.
+        this read requests the entire graph, not a window into it. Internal
+        ``_``-prefixed tables are dropped. Large SVG exports use the separate
+        disk-spooled topology download at ``/api/graph/export``.
         """
         report = self.read_freshness(ReadPolicy(freshness=freshness, freshness_timeout_ms=freshness_timeout_ms))
         pk_map = self._pk_map()

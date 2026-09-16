@@ -491,6 +491,21 @@ def create_app(config: GragConfig) -> FastAPI:
     def graph_full(request: Request, policy: ReadPolicyParam) -> GraphSample:
         return resolve(request).graph_full(**policy.model_dump())
 
+    @app.get("/api/graph/export")
+    def graph_export(request: Request, policy: ReadPolicyParam) -> StreamingResponse:
+        """Capture complete SVG topology before streaming it outside reply limits."""
+        from grag.api.graph_export import capture_graph_export
+        from grag.api.snapshot import SnapshotResponse
+
+        service = resolve(request)
+        with service.operation():
+            report = service.read_freshness(policy)
+            return SnapshotResponse.from_snapshot(
+                capture_graph_export(service.engine, service.config, report),
+                headers={"Content-Disposition": 'attachment; filename="grag-topology.json"'},
+                media_type="application/json",
+            )
+
     # -- UI statics --------------------------------------------------------------
 
     if (_STATIC_DIR / "index.html").is_file():

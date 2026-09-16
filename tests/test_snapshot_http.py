@@ -90,21 +90,27 @@ def test_server_capture_error_returns_error_before_success_headers(tmp_path):
 
 
 @pytest.mark.parametrize("when", ["headers", "body", "cancelled"])
-def test_delivery_failure_always_closes_snapshot(engine, monkeypatch, when):
+@pytest.mark.parametrize("kind", ["archive", "topology"])
+def test_delivery_failure_always_closes_snapshot(engine, monkeypatch, when, kind):
     import grag.api.snapshot as module
+    from grag.api.graph_export import capture_graph_export
+    from grag.core.types import FreshnessReport
 
     closed = []
 
     @contextmanager
     def tracked(engine):
-        with capture_snapshot(engine) as file:
+        snapshot = (capture_snapshot(engine) if kind == "archive" else
+                    capture_graph_export(engine, engine.config, FreshnessReport()))
+        with snapshot as file:
             try:
                 yield file
             finally:
                 closed.append(True)
 
     monkeypatch.setattr(module, "capture_snapshot", tracked)
-    response = SnapshotResponse.capture(engine, headers={})
+    response = (SnapshotResponse.capture(engine, headers={}) if kind == "archive" else
+                SnapshotResponse.from_snapshot(tracked(engine), headers={}, media_type="application/json"))
 
     async def receive():
         await asyncio.Future()
@@ -161,3 +167,7 @@ def test_multiple_databases_export_only_selected_graph(tmp_path):
             assert [
                 r["key"] for r in archive.records() if r.get("label") == "Note"
             ] == ["two"]
+        # The UI passes the selected graph as a query parameter.
+        topology = client.get("/api/graph/export?db=two")
+        assert topology.status_code == 200
+        assert [n["id"] for n in topology.json()["subgraph"]["nodes"]] == ["Note:two"]

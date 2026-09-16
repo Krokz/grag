@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from contextlib import AbstractContextManager
+from typing import TextIO
 
 from starlette.responses import StreamingResponse
 
@@ -16,7 +18,13 @@ class SnapshotResponse(StreamingResponse):
 
     @classmethod
     def capture(cls, engine: Engine, *, headers: dict[str, str]) -> SnapshotResponse:
-        snapshot = capture_snapshot(engine)
+        return cls.from_snapshot(capture_snapshot(engine), headers=headers, media_type="application/x-ndjson")
+
+    @classmethod
+    def from_snapshot(
+        cls, snapshot: AbstractContextManager[TextIO], *, headers: dict[str, str], media_type: str,
+    ) -> SnapshotResponse:
+        """Capture completely before success headers; close on every delivery exit."""
         stream = snapshot.__enter__()
         lock = threading.Lock()
         closed = False
@@ -36,7 +44,7 @@ class SnapshotResponse(StreamingResponse):
                 close()
 
         try:
-            response = cls(body(), headers=headers, media_type="application/x-ndjson")
+            response = cls(body(), headers=headers, media_type=media_type)
             response._close = close
             return response
         except BaseException:
