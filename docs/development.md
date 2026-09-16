@@ -235,6 +235,9 @@ ambiguous-write retries, retirement, custom keys and database switching.
 
 ## Performance measurements
 
+Use the [product boundary](architecture.md#product-boundary) when proposing work:
+prioritize the existing ingest, retrieve and remember workflow and its reliability.
+
 `tests/test_perf.py` checks small-fixture cold start, warm search latency and RSS
 with CI headroom. It is not a large-project performance guarantee. `grag bench`
 reports synthetic recall@10, mean query/encoding time, peak-RSS growth and code

@@ -10,6 +10,31 @@ This describes the current source checkout. The latest published baseline is
 The usual setup is **one database per checkout, one owning process, and any number
 of clients using that process**. BM25 works without an embedding model.
 
+## Product boundary
+
+The core workflow is **ingest, retrieve and remember**:
+
+- Ingest selected source files into cited, refreshable records and relationships.
+- Retrieve useful evidence within a stated budget, with explicit coverage and
+  completeness limits.
+- Remember sourced facts, decisions and handoffs, then recall or correct them
+  across sessions.
+
+The agent harness owns planning, model execution and tool selection. Authored
+memory uses the project's vocabulary; grag does not require a task engine,
+ontology or schema preset. Embeddings and the browser views are optional ways to
+use the same local graph.
+
+Single-owner access, atomic writes, edit guards, backup and recovery support the
+core's reliability. Their correctness is required whenever those paths are used.
+Additional administrative workflows can wait for demonstrated user needs.
+
+Evaluate proposed features against a concrete failure or repeated user friction.
+Prefer improving existing tools and defaults. New setup steps, services, models,
+tools or mandatory concepts need evidence that their benefit outweighs their
+operational and context costs. Measure agent task correctness alongside tokens,
+latency and setup effort; smaller tool replies alone do not establish session savings.
+
 ## The usual local setup
 
 ```mermaid
