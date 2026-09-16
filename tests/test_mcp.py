@@ -114,6 +114,33 @@ def _populate(service: GragService) -> None:
     assert not out.startswith("ERROR"), out
 
 
+def test_search_deduplicates_ids_and_keeps_canonical_followups(service):
+    _define(service)
+    key = "repo-" + "a" * 64 + ":notes/plan.md#revision:two"
+    canonical = f"Doc:{key}"
+    saved = mcp_server.upsert_nodes(service, [{
+        "label": "Doc", "key": key, "source": "notes/plan.md",
+        "properties": {"title": "Quasar recovery", "body": "Preserve the committed journal."},
+    }])
+    assert not saved.startswith("ERROR"), saved
+
+    text = mcp_server.search_knowledge(service, "Quasar", hops=0, token_budget=2000)
+    context, _, footer = text.rpartition("\n---\n")
+    metadata = json.loads(footer)
+    assert "included_node_ids" not in metadata
+    assert canonical in context and "notes/plan.md" in context
+    assert [seed["id"] for seed in metadata["seeds"]] == [canonical]
+    assert metadata["vector"] == "off" and metadata["evidence_policy"] == "current"
+    assert {"truncated", "omitted_nodes", "omitted_edges", "omitted_properties",
+            "expansion_limited", "freshness", "response_token_estimate"} <= metadata.keys()
+    legacy_footer = {**metadata, "included_node_ids": [canonical]}
+    assert len(footer.encode()) < len(json.dumps(legacy_footer, separators=(",", ":")).encode())
+
+    followup = mcp_server.get_context(service, [metadata["seeds"][0]["id"]], hops=0)
+    assert canonical in followup and "Preserve the committed journal." in followup
+    assert json.loads(followup.rpartition("\n---\n")[2])["included_node_ids"] == [canonical]
+
+
 def _seed_ids(search_out: str) -> list[str]:
     _, _, footer = search_out.partition("\n---\n")
     payload = json.loads(footer or search_out)

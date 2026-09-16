@@ -174,7 +174,6 @@ def mcp_retrieval_text(resp: SearchResponse | ContextResponse) -> str:
         for key in (
             "token_estimate",
             "response_token_estimate",
-            "included_node_ids",
             "truncated",
             "omitted_nodes",
             "omitted_edges",
@@ -182,6 +181,11 @@ def mcp_retrieval_text(resp: SearchResponse | ContextResponse) -> str:
             "expansion_limited",
         )
     }
+    if isinstance(resp, ContextResponse):
+        # Requested-ID reads use this to distinguish filtered/missing records
+        # from included evidence, including history and paged text. Search
+        # already provides canonical seed IDs for follow-up calls.
+        payload["included_node_ids"] = resp.included_node_ids
     payload["freshness"] = resp.freshness.model_dump()
     if resp.evidence_policy is not None:
         payload["evidence_policy"] = resp.evidence_policy

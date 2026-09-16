@@ -31,13 +31,22 @@ is insufficient.
 
 ## Check completeness and budgets
 
- Both retrieval calls return `truncated`,
-`omitted_nodes`, `omitted_edges`, `omitted_properties`, `included_node_ids`, and
-`expansion_limited`. MCP returns this metadata in a JSON footer after `---`,
-including for `get_context`. A truncated answer is partial evidence. Omission
+Both retrieval calls return `truncated`, `omitted_nodes`, `omitted_edges`,
+`omitted_properties`, and `expansion_limited`. MCP returns this metadata in a JSON
+footer after `---`, including for `get_context`. A truncated answer is partial evidence. Omission
 counts describe packing; `expansion_limited` separately reports a neighborhood
 that exceeded 512 paths per seed. These fields do not claim exhaustive search
 recall beyond the requested seeds, hops, and candidate limits.
+
+Development: the MCP `search_knowledge` footer omits the duplicate
+`included_node_ids` list. Context lines retain canonical node IDs, and `seeds`
+retains canonical IDs, scores and match types for follow-up `get_context` calls.
+MCP `get_context` still reports `included_node_ids` for requested-ID eligibility
+checks, history and paging. REST, CLI JSON and Python responses retain the list
+on both calls. Consumers of MCP search metadata should use the seed IDs for
+follow-ups or the REST/Python response for a structured list of all included nodes.
+The budget still bounds the larger of the full JSON response and MCP text;
+smaller MCP metadata does not promise additional evidence at a fixed budget.
 
 Property values have no fixed character cutoff. When everything fits, long
 strings and relationship properties are returned in full. Under a tight budget,
