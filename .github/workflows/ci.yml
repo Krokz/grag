@@ -183,3 +183,21 @@ jobs:
         run: |
           npm ci
           npm run build
+
+      - name: Set up Python for browser fixtures
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Exercise memory workflows in the browser
+        run: |
+          python -m pip install -e ..
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+
+      - name: Keep browser test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: memory-ui-results
+          path: ui/test-results/

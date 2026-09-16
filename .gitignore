@@ -9,6 +9,8 @@ build/
 *.egg-info/
 node_modules/
 ui/dist/
+ui/test-results/
+ui/playwright-report/
 src/grag/api/static/
 src/grag/_runtime/
 .pytest_cache/

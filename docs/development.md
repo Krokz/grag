@@ -198,17 +198,40 @@ grag --db examples/knowledge.lbdb serve --with-mcp
 python examples/demo_e2e.py
 ```
 
-The UI has a graph explorer (click to inspect, double-click to expand neighbors),
-Cypher console, schema sidebar and search. Click a label in the legend to view
+The UI opens on Graph. Memories provides searchable project memories, open tasks,
+recent changes, evidence/history and guarded correction actions; Health shows
+the selected owner's state. See the
+[UI guide](guides/ui.md). The graph explorer supports click to inspect and
+double-click to expand neighbors, with a Cypher console, schema sidebar and search.
+Click a label in the legend to view
 that label and its one-hop relationships. **Export SVG view** saves the currently
-loaded, filtered view; **Export full SVG** requests the full graph and lays it out
-in the browser, subject to server response limits and available browser resources.
+loaded, filtered view; **Export full SVG** downloads a consistent snapshot of every
+user node and edge, then lays it out in the browser. The download includes only
+keys, labels and endpoints; document bodies, vectors and other properties are not
+needed for the drawing. It uses `/api/graph/export`, outside the ordinary 1 MiB
+API reply limit. Capture uses temporary disk space and briefly holds off writes;
+the lock is released before download. Available browser memory and layout time
+still constrain very large drawings. Use `grag export` for a restorable data backup.
 
 **One owning process per file.** Direct `grag mcp` opens the database and cannot
 run alongside another owner. `mcp --auto-serve` is a thin proxy and can share the
 existing owner with other clients. `serve --with-mcp` mounts MCP inside the
 REST/UI process, so UI requests read the same committed graph that MCP updates.
 Use `--mcp-path` to change the mount path (default `/mcp`).
+
+Browser workflow regressions use temporary multi-database fixtures:
+
+```bash
+cd ui
+npx playwright install chromium
+npm run test:e2e
+```
+
+Build the UI and install the source Python package first. Set `GRAG_UI_TEST_PYTHON`
+to an explicit Python interpreter if needed. `GRAG_UI_TEST_CHROME=1` uses installed
+Chrome locally; CI installs Playwright Chromium. These tests never use project or
+personal graph registrations. They cover evidence/history, correction conflicts,
+ambiguous-write retries, retirement, custom keys and database switching.
 
 ## Performance measurements
 
