@@ -5,8 +5,7 @@ documents and authored knowledge, then returns relevant records and connections
 with citations. The harness decides what to ask, what to remember and how to
 answer the user. grag does not run an LLM or autonomously create a project ontology.
 
-This describes the current source checkout. The latest published baseline is
-[grag 0.10.1](https://github.com/Krokz/grag/tree/v0.10.1); the memory UI below is pending release.
+This describes grag 0.11.0, including the memory UI and updated agent guidance.
 The usual setup is **one database per checkout, one owning process, and any number
 of clients using that process**. BM25 works without an embedding model.
 

@@ -1,7 +1,7 @@
 # Review your project memory
 
-!!! note "Pending release"
-    This guide describes M23 in the source checkout. These views are not in published 0.10.1.
+!!! note "Added in 0.11.0"
+    Memories and Health use your existing graph and memory schema.
 
 Open the URL printed by `grag status`, or start the local UI with `grag serve`.
 The browser uses the same owning server as connected agents. Select the intended
