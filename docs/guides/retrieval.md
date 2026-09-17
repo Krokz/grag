@@ -5,13 +5,57 @@ Choose a read based on what you already know, then inspect its sources and limit
 
 | What you need | Start with |
 |---|---|
-| An exact symbol, count or status | A projected `cypher_query` after checking the schema |
-| Discovery by topic | `search_knowledge`, narrowed to relevant labels |
+| A code definition or implementation | Source search and a bounded file read |
+| Saved decisions, history or concepts | `search_knowledge`, narrowed to known labels |
+| Callers, relationships, graph counts or status | A projected `cypher_query` after checking unfamiliar schema |
 | Neighbors or evidence for known IDs | `get_context` |
 | Earlier memory revisions | [History and evidence](history.md) |
 
 There is no required query sequence. Fetch more only when the evidence you have
 is insufficient.
+
+Use the graph when saved knowledge or relationships help with the task. Ordinary
+code navigation can start with the harness's source search; having grag connected
+does not require a graph lookup before each source read. Graph code search remains
+available, but a natural-language match is a lead to verify, not evidence that the
+matched function implements the requested behavior.
+
+## Make the first lookup useful
+
+Start a saved-knowledge topic search directly; `describe_schema` is needed for unfamiliar Cypher
+or writes, not as a search preflight. Keep the query focused on the component or
+concept you need. A whole implementation request can match incidental words
+across unrelated repositories. For an initial lead, try `top_k=4, hops=0`, then
+expand only when the question needs relationships or more evidence. These are
+suggestions, not changed defaults or a completeness guarantee.
+
+When the schema is known, narrow `labels` to the relevant kind of evidence—for
+example, an existing service or decision label for architecture context. Do not
+invent labels or treat historical memory as verified implementation. For an exact
+name or a known repository path within a graph query, use projected Cypher. A repository name in search
+text is **not** a scope filter. With the standard code schema and a source root
+already established, a lookup can be:
+
+```cypher
+MATCH (f:Function)
+WHERE f._source STARTS WITH '/workspace/example/src/'
+  AND f.name CONTAINS 'auth'
+RETURN f.name, f._source, f.line_start, f.line_end
+ORDER BY f._source, f.line_start
+LIMIT 10
+```
+
+Use the actual root and observed schema. The path restricts code citations; it
+does not establish ownership of authored memories. A limited query can omit
+matches even when its response is not marked truncated.
+
+Stop recall when the relevant memory supplies the requested claim, scope, source
+and qualifications. Read again to resolve specific missing evidence, a conflict,
+current-code verification or an edit guard. For implementation questions, follow
+relevant citations with bounded source reads. If hits are off-topic, change scope
+or inspect source; increasing seeds and hops is not a relevance fix.
+See [Capture and reuse conclusions](memory.md#save-a-conclusion-the-next-session-can-use)
+and [Correct a stale finding](memory.md#correct-a-stale-finding).
 
 === "CLI"
 

@@ -8,13 +8,11 @@ description: Query and maintain a local grag knowledge graph for project groundi
 Use the project's graph to answer questions about its structure, decisions and
 history, and save useful findings with sources for the next session. Storage and
 retrieval are local; the agent harness or an explicitly remote embedder may send
-context to its provider. Follow the user's chosen scope and database.
+context to its provider. Follow the chosen scope/database.
 
 ## Prefer MCP for graph work
 
-Prefer configured grag MCP tools for reads, writes and ingestion in the selected
-graph. Discover deferred tools before declaring them unavailable. Use `upsert_nodes`
-for memory, `search_knowledge` for search, and `ingest_code` / `ingest_docs` for indexing.
+Prefer configured grag MCP tools for graph reads, writes and ingestion. Discover deferred tools before declaring them unavailable.
 Do not substitute equivalent CLI commands or Python/HTTP scripts while MCP is available.
 
 Use the CLI for setup/server management, diagnostics, backup/recovery, explicit user
@@ -35,32 +33,35 @@ precedence; merely loading this skill during other work does not request a full 
 
 ## Choose the smallest useful read
 
-1. Confirm the MCP connection addresses the intended graph. For CLI fallback,
-   `.grag/project.json` selects the checkout's database; explicit `--db` overrides it.
-2. Read `describe_schema` before Cypher or new writes. Reuse known labels and
-   properties. Default compact schema is enough for most work; `detail="full"`
-   adds counts/samples. Reuse `schema_revision` with `if_revision` for the same
-   detail level instead of repeatedly loading an unchanged schema.
-3. For an exact name, count, status or relationship, use a projected
-   `cypher_query`. For a fuzzy question, use `search_knowledge`, narrowing `labels`
-   when known. Use `get_context` only for needed neighbors, selected evidence,
-   history or long-text paging; these are choices, not a mandatory tool chain.
-4. Read source bodies at returned file/line citations when the graph is
-   insufficient. Index an unfamiliar unindexed source with `ingest_code` when
-   structural navigation will help; avoid re-ingesting a known fresh scope.
+1. Confirm the intended graph; `.grag/project.json` selects it for CLI fallback,
+   and explicit `--db` overrides it.
+2. Use source search for straightforward code navigation. Use grag for saved
+   decisions/history and structural relationships such as callers or cross-file
+   impact. A graph lookup is useful when it supplies evidence the task needs.
+3. For graph topic search, use a focused `search_knowledge` query with known
+   labels; try `top_k=4, hops=0` for an initial lead. No schema preflight is needed.
+   A repository name in query text is not a scope filter.
+4. Use projected `cypher_query` for graph counts/status and exact relationships
+   or IDs. Check unfamiliar schema; reuse known labels/properties. Compact schema
+   suffices; full adds counts/samples. Reuse `schema_revision` with `if_revision`
+   at the same detail level.
+5. Stop recall when the relevant memory supplies the requested claim, scope,
+   source and qualifications. Read again for a specific gap: missing text or
+   neighbors, conflicting evidence, current-code verification or an edit guard.
+   Off-topic hits call for source inspection or corrected scope. Empty results
+   do not prove absence.
 
-Example after checking the schema:
+After checking schema (filter by known source root in shared graphs):
 
 ```cypher
 MATCH (f:Function) WHERE f.name = 'refresh'
-RETURN f.id, f.path, f.line_start, f.signature
+RETURN f.id, f._source, f.line_start, f.line_end
 ```
 
-Whole entities (`RETURN n`, `RETURN r`) include computed `_revision` for guarded
-edits and omit derived vectors/null columns in MCP. `_revision` is not a stored
-Cypher property. Explicit projections remain exact, including nulls and vectors.
-Return endpoints with relationships for canonical graph IDs; native `_ID`, `_SRC`
-and `_DST` are not persistent identities.
+Whole entities include computed `_revision` for guarded edits and omit vectors/nulls
+in MCP. `_revision` is not a stored property. Explicit projections remain exact.
+Return endpoints with relationships for canonical IDs; native `_ID`, `_SRC` and
+`_DST` are not persistent identities.
 
 ## Check what the result establishes
 
@@ -82,41 +83,38 @@ and `_DST` are not persistent identities.
 - `token_budget` is a UTF-8/4 estimate (256–32768, default 2000), not a model
   tokenizer count. Narrow results or page text instead of repeatedly enlarging them.
 
-## Save useful context
+## Reuse investigations across sessions
 
-For memory corrections, retirement, "continue", "resume" or "what next", load
-[memory](references/memory.md).
-Confirm the checkout/database, then use exact status and established priority/scope
-fields or a current priority decision. Search scores, task IDs and mission numbers
-are not priority. Fetch the chosen task's acceptance, next step and linked current
-decisions/questions within a budget. Missing scope or priority means uncertainty;
-`evidence="current"` does not itself mean a task is unfinished or a question unanswered.
+Before finishing a useful investigation or handoff, preserve explicit user decisions,
+reasons and reusable findings with scope, sources, limits and next steps. Cite the
+discussion for choices and source inspection for observations; keep unchosen proposals
+distinct. Reuse existing records/fields; skip routine reads and ingested facts.
+Load [memory](references/memory.md) for capture, correction, retirement or resumption.
 
-Reuse the schema and existing records. Save decisions and their reasons, corrections,
-open work and non-obvious findings with `source`; connect them to relevant code
-where an appropriate relationship exists. Prefer ingested code facts over copied
-versions/paths that can drift. Mark completed work done rather than duplicating it.
-Replace the current summary when state changes; use evidence history for prior text,
-not an ever-growing chronological body. Keep completion and release status distinct.
+For prior findings, use a focused lookup or `get_context` for a known ID. Reuse
+sufficient evidence for recall; verify relevant current source for implementation
+claims. Within an authorized memory workflow, correct verified stale findings with
+revision guards and history without asking again. Preserve the user's decision when
+implementation diverges. Respect read-only scope; report unresolved discrepancies.
 
-`upsert_nodes` can include related `edges` in one atomic call. Put the primary key
-in `key`, never `properties`; omitted fields preserve values, null clears them.
-Check warnings for skipped properties. Validation/statement failures roll back;
-an uncertain completion needs the original operation ID and stored-state check
-(see operations). Stay within
-1000 total nodes/edges and 2 MiB per call.
+For resume, use the selected task or exact unfinished status and the project's
+priority/scope convention; scores and mission numbers are not priority. Fetch its
+acceptance, next step and linked decisions/questions. Current evidence can include
+done tasks. Missing scope or priority remains uncertain; see the memory reference.
 
-For competing edits, read the whole entity and pass its `_revision` as
-`expected_revision`; use `"absent"` for create-only. Relationship revisions use
-`r2:` and survive logical restore, scoped by the selected type/endpoints. Legacy
-unprefixed relationship guards require a reread. Node revision format is unchanged.
-For a possibly lost response, retry the exact payload and `operation_id`. A receipt
-replays the original result without undoing later edits; its revisions describe that
-old commit. A changed payload needs a new ID. Reconcile conflicts before a new edit.
+Link relevant code/tasks where relationships exist. Keep summaries current and
+completion distinct from release status; preserve prior text in history.
 
-Add `evidence: {}` to start correction history; changing evidence on an existing
-node requires its revision. Before corrections, reviews, expiry, supersession or
-history reads, load [references/memory.md](references/memory.md).
+`upsert_nodes` accepts related `edges` atomically. Put primary keys in `key`, never
+`properties`; omission preserves values, null clears. Check skipped-property warnings.
+Limits: 1000 total nodes/edges and 2 MiB. For uncertain completion, use the original
+operation ID and check stored state (operations reference).
+
+Read a whole entity before editing and pass its `_revision` as `expected_revision`;
+use `"absent"` for create-only. Add `evidence: {}` to start correction history.
+Retry a lost response with the exact payload and `operation_id`; read again before
+another edit. Conflict, review, lifecycle and history procedures are in the memory
+reference; never treat a retry receipt as the latest revision.
 
 ## Load detail only when needed
 

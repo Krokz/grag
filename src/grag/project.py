@@ -532,6 +532,20 @@ _MCP_GUIDANCE = (
     "when available.\n\n"
 )
 
+_LOOKUP_GUIDANCE = (
+    "Use source search for code navigation; grag for saved decisions/findings and relationships. "
+    "Focused `search_knowledge` needs no schema preflight; `get_context` serves known IDs. "
+    "Stop recall when claim, scope, source and qualifications suffice. Read again for missing "
+    "evidence, current-code verification or an edit guard. Off-topic hits need corrected scope "
+    "or source inspection; repo names in search text are not scope filters. Use projected "
+    "`cypher_query` with familiar schema and `freshness=\"require\"` for current indexed code.\n\n"
+    "Save useful decisions/reasons and findings with scope, sources, limits and next steps. "
+    "Cite discussions for choices and code for observations; distinguish unchosen proposals. "
+    "Within authorized memory work, correct verified stale findings with revision guards and "
+    "history without asking again; preserve user decisions and read-only scope. Reuse records; "
+    "skip routine reads and unchanged facts. See the grag skill's memory reference.  \n"
+)
+
 
 def _claude_md_block(
     db_path: Path,
@@ -549,8 +563,7 @@ def _claude_md_block(
             f"{server_url}` with `GRAG_API_TOKEN` exported; the graph is shared "
             "with the whole team, so writes land for everyone.\n\n"
             f"{_MCP_GUIDANCE}"
-            "Ground project answers in grag: `cypher_query` for exact facts, "
-            "`search_knowledge` for discovery; request `freshness=\"require\"` when current code matters.  \n"
+            f"{_LOOKUP_GUIDANCE}"
             "Code is indexed on the server (do not `ingest_code` local paths). "
             "New facts: `upsert_nodes` / `upsert_edges`.\n"
             f"{_BLOCK_END}"
@@ -563,8 +576,7 @@ def _claude_md_block(
         "Use the registered MCP connection to the shared database owner. "
         "BM25 works without an embedding model.\n\n"
         f"{_MCP_GUIDANCE}"
-        "Ground project answers in grag: `cypher_query` for exact facts, "
-        "`search_knowledge` for discovery; request `freshness=\"require\"` when current code matters.  \n"
+        f"{_LOOKUP_GUIDANCE}"
         "Index missing code scope with `ingest_code`. Save sourced facts with "
         "`upsert_nodes` / `upsert_edges`. See the grag skill for detailed workflows.\n"
         f"{_BLOCK_END}"

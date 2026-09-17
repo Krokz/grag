@@ -132,6 +132,76 @@ reading. See the [workflow evaluation guide](https://github.com/Krokz/grag/blob/
 for the real MCP drill, optional tokenizer calibration, and measurement limits.
 Vector-neighbor recall from `grag bench` is a separate metric.
 
+### Measure whole agent sessions
+
+Smaller graph replies do not establish lower agent costs. Compare fresh sessions
+on the same committed source snapshot, with and without grag, using the same
+model, task, permissions and acceptance checks. Include ordinary symbol lookups,
+cross-file questions, unsupported premises and edits with executable checks.
+Freeze questions and expected evidence before running either arm; keep the
+answers and grader outside the agent's accessible workspace.
+For planning tasks, grade proposed mechanisms as well as descriptions of current
+code. If review uncovers a gap in the frozen rubric, preserve its original score
+and publish a clearly labeled stricter sensitivity check; strengthen the next
+protocol before launch.
+
+Use reported cost per accepted task as the primary efficiency measure; report
+acceptance rates alongside it so failures cannot look like savings. Track total
+tokens, model rounds and latency separately. Provider-reported cost is not an
+invoice, and token totals alone do not establish how a harness charges usage limits.
+
+Record native input, cache reads, cache creation, output and reported monetary
+cost separately. Count failed attempts and setup probes too. Cache reuse means a
+lower token total can still cost more. `tests/agent_eval.py` provides offline
+helpers for deduplicating Claude terminal usage, checking bounded citations and
+calculating cost per accepted completion; it does not launch paid model calls.
+Missing usage remains unknown. Treat output-format compliance and task correctness
+as separate findings, and label any scoring rule introduced after inspecting
+answers as exploratory.
+
+Verify the harness's actual model, connected MCP tools and grag executable. For
+an editable checkout, put its environment's `bin` directory first in `PATH`
+before `grag init` and check the reported MCP runtime. Installing an MCP server
+does not mean the agent called it: report actual graph calls and subsequent file
+reads. A session that ignores grag measures registration/guidance overhead, not
+retrieval quality. State whether skills, shell access and memory reuse were
+enabled; a constrained pilot is not the unrestricted workflow.
+
+Test automatic use separately from explicit `/grag` activation. Use ordinary
+engineering requests with the installed project guidance, and let the model
+choose its tools. Distinguish schema inspection from retrieving evidence; neither
+proves that retrieved evidence helped the answer. Record subsequent source reads
+and model rounds: fewer returned bytes can still produce more total tokens when
+the conversation is sent again over additional rounds.
+
+When testing source excerpts in retrieval replies, compare against the same graph
+and guidance with pointer replies. Record which exact file ranges reached the
+agent and whether later reads needed additional lines; overlapping ranges alone
+do not mean a whole read could have been eliminated. Measure packing regressions
+as well as answer quality: source text and verification metadata can displace
+useful nodes or relationships. Keep changes to guidance and tool descriptions in
+a separate comparison so they do not obscure the effect of excerpts.
+
+Prefer the task's ordinary response format. An artificial output schema can add
+formatter failures and repair rounds unrelated to retrieval. Preserve those runs
+and their cost; a revised protocol is a separate exploratory cohort, not a
+replacement for unfavorable results. A successful terminal response still needs
+source-grounded quality grading, and a budget-terminated formatter artifact is
+not a completed session.
+
+For memory reuse, compare source-only discovery with an equivalent Markdown
+handoff as well as grag. Keep the same remembered facts and source snapshots in
+the memory arms; report historical memory creation cost as unknown when it was
+not measured. Compare lexical and locally embedded retrieval separately, and
+confirm actual skill loading and vector-selected results in the transcripts.
+Keep JSON compliance separate from factual and citation quality; record valid
+alternative source anchors when a frozen grader is too narrow.
+
+Use disposable snapshots and databases, with no remotes or deployment credentials.
+Private corpora and transcripts stay local and outside tracked fixtures. Remote
+agent evaluation needs explicit source-sharing authorization and a model/cost
+limit. It is never part of the ordinary test suite or CI.
+
 See **[CONTRIBUTING.md](https://github.com/Krokz/grag/blob/main/CONTRIBUTING.md)** for the branching model (Gitflow-lite:
 `main` + `dev` + `feature`/`release`/`hotfix`), PR rules, and how releases are
 cut and published to PyPI.

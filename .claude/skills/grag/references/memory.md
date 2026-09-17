@@ -1,10 +1,86 @@
 <!-- grag-managed skill reference: memory -->
-# Evidence and correction history
+# Capture, reuse and correct memory
 
 Use the graph's existing vocabulary. Common choices are Task (status and acceptance),
 Decision (choice, reason and rejected alternative), Insight (established finding),
 Question (unresolved issue), and Concept/Integration. They are conventions, not built-in
-schema. Check `describe_schema`; define only missing types and endpoint pairs.
+schema. Check unfamiliar schema before writes; define only missing types and
+endpoint pairs. Topic search needs no schema preflight.
+
+## Preserve the result of an investigation
+
+Before finishing a useful investigation or handoff, save what a later session would
+otherwise rediscover. Reuse an existing record and its summary/body fields; this is a
+content convention, not a new schema or a required set of columns.
+
+Preserve explicit user decisions and their reasons, even when they are only in the
+conversation. A code observation alone cannot retain the user's rationale. Keep
+the agreed choice and its discussion source distinct from what source inspection
+established and from proposals still under consideration. Separate records or clear
+clauses in an existing record both work; do not impose new labels to achieve this.
+
+| Include when known | Purpose |
+|---|---|
+| Finding or decision, with its reason | Answer the next session's likely question directly. |
+| Applicable component, project and conditions | Keep a local conclusion from becoming a universal rule. |
+| Supporting source/symbols and what was checked | Make the conclusion traceable; record a revision only if actually observed. |
+| Limits, uncertainty or rejected alternative and reason | Preserve qualifications; distinguish proposals from agreed decisions. |
+| Unfinished work and next validation | Let implementation resume without inventing completion. |
+
+Keep the decisive qualification beside the conclusion. A compact paragraph can
+hold the whole result; a transcript, copied source body or growing session diary
+usually cannot. Save only information supported by the investigation or an explicit
+user decision. Do not invent alternatives, test results, authorship or review.
+An agent's interpretation stays labeled as such; successful storage is not review.
+Set each node's `source` beside `key` and `properties`, never in `properties` or as
+`_source`. Cite the actual discussion for an agreed decision and the inspected
+file/symbol for an implementation observation; one does not establish the other.
+Use a discussion link when available; otherwise identify the conversation by its
+date/topic and retain the relevant statement faithfully. Never invent a message URL
+or use a code citation as the sole evidence for a user choice. Both sources can fit
+the existing `source` string or be explained beside the claims in the body.
+Link existing code/task nodes where useful. Repair skipped-property warnings rather
+than claiming a complete save with missing provenance or qualifications.
+If a finding changes, reconcile and replace its current summary with a revision
+guard; history retains the earlier wording. Skip duplicate static facts and routine
+progress. Do not manufacture a memory just to finish a turn.
+
+## Let a memory replace repeated work
+
+For prior rationale, constraints or a continuation, start with a focused topic
+lookup using known labels, or `get_context` when the ID is already known. Search
+does not require a schema preflight. Stop when the relevant result supplies the
+requested claim, scope, source and qualifications. A follow-up read should resolve
+a specific gap: omitted text or relationships, conflicting evidence, current-code
+verification or the current whole entity/revision needed for an edit. A different
+read tool returning the same record is not independent confirmation.
+
+- **Recall:** if the record establishes the requested past decision/finding and
+  its limits, answer with its source and status. Reopening implementation files
+  is unnecessary unless the question also asks whether they still follow it.
+- **Current implementation or edits:** use the memory to retain rationale and
+  narrow the investigation. Check the relevant current source/tests before
+  asserting behavior or changing code. Code freshness does not certify memory.
+- **Missing, conflicting or partial evidence:** retrieve the particular omitted
+  qualification, or investigate the affected area. An off-topic hit does not
+  justify a chain of broader searches. Preserve uncertainty when scope or support
+  cannot be established; do not treat eligible or accepted evidence as infallible.
+
+## Correct a finding without changing the decision
+
+When memory maintenance is already authorized, correcting a verified stale finding
+is part of that work; do not ask for the same permission again. A read-only request
+or narrower user scope still controls. Evidence that code changed does not authorize
+changing the user's decision or repairing the code itself.
+
+Read the whole current entity and reconcile the affected claim. Preserve the agreed
+choice, its discussion source, unrelated fields and unresolved work. Describe the
+current observation and its code source separately. Apply the correction to the same
+record with `expected_revision` and `evidence: {}` (or an evidence patch with a reason)
+so history retains the prior value. Do not promote review status without review.
+Inspect skipped-property warnings; on a revision conflict, reread and reconcile.
+If evidence or scope remains uncertain, report the discrepancy without presenting a
+replacement as established. Exact lost-response retries follow the rules below.
 
 ## Everyday memory
 

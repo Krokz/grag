@@ -146,26 +146,25 @@ def _validate_standalone_http_security(config: GragConfig, host: str) -> None:
 
 
 _INSTRUCTIONS = (
-    "Prefer these MCP tools for graph reads, writes and ingestion in the selected database; "
-    "discover deferred tools before treating them as unavailable. Do not substitute equivalent "
-    "grag CLI commands or Python/HTTP scripts when MCP is available. Use the CLI for setup, "
-    "server management, diagnostics, backup/recovery, explicit user requests, or unavailable/failed "
-    "MCP connections. State a fallback reason, keep the same database/server, and return to MCP "
-    "when available. Validation errors and empty results are not connection failures. "
-    "Use grag to ground project questions. Read describe_schema once, then choose "
-    "cypher_query with narrow projections for exact facts, or search_knowledge for fuzzy "
-    "questions. Call get_context only for needed neighbors, selected evidence or paging. "
-    "Reuse schema revisions; an unfamiliar unindexed source needs ingest_code first. "
-    "Freshness: allow_stale reads immediately; wait permits an unverified read at the "
-    "deadline; require errors unless source verification succeeds. freshness_timeout_ms "
-    "(0..60000, default5000) bounds verification, not query execution. Only fresh verifies "
-    "the registered scope at checked_at, not memories/embeddings or later file edits. "
-    "Legacy indexes need explicit ingest_code to enroll a verifiable scope. "
-    "Read evidence qualifiers, truncation/omission counters and parser-coverage limits. "
-    "Save useful decisions/corrections with source; use guarded atomic upserts and exact "
-    "operation-ID retries where appropriate. BM25 is the default; embeddings are optional "
-    "and add model preparation, memory and indexing costs. Do not enable them merely "
-    "because vector=off. Never delete WAL/shadow files to repair a database."
+    'Use connected MCP for graph reads/writes/ingestion; discover deferred tools. CLI is for '
+    'setup/operations, explicit requests or unavailable/failed MCP. State fallback; keep the '
+    'selected database. Empty results and validation errors are not connection failures. Use source search for '
+    'code navigation; grag for saved decisions/findings and structural relationships. '
+    'Use focused search with known labels or context for known IDs. Stop recall when claim, '
+    'scope, source and qualifications suffice; read again for a specific evidence gap, '
+    'current-code check or edit guard. Off-topic hits need source inspection or corrected '
+    'scope. Search needs no schema preflight; '
+    'projected Cypher needs familiar schema. Repo names in query text are not scope filters. '
+    'Save useful decisions/reasons and findings with scope, sources, limits and next steps. '
+    'Cite discussions for choices and code for observations; distinguish unchosen proposals. '
+    'Within authorized memory work, correct verified stale findings using revision guards '
+    'and history without asking again; preserve user decisions and read-only scope. Only '
+    'freshness=fresh verifies the registered code scope at checked_at, not '
+    'memories/embeddings or later edits. require errors if verification fails; wait can '
+    'return unverified at its deadline. Inspect evidence qualifiers, omissions and parser '
+    'coverage; absence is not completeness. Reuse records; retry lost writes with the exact '
+    'operation ID/payload. BM25 works without embeddings. Never delete WAL/shadow '
+    'files to repair a database.'
 )
 
 
@@ -289,14 +288,10 @@ def define_schema(
     if_not_exists: bool = True,
     allow_similar: bool = False,
 ) -> str:
-    """Create/reuse node and directed relationship tables; call before writing a new type.
-    Reuse existing labels: near-duplicates are refused unless allow_similar=true.
-    Node primary keys default to STRING id; declare a different type in properties.
-    Names use unquoted ASCII identifiers; reserved words (e.g. optional) get rename
-    hints. Tables and registry publish atomically.
-    Properties support STRING, INT64, DOUBLE, BOOL, DATE, TIMESTAMP. searchable enables
-    retrieval. Relationship endpoints must exist or be defined in this call.
-    Returns the current compact schema. if_not_exists=true preserves existing tables.
+    """Create/reuse node and directed relationship tables; inspect existing schema first. Node
+    keys default to STRING id. Declare property types and relationship endpoints. Names must
+    be unquoted ASCII identifiers; near-duplicates require allow_similar=true. if_not_exists
+    preserves existing tables. Returns compact schema.
     """
     req = DefineSchemaRequest(
         node_tables=[NodeTableSpec.model_validate(t) for t in node_tables],
@@ -310,18 +305,13 @@ def define_schema(
 
 @_return_errors
 def upsert_nodes(service: GragService, nodes: Sequence[UpsertNode | dict], edges: Sequence[UpsertEdge | dict] | None = None, operation_id: str | None = None) -> str:
-    """Atomically save nodes and optional edges; any error rolls back the entire batch.
-    Reuse schema; node key holds the primary-key value, never properties. Supply source.
-    Omitted fields preserve values; null clears a property. Check warnings for skipped
-    properties. At most 1000 total nodes/edges and 2 MiB per call; split larger work.
-    For lost responses, retry the exact payload and operation_id; replay returns the
-    original result without undoing later edits. A changed payload with that ID conflicts.
-    For competing edits use expected_revision from a whole-entity query, or "absent"
-    for create-only. Relationship tokens use r2:; legacy tokens require a fresh read.
-    Node evidence={} starts durable correction history; existing-node evidence patches
-    require expected_revision. Optional state/review/actor/reason/expiry/supersession
-    are explicit caller metadata, not independent verification. Source and history survive
-    later corrections. Results include counts/warnings and guarded or retryable revisions.
+    """Atomically save nodes and optional edges using existing labels/properties; describe_schema
+    first if unfamiliar. Each node has label, key, properties and source: source belongs beside
+    properties, never inside it or as _source. Repair skipped-property warnings. Omission preserves
+    values; null clears. Limit: 1000 nodes/edges, 2 MiB. Guard edits with expected_revision from a
+    whole-entity read, or 'absent' for create-only. Lost response: retry exact payload/operation_id.
+    evidence={} starts history; adopting existing nodes needs a guard. Caller review is not
+    verification. Returns counts, warnings and revisions; see the skill's memory reference.
     """
     req = UpsertNodesRequest(nodes=[UpsertNode.model_validate(n) for n in nodes], edges=[UpsertEdge.model_validate(e) for e in edges or []], operation_id=operation_id)
     return _summary_json(service.upsert_nodes(req))
@@ -329,13 +319,11 @@ def upsert_nodes(service: GragService, nodes: Sequence[UpsertNode | dict], edges
 
 @_return_errors
 def upsert_edges(service: GragService, edges: Sequence[UpsertEdge | dict], operation_id: str | None = None) -> str:
-    """Atomically save directed relationships between existing endpoints. Reuse schema;
-    use upsert_nodes with edges to create endpoints in the same transaction. Check warnings.
-    Supply source, optional expected_revision (r2: token from RETURN r, or "absent"),
-    and operation_id for exact retries after lost responses. Legacy unprefixed edge guards
-    require a reread; stored old receipts still replay unchanged. Same type/endpoints
-    select the guarded relationship; duplicate relationships must be reconciled first.
-    At most 1000 edges and 2 MiB per call. Returns counts/warnings and applicable revisions.
+    """Atomically save directed relationships between existing endpoints; upsert_nodes can create
+    endpoints and edges together. Supply source; inspect warnings. Limit: 1000 edges, 2 MiB.
+    Use current expected_revision (or 'absent') for guards; legacy tokens need a reread. Retry
+    lost responses with the exact operation_id and payload. Returns counts, warnings and
+    revisions.
     """
     req = UpsertEdgesRequest(edges=[UpsertEdge.model_validate(e) for e in edges], operation_id=operation_id)
     return _summary_json(service.upsert_edges(req))
@@ -348,7 +336,7 @@ def cypher_query(
 ) -> str:
     """Run read-only Cypher with compact JSON columns/rows/row_count/truncated/freshness.
     Read describe_schema first; project only needed fields for exact lookups or counts.
-    Use search_knowledge for fuzzy questions. This tool accepts no writes.
+    Use search_knowledge for topics in saved knowledge. This tool accepts no writes.
     For task resumption, filter declared scope/status and use explicit priorities;
     task IDs, mission numbers and relevance scores do not establish priority.
     Whole nodes/relationships include computed _revision and omit vectors/null columns;
@@ -380,9 +368,11 @@ def search_knowledge(
     freshness_timeout_ms: int = 5000,
     evidence: Literal["current", "all"] = "current",
 ) -> str:
-    """Retrieve cited context for a fuzzy question: BM25 plus optional vectors, then graph
-    expansion. Narrow labels when known; top_k controls seeds and hops controls neighbors.
-    Use cypher_query projections for exact names/counts, get_context for selected IDs.
+    """Discover cited context with a focused topic; no schema preflight required. BM25 plus
+    optional vectors, then graph expansion. Narrow labels only when known; repo names in
+    query text are not scope filters. Use projected Cypher for exact names/path filters.
+    For an initial lead, try top_k=4, hops=0; expand only for needed evidence. Off-topic hits
+    need a better query/scope or source inspection, not more seeds. Defaults stay 8/1.
     Resume work via exact status/scope/priority queries; relevance is not task order.
     Inspect the JSON footer: freshness, evidence_policy, truncated and omission counts.
     Current evidence excludes superseded/retracted/expired/disputed/obsolete nodes;
@@ -461,19 +451,13 @@ def ingest_code(
     root: str | None = None,
     replace_scope: bool = False,
 ) -> str:
-    """Index local source structure, names, signatures, docstrings and file/line citations;
-    source bodies stay in files. Incremental scans reconcile changed/removed generated
-    nodes/edges while retaining authored links; check warnings and obsolete qualifiers.
-    Unchanged parses are reused within an owner; files_reused counts them, not skipped dependency checks.
-    Python works by default; other supported languages/framework scripts need gragdb[code].
-    Go also indexes Constant source expressions and basic interface method sets.
-    Do not assume complete call/import resolution: inspect Module.code_coverage for JS/TS/Go;
-    missing edges do not prove absence. paths honor ignores and skip symlinks/nested repos.
-    Use root for one intended scope. Registered paths accumulate unless replace_scope=true
-    with an explicit root; paths=[] then unregisters that scope. Saved options govern refresh.
-    calls controls CALLS edges; max_file_kb limits individual source files.
-    Use background=true for large scans and poll job_status; a returned job is not completion.
-    Serving reads verify enrolled code scopes; require freshness when current code matters.
+    """Index server-local code structure and file/line pointers. Python is built in; other
+    supported languages need gragdb[code]. Edges are partial static analysis: inspect
+    Module.code_coverage; missing edges do not prove absence. Paths honor ignores and skip
+    symlinks/nested repos. Registered paths accumulate; replace_scope=true requires root, with
+    paths=[] to unregister. Re-ingest reconciles generated content while retaining authored
+    links; inspect warnings/obsolete states. Use background=true for large scans, then poll
+    job_status. Scope, parser coverage and saved options: skill ingestion reference.
     """
     req = CodeIngestRequest(paths=paths, calls=calls, max_file_kb=max_file_kb, root=root, replace_scope=replace_scope)
     if background:
@@ -492,19 +476,13 @@ def ingest_docs(
     background: bool = False,
     json_mode: Literal["records", "document"] = "records",
 ) -> str:
-    """Index local Markdown/text/JSON/JSONL documents with provenance. JSON expects a list
-    of {text, source?, metadata?} records or a documents wrapper; JSONL one record per line.
-    Use json_mode="document" for ordinary .json schemas/contracts/fixtures: validated literal
-    source text with file citations; no schema validation or reference resolution. This explicitly
-    treats record-shaped .json as one source document too; JSONL stays records. JSON is bounded
-    to 64 nesting levels and existing byte/batch limits. Invalid files warn and preserve unseen data.
-    sections=true preserves Markdown headings; JSON source text uses one preamble section.
-    label names the chunk table.
-    Ingest code first to link mentioned symbols. Directory scans reconcile deleted documents;
-    file updates replace generated content/links. Authored or unknown links can retain obsolete
-    nodes; inspect warnings. Failed scans do not authorize deletion of unseen documents.
-    Honor ignores and source scope; documents need explicit re-ingestion after edits.
-    Use background=true for large input, then poll job_status. Paths are on the server.
+    """Index server-local Markdown/text/JSON/JSONL with provenance. Default JSON expects document
+    records ({text, source?, metadata?}); use json_mode='document' for ordinary .json files.
+    JSONL stays records. sections=true preserves Markdown headings; ingest code first for
+    symbol links. Successful scans reconcile generated content; authored links can retain
+    obsolete nodes. Inspect warnings. Document edits need re-ingestion. Use background=true
+    for large input, then poll job_status. Formats, limits and scope: skill ingestion
+    reference.
     """
     from pathlib import Path
 
@@ -528,10 +506,9 @@ def ingest_docs(
 
 @_return_errors
 def job_status(service: GragService, job_id: str) -> str:
-    """Poll a background ingestion job by job_id. queued/running are unfinished;
-    done includes the result and warnings, failed includes the error, cancelled requires
-    resubmission if still wanted. Jobs are process-local and disappear after restart.
-    A job ID or running response never establishes a successful ingest.
+    """Poll a background ingestion job. queued/running are unfinished; done includes
+    result/warnings; failed includes error. Jobs are process-local; cancelled/lost jobs may
+    need resubmission.
     """
     job = service.get_job(job_id)
     return json.dumps(job.model_dump(), ensure_ascii=False, separators=_COMPACT)

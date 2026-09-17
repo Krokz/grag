@@ -1,11 +1,14 @@
 # Save, recall and revise memory <span id="save-and-revise-memory"></span>
 
-Ask your agent to remember a decision with its reason, supporting source and a
-link to the relevant component. On the next session, ask for that decision and
-its evidence. grag provides storage and retrieval; the harness decides when to
-read or write. Start with `describe_schema` and reuse the project's labels and
-records. `Task`, `Decision`, `Insight` and `Question` are conventions, not a
-required schema.
+Keep supported conclusions from useful investigations so the next session can
+reuse the result. grag provides storage and retrieval; the harness decides when
+to read or write. The packaged guidance encourages capture at a useful conclusion,
+decision, correction or handoff. You can also explicitly ask it to remember.
+{ .grag-lead }
+
+Reuse the project's labels and records; check unfamiliar schema before writes.
+Topic search needs no schema preflight. `Task`, `Decision`, `Insight` and `Question`
+are conventions, not a required schema.
 
 | Intent | Existing MCP tools |
 |---|---|
@@ -18,6 +21,66 @@ Keep the canonical `Label:key` from results; keys may contain additional colons.
 Confirm the selected database and any declared project membership before writing.
 A source citation records provenance, not project ownership. Existing memory
 labels and relationships remain usable without creating a separate `Memory` copy.
+
+## Save a conclusion the next session can use
+
+A compact memory should establish the finding or decision, its reason and scope,
+supporting evidence, important limits and any unfinished work. Fit these into
+existing fields such as `summary` or `body`; no new table or columns are required.
+Keep decisive qualifications beside the conclusion so a partial read cannot easily
+separate them. Link relevant code and tasks when the schema supports it.
+
+!!! example "Illustration: request-scoped identity"
+    **Decision:** keep user identity on each request because the executor is shared.
+    **Reason:** mutable executor credentials could leak identity between requests.
+    **Evidence:** the accepted design discussion and inspected executor symbol.
+    **Unfinished:** downstream delegation and concurrent-request rejection tests.
+
+    This is a fictional example, not an observation about your project. A real
+    memory should cite actual evidence and only record checks that were performed.
+
+Save observed behavior, agreed decisions and tentative proposals as distinct claims.
+Preserve explicit user decisions and their reasons even when they exist only in the
+conversation; a code observation cannot replace that rationale. Cite the discussion
+for the choice and the inspected code for observed behavior.
+If no discussion link is available, identify the conversation by date/topic and
+retain the relevant statement faithfully; do not invent a link. The existing
+`source` field and memory body can carry both forms of provenance.
+An agent's inference is not an accepted decision. Successful storage does not mean
+review; preserve review state and attribution honestly. Replace changed summaries
+with revision guards and retain history, instead of appending an endless diary.
+
+## Reuse it without repeating the investigation
+
+| Next-session question | Appropriate use |
+|---|---|
+| Why did we choose request-scoped identity? | Retrieve the decision and answer from its supported rationale and qualifications. |
+| Does today's implementation isolate identity? | Use the memory to locate the relevant source and verify current behavior. |
+| Continue the delegation work | Retrieve the task's current status, constraints and next check; inspect the code being changed. |
+
+A focused `search_knowledge` or a `get_context` for a known ID may supply all the
+evidence a recall question needs. Stop when the relevant result establishes the
+requested claim, scope, source and qualifications. Follow-up reads should resolve
+missing evidence, a conflict, current-code verification or an edit's revision guard.
+Reading the same record through another tool does not independently confirm it.
+Memory freshness is not established by code freshness alone.
+
+The benefit to look for is an investigation the agent can skip while still answering
+correctly. Shorter tool output alone does not establish lower session cost or tokens.
+These instructions support reuse; they do not guarantee harness behavior or savings.
+
+## Correct a stale finding
+
+Within an authorized memory-maintenance task, a verified correction can proceed
+without another permission request. Read-only scope still controls. Read the whole
+current record, preserve unrelated claims and the user's original decision, and
+update the observed implementation with its current source. A divergence in code
+does not mean the user changed their decision or authorized a code edit.
+
+Use the same record, its current `expected_revision` and `evidence: {}` (or an
+evidence patch with a reason) to retain history. Check warnings and reconcile
+revision conflicts. Preserve review status; report unresolved discrepancies when
+evidence is insufficient for a supported correction.
 
 ## CLI shortcuts
 
