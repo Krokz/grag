@@ -202,7 +202,9 @@ def test_nontrivial_code_documents_and_fts_survive_reopen(tmp_path):
         assert service.engine.execute("MATCH (f:Function) RETURN count(f)").rows == [[96]]
         assert service.engine.execute("MATCH (s:Section) RETURN count(s)").rows == [[48]]
     finally:
-        service.close()
+        # Native checkpointing can outlast the default grace period on Windows.
+        # Reopen only after the owner confirms closure, not after a timed-out drain.
+        assert service.close(timeout=30)["engine_closed"]
     service = GragService(config)
     try:
         assert service.engine.execute("MATCH (m:Module) RETURN count(m)").rows == [[12]]
@@ -210,7 +212,7 @@ def test_nontrivial_code_documents_and_fts_survive_reopen(tmp_path):
         result = service.search_knowledge(SearchRequest(query="quartzrule", labels=["Section"], hops=0))
         assert result.included_node_ids
     finally:
-        service.close()
+        assert service.close(timeout=30)["engine_closed"]
 
 
 def test_rollback_survives_exhausted_work_budget(engine, monkeypatch):
