@@ -65,12 +65,12 @@ async def _memory_loop(tmp_path):
     @asynccontextmanager
     async def connect():
         with (tmp_path / "mcp.stderr").open("a") as errlog:
-            async with stdio_client(params, errlog=errlog) as (reader, writer):
-                async with ClientSession(
-                    reader, writer, read_timeout_seconds=30
-                ) as session:
-                    await session.initialize()
-                    yield session
+            async with (
+                stdio_client(params, errlog=errlog) as (reader, writer),
+                ClientSession(reader, writer, read_timeout_seconds=30) as session,
+            ):
+                await session.initialize()
+                yield session
 
     async def call(session, name, arguments, *, error=None):
         result = await session.call_tool(name, arguments)

@@ -215,10 +215,12 @@ async def _mcp_workflow(root):
     @asynccontextmanager
     async def connect():
         with (root / "mcp.stderr").open("a") as errors:
-            async with stdio_client(params, errlog=errors) as (reader, writer):
-                async with ClientSession(reader, writer, read_timeout_seconds=60) as session:
-                    await session.initialize()
-                    yield session
+            async with (
+                stdio_client(params, errlog=errors) as (reader, writer),
+                ClientSession(reader, writer, read_timeout_seconds=60) as session,
+            ):
+                await session.initialize()
+                yield session
 
     async def call(session, name, args):
         result = await session.call_tool(name, args)

@@ -117,10 +117,12 @@ async def connect(root):
                                   args=['mcp'] if launcher else ['-m', 'grag.cli', 'mcp'],
                                   cwd=str(root / 'nested'), env=env)
     with (root / 'mcp.stderr').open('a') as error:
-        async with stdio_client(params, errlog=error) as (read, write):
-            async with ClientSession(read, write, read_timeout_seconds=60) as session:
-                await session.initialize()
-                yield session
+        async with (
+            stdio_client(params, errlog=error) as (read, write),
+            ClientSession(read, write, read_timeout_seconds=60) as session,
+        ):
+            await session.initialize()
+            yield session
 
 
 async def resume(session, checkout):

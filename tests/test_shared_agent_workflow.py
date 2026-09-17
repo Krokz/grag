@@ -119,11 +119,13 @@ async def shared_workflow(root):
     @asynccontextmanager
     async def connect():
         with (root / "shared-mcp.stderr.log").open("a") as errors:
-            async with stdio_client(params, errlog=errors) as (reader, writer):
-                async with ClientSession(reader, writer, read_timeout_seconds=60) as session:
-                    await session.initialize()
-                    await call(session, "describe_schema", {})
-                    yield session
+            async with (
+                stdio_client(params, errlog=errors) as (reader, writer),
+                ClientSession(reader, writer, read_timeout_seconds=60) as session,
+            ):
+                await session.initialize()
+                await call(session, "describe_schema", {})
+                yield session
 
     def stop():
         nonlocal owned_process
