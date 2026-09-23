@@ -47,6 +47,27 @@ and samples for full detail, and are separate from source freshness.
 See [memory writes and history](../guides/memory.md), [task resumption](../guides/resume.md), [retrieval](../guides/retrieval.md), and [request limits](limits.md) for the full contracts.
 
 
+## Tool loading in agent sessions
+
+Every registered MCP tool adds its description and input schema to the agent's
+context, and grag's server instructions and generated project guidance add more.
+Measured with Claude Code 2.1.27x, registering grag's ten tools without deferral
+added roughly 6,500 (Haiku) to 9,000 (Sonnet) tokens to the first request of each
+session.
+
+Claude Code can defer MCP tool schemas and load one only when the agent searches for
+it (ToolSearch). Interactive sessions normally defer. Scripted `claude -p` runs that
+pass an explicit `--tools` list must include `ToolSearch`, or every grag schema is
+sent up front:
+
+```bash
+claude -p "..." --tools "Read,Glob,Grep,ToolSearch"
+```
+
+With `--debug`, the line `Dynamic tool loading: 0/10 deferred tools included`
+confirms that no grag schema was loaded up front. In our tests, tool search did not
+activate through a custom `ANTHROPIC_BASE_URL`, so all schemas were sent.
+
 ## Manual connection example
 
 
