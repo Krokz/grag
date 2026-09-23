@@ -96,6 +96,15 @@ missing evidence, a conflict, current-code verification or an edit's revision gu
 Reading the same record through another tool does not independently confirm it.
 Memory freshness is not established by code freshness alone.
 
+When a history-tracked record's `source` cites files (absolute paths, or paths
+under a registered code root), grag stores their content hashes at write time.
+Ordinary `search_knowledge` and `get_context` reads then add `_source_changed`,
+listing cited files whose content changed or went missing since the record was
+last written. Recheck those claims and correct the record, which re-anchors it.
+Only cited files are checked: a record without `_source_changed` may still be
+stale because of changes elsewhere. The stored anchors are not shown in replies
+and do not change the record's `_revision`.
+
 The benefit to look for is an investigation the agent can skip while still answering
 correctly. Shorter tool output alone does not establish lower session cost or tokens.
 These instructions support reuse; they do not guarantee harness behavior or savings.

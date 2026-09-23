@@ -120,6 +120,10 @@ read tool returning the same record is not independent confirmation.
   qualification, or investigate the affected area. An off-topic hit does not
   justify a chain of broader searches. Preserve uncertainty when scope or support
   cannot be established; do not treat eligible or accepted evidence as infallible.
+- **`_source_changed`:** lists files cited in a tracked record's `source` whose
+  content changed, or that went missing, since the record was last written. Recheck
+  those claims against the named files before relying on them, then correct the
+  record. Its absence does not prove a claim is current: only cited files are checked.
 
 ## Correct a finding without changing the decision
 
