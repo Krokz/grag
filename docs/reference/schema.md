@@ -4,6 +4,31 @@ Use the project's existing labels and properties. Task, Decision, Insight and
 Question are useful conventions, not a required schema.
 { .grag-lead }
 
+## Optional memory preset
+
+**New in 0.13.0:** `grag memory adopt`, `grag init --memory-preset`, or
+`define_schema` with only `preset="memory"` adopts version 1 of the memory
+preset: `Decision`, `Insight`, `Task` and `Question` node tables, each keyed by a
+STRING `id` with STRING `title`, `body`, `status` and `scope` properties.
+
+Adoption is additive and can be repeated:
+
+- Missing tables are created and registered as searchable.
+- Existing tables gain missing properties. The table's text search index is
+  rebuilt to include new text properties.
+- Nothing is dropped, renamed or retyped. A different primary key, a property
+  with another type, a relationship table with a preset name, or a near-duplicate
+  table (`Decisions`) is reported as a conflict and left unchanged. Pass
+  `allow_similar=true` (`--allow-similar`) to create a preset table beside a
+  near-duplicate.
+- The adopted version is recorded in grag's internal metadata. A later grag
+  version adds its changes on the next adoption and refuses to run against a
+  database adopted by a newer version.
+
+The response lists created tables, added properties and conflicts. Export does not
+carry the recorded version; re-adopting after an import is safe. A server that
+predates presets is refused before any request is sent.
+
 ## Reuse before defining
 
 `describe_schema` shows the current vocabulary. `define_schema` rejects a new

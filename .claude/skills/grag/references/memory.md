@@ -3,9 +3,11 @@
 
 Use the graph's existing vocabulary. Common choices are Task (status and acceptance),
 Decision (choice, reason and rejected alternative), Insight (established finding),
-Question (unresolved issue), and Concept/Integration. They are conventions, not built-in
+Question (unresolved issue), and Concept/Integration. They are conventions, not required
 schema. Check unfamiliar schema before writes; define only missing types and
-endpoint pairs. Topic search needs no schema preflight.
+endpoint pairs. With no memory labels yet, `define_schema` with only `preset="memory"`
+adds Decision/Insight/Task/Question (title, body, status, scope) without changing
+existing tables. Topic search needs no schema preflight.
 
 ## Preserve the result of an investigation
 

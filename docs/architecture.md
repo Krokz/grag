@@ -21,7 +21,8 @@ The core workflow is **ingest, retrieve and remember**:
 
 The agent harness owns planning, model execution and tool selection. Authored
 memory uses the project's vocabulary; grag does not require a task engine,
-ontology or schema preset. Embeddings and the browser views are optional ways to
+ontology or schema preset. An optional, versioned memory preset gives a new graph
+a shared starting point. Embeddings and the browser views are optional ways to
 use the same local graph.
 
 Single-owner access, atomic writes, edit guards, backup and recovery support the

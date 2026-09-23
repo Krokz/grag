@@ -1,4 +1,4 @@
-"""Bounded, schema-aware UI browsing. No preset schema or inferred memories."""
+"""Bounded, schema-aware UI browsing. No required schema or inferred memories."""
 
 from __future__ import annotations
 

@@ -8,7 +8,7 @@ command syntax supported by your installed version.
 |---|---|
 | Connect | `init`, `relocate` |
 | Index | `ingest-code`, `ingest` |
-| Save and retrieve | `remember`, `inspect`, `retire`, `search`, `context` |
+| Save and retrieve | `remember`, `inspect`, `retire`, `search`, `context`, `memory adopt` |
 | Run a server | `serve`, `mcp`, `start`, `restart`, `stop` |
 | Diagnose | `status`, `doctor` |
 | Preserve data | `export`, `import`, `recover` |
@@ -40,7 +40,8 @@ These commands use the same database resolution and owner routing as ingestion:
 | `search/context --tokens N` | `2000` | Estimated retrieval budget; this CLI default overrides `GRAG_TOKEN_BUDGET` for these commands. |
 | `search/context --hops N` | `1` | Graph-expansion depth. |
 | `search/context/inspect --freshness MODE` | `allow_stale` | `allow_stale`, `wait` or `require`; uses the request's default freshness timeout. |
-| `remember/search/context/inspect/retire --json` | off | Emits compact machine-readable JSON instead of the human summary (`inspect` otherwise uses indented JSON). |
+| `memory adopt` | — | Since 0.13.0: adopts the optional, versioned [memory preset](schema.md#optional-memory-preset); additive and repeatable. Conflicts are reported and left unchanged. `--allow-similar` creates preset tables beside near-duplicates. |
+| `remember/search/context/inspect/retire/memory adopt --json` | off | Emits compact machine-readable JSON instead of the human summary (`inspect` otherwise uses indented JSON). |
 
 See the [everyday memory walkthrough](../guides/memory.md#cli-shortcuts) for guarded
 corrections, retry semantics and the difference between retraction and deletion.
@@ -61,6 +62,7 @@ corrections, retry semantics and the difference between retraction and deletion.
 | `init --port PORT` | saved, otherwise derived per-project | Port written into generated MCP/shared-server configuration. New defaults derive from the database path (41000–49151); choose an explicit port if occupied. |
 | `init --ingest` | off | Also runs `ingest-code` on the resolved project root immediately. |
 | `init --ingest-if-empty` | off | Since 0.10.0: checks the selected local graph and sets up/indexes the checkout only when absent, empty or containing only the verified init marker. Other content skips setup and indexing. Mutually exclusive with `--ingest`; refuses remote servers and `--remove`. |
+| `init --memory-preset` | off | Since 0.13.0: also runs `memory adopt` on the selected local database after setup. Refuses remote servers and `--remove`. |
 | `init --global-skill` | off | Since 0.10.0: installs only the user-level skill bundle so it can be invoked in new repos. Supports `--client`, `--dry-run` and `--remove`; does not open a database or configure MCP. Claude honors `CLAUDE_CONFIG_DIR` for its personal skill location. |
 | `init --remove` | off | Undoes init: removes the grag MCP entry and the CLAUDE.md block. |
 | `init --url` | off | Writes direct HTTP URL transport instead of stdio plus auto-serve; the shared server must already be running. |

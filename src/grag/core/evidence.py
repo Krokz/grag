@@ -1,6 +1,6 @@
 """Explicit memory lifecycle and opt-in, transactional authored revision history.
 
-No preset schema or background expiry worker. Untracked graphs keep working;
+No required schema or background expiry worker. Untracked graphs keep working;
 expiry is evaluated at read time and never deletes evidence. History begins at
 adoption, with a baseline for an existing node, not invented earlier revisions.
 """

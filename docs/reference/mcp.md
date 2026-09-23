@@ -10,7 +10,7 @@ Any MCP client gets these 10 tools:
 | tool | purpose |
 |---|---|
 | `describe_schema` | compact schema: tables, property types, primary keys and directed endpoints. Optional full detail and revision-based reuse. Call before writing Cypher. |
-| `define_schema` | create node/rel tables (LLM designs the graph for a domain); grag 0.10.0 validates reserved names and publishes the batch atomically |
+| `define_schema` | create node/rel tables (LLM designs the graph for a domain); grag 0.10.0 validates reserved names and publishes the batch atomically; since 0.13.0, `preset="memory"` alone adopts the optional [memory preset](schema.md#optional-memory-preset) |
 | `upsert_nodes` / `upsert_edges` | atomic MERGE batches; optional retry IDs and revision checks; `_source` provenance automatic |
 | `cypher_query` | read-only Cypher; errors come back with correction hints |
 | `search_knowledge` | hybrid BM25 + vector seeds → RRF fusion → per-label diversity cap → k-hop expansion → cited, token-budgeted context |

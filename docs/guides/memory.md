@@ -8,7 +8,8 @@ decision, correction or handoff. You can also explicitly ask it to remember.
 
 Reuse the project's labels and records; check unfamiliar schema before writes.
 Topic search needs no schema preflight. `Task`, `Decision`, `Insight` and `Question`
-are conventions, not a required schema.
+are conventions, not a required schema; the optional [memory
+preset](../reference/schema.md#optional-memory-preset) creates them for you.
 
 | Intent | Existing MCP tools |
 |---|---|
