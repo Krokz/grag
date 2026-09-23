@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 *.lbdb
 *.wal
+*.ses
 dist/
 build/
 *.egg-info/
@@ -17,6 +18,10 @@ src/grag/_runtime/
 site/
 
 # grag init output (personal machine paths) — dogfooding configs stay local
+.grag/
 .mcp.json
 .cursor/mcp.json
 CLAUDE.md
+
+# Private evaluation artifacts (private repository snapshots, session transcripts)
+audits/
