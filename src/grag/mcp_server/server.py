@@ -311,7 +311,8 @@ def upsert_nodes(service: GragService, nodes: Sequence[UpsertNode | dict], edges
     first if unfamiliar. Each node has label, key, properties and source: source belongs beside
     properties, never inside it or as _source. Repair skipped-property warnings. Omission preserves
     values; null clears. Limit: 1000 nodes/edges, 2 MiB. Guard edits with expected_revision from a
-    whole-entity read, or 'absent' for create-only. Lost response: retry exact payload/operation_id.
+    whole-entity read (search_knowledge and get_context return it as _revision), or 'absent' for
+    create-only. Lost response: retry exact payload/operation_id.
     evidence={} starts history; adopting existing nodes needs a guard. Caller review is not
     verification. Returns counts, warnings and revisions; see the skill's memory reference.
     """
@@ -432,6 +433,8 @@ def get_context(
     For tracked memory, history=true lists up to 20 revisions; continue using history_before.
     revision=<sequence> retrieves one saved snapshot and can combine with text_property.
     History needs one ID, starts at adoption, and does not reconstruct past relationships.
+    Packed nodes carry their _revision guard token; pass it as expected_revision to correct
+    a record. Page mode (text_property) does not project _revision; read without it first.
     Budgets are UTF-8/4 estimates (256..32768) bounding this text reply; use Cypher for exact structured projections.
     """
     resp = service.get_context(

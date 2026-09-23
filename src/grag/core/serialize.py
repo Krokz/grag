@@ -31,7 +31,9 @@ from grag.core.types import (
 # Kept here without importing evidence.py, which depends on the engine.
 _SAFETY_PROPS = {"_evidence_state", "_review_state", "_expires_at", "_superseded_by",
                  "_evidence_seq", "_document_state", "_source_state", "_history_revision", "_evidence_visibility", "status"}
-_CITATION_PROPS = {PROVENANCE_SOURCE, "line_start", "line_end", "status", *_SAFETY_PROPS}
+# The citation bundle also carries the guard token: an ordinary read must be
+# sufficient for a guarded correction, so budget pressure never strips it.
+_CITATION_PROPS = {PROVENANCE_SOURCE, "line_start", "line_end", "status", "_revision", *_SAFETY_PROPS}
 
 
 def estimate_tokens(text: str) -> int:

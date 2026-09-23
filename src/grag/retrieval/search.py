@@ -31,7 +31,11 @@ from grag.core.types import (
     merge_subgraphs,
 )
 from grag.retrieval.lexical import rank_lexical
-from grag.retrieval.packing import pack_search_response, retrieval_budget
+from grag.retrieval.packing import (
+    _with_revisions,
+    pack_search_response,
+    retrieval_budget,
+)
 from grag.retrieval.vectors import (
     _ensure_extension,
     _ident,
@@ -190,8 +194,9 @@ def search_knowledge(
         excluded=excluded if req.evidence == "current" else None, now=now,
     )
     subgraph = merge_subgraphs(Subgraph(nodes=[s.node for s in seeds]), expanded)
+    # Ordinary reads carry the guard token, so correction needs no Cypher detour.
     return pack_search_response(
-        subgraph,
+        _with_revisions(subgraph),
         seeds,
         budget,
         pending_embeddings=pending,

@@ -424,6 +424,63 @@ def test_search_unknown_labels_never_displace_evidence(docs_engine):
 # --- guard revisions in ordinary reads (September 2026 longitudinal audit) -------
 
 
+def test_reads_expose_guard_revisions_matching_cypher(docs_engine):
+    from grag.core.revisions import annotate_revisions
+    from grag.retrieval.context import get_context
+
+    # Reference tokens from the Cypher path — formerly the only way to read them.
+    reference = {}
+    for (row,) in docs_engine.execute("MATCH (n:Doc) RETURN n").rows:
+        annotated = annotate_revisions(row)
+        reference[f"Doc:{annotated['id']}"] = annotated["_revision"]
+
+    resp = search_knowledge(docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=1))
+    assert resp.seeds and len(resp.subgraph.nodes) > 1
+    for node in resp.subgraph.nodes:
+        assert node.properties["_revision"] == reference[node.id]
+    ctx = get_context(docs_engine, docs_engine.config, ContextRequest(node_ids=["Doc:doc-0"], hops=0))
+    assert ctx.subgraph.nodes[0].properties["_revision"] == reference["Doc:doc-0"]
+
+
+def test_read_revision_token_satisfies_the_upsert_guard(docs_engine):
+    from grag.core.errors import ConflictError
+    from grag.core.mutate import upsert_nodes
+    from grag.core.types import UpsertNode, UpsertNodesRequest
+    from grag.retrieval.context import get_context
+
+    ctx = get_context(docs_engine, docs_engine.config, ContextRequest(node_ids=["Doc:doc-1"], hops=0))
+    token = ctx.subgraph.nodes[0].properties["_revision"]
+    # A guarded write with the read token succeeds without any Cypher detour.
+    summary = upsert_nodes(docs_engine, docs_engine.config, UpsertNodesRequest(nodes=[
+        UpsertNode(label="Doc", key="doc-1", properties={"title": "vector search, corrected"}, expected_revision=token)
+    ]))
+    assert summary.revisions["Doc:doc-1"] != token
+    # The pre-write token is now stale and must conflict.
+    try:
+        upsert_nodes(docs_engine, docs_engine.config, UpsertNodesRequest(nodes=[
+            UpsertNode(label="Doc", key="doc-1", properties={"title": "stale"}, expected_revision=token)
+        ]))
+        raise AssertionError("stale token accepted")
+    except ConflictError:
+        pass
+
+
+def test_revision_survives_budget_pressure(docs_engine):
+    from grag.retrieval.packing import mcp_retrieval_text
+
+    docs_engine.execute_write(
+        "CREATE (d:Doc {id: $id, title: $t, text: $x})",
+        {"id": "long-0", "t": "graph relationships long", "x": "graph relationships " + "x" * 800},
+    )
+    resp = search_knowledge(
+        docs_engine, docs_engine.config, SearchRequest(query="graph relationships long", hops=0, token_budget=320)
+    )
+    node = next(n for n in resp.subgraph.nodes if n.id == "Doc:long-0")
+    assert "text" not in node.properties  # the body gave way
+    assert node.properties["_revision"]  # the guard token did not
+    assert "_revision:" in mcp_retrieval_text(resp)
+
+
 def test_surface_threads_through_search_and_context(docs_engine):
     from grag.retrieval.context import get_context
     from grag.retrieval.packing import estimate_tokens, mcp_retrieval_text
@@ -472,12 +529,14 @@ def test_search_label_hits_explicit_labels_are_bounded_with_zeros_first(docs_eng
         docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0, labels=labels, token_budget=256)
     )
     # Eleven requested labels: as many listed as leftover space allows after
-    # evidence, zeros first, the rest counted as omitted.
-    assert len(resp.label_hits) == 8 and resp.label_hits_omitted == 3
+    # evidence (now including the citation-class _revision), zeros first, the
+    # rest counted as omitted. The 8/3 split became 6/5 when _revision joined
+    # the citation bundle; the budget and ordering invariants are unchanged.
+    assert len(resp.label_hits) == 6 and resp.label_hits_omitted == 5
     values = list(resp.label_hits.values())
     assert values == sorted(values, key=lambda v: (v != 0, -v))
     footer = mcp_retrieval_text(resp).split("\n---\n")[-1]
-    assert '"label_hits_omitted":3' in footer
+    assert '"label_hits_omitted":5' in footer
     assert resp.response_token_estimate <= 256
 
 

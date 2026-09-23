@@ -189,7 +189,9 @@ def test_single_label_preserves_native_bm25_order(ranked_engine):
     response = search_knowledge(
         ranked_engine,
         ranked_engine.config,
-        SearchRequest(query="orchid backend", labels=["Function"], top_k=6, hops=0),
+        # Budget headroom so all six seeds pack with their _revision tokens;
+        # this test guards order preservation, not budget behavior.
+        SearchRequest(query="orchid backend", labels=["Function"], top_k=6, hops=0, token_budget=8000),
     )
     assert [s.node.id for s in response.seeds] == [s.node.id for s in hits[:6]]
 

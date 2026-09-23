@@ -21,6 +21,7 @@ from grag.core.types import (
     split_node_id,
 )
 from grag.retrieval.packing import (
+    _with_revisions,
     pack_context_response,
     pack_text_page,
     retrieval_budget,
@@ -210,8 +211,10 @@ def get_context(
     expanded, expansion_limited = _expand_neighborhood(engine, refs, hops, pk,
         excluded=excluded if req.evidence == "current" else None, now=now)
     subgraph = merge_subgraphs(Subgraph(nodes=seeds), expanded)
+    # Ordinary reads carry the guard token, so correction needs no Cypher detour.
+    # Historical reads (above) deliberately do not: their token would be stale.
     return pack_context_response(
-        subgraph,
+        _with_revisions(subgraph),
         budget,
         [n.id for n in seeds],
         expansion_limited=expansion_limited,

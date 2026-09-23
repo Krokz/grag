@@ -15,7 +15,10 @@ from workflow_scenarios import run_scenarios
 
 
 def test_workflow_corpus(tmp_path):
-    report = evaluate(tmp_path, repeats=1)
+    # The larger budget was 3000 before packed nodes carried the citation-class
+    # _revision guard token (~18 tokens/node). 3400 restores the headroom the
+    # token consumes and the variance from tmp_path length across environments.
+    report = evaluate(tmp_path, repeats=1, budgets=(1000, 3400))
     rows = report["results"]
     assert len(rows) == 48  # ten searches per mode/budget, four structural questions
     for row in rows:
@@ -25,9 +28,9 @@ def test_workflow_corpus(tmp_path):
         assert not row["invalid_excerpts"]
         if not row["complete_evidence"]:
             assert row["token_savings_when_complete"] is None
-    routed = [r for r in rows if r["mode"] == "cypher" and r["budget"] == 3000]
+    routed = [r for r in rows if r["mode"] == "cypher" and r["budget"] == 3400]
     assert len(routed) == 4 and all(r["complete_evidence"] for r in routed)
-    graph = {r["case"]: r for r in rows if r["mode"] == "fts_graph" and r["budget"] == 3000}
+    graph = {r["case"]: r for r in rows if r["mode"] == "fts_graph" and r["budget"] == 3400}
     assert graph["shared-harnesses"]["complete_evidence"]
     assert graph["cache-rationale"]["complete_evidence"]
     assert graph["direct-callers"]["complete_evidence"]

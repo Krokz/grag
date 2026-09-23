@@ -6,8 +6,8 @@
   "variant": "baseline",
   "embeddings": false,
   "runtime": {
-    "python": "3.14.6",
-    "ladybug": "0.20.3"
+    "python": "3.13.11",
+    "ladybug": "0.20.2"
   },
   "summary": [
     {
@@ -54,7 +54,7 @@
       "queries": 12,
       "candidate_hit": 5,
       "top1_useful": 1,
-      "packed_navigation_hit": 3,
+      "packed_navigation_hit": 1,
       "selected_hit_at_8": 3,
       "unanswerable_with_hits": 0
     },
@@ -126,7 +126,7 @@
       "queries": 12,
       "candidate_hit": 5,
       "top1_useful": 1,
-      "packed_navigation_hit": 3,
+      "packed_navigation_hit": 1,
       "selected_hit_at_8": 3,
       "unanswerable_with_hits": 0
     },
@@ -234,7 +234,7 @@
       "queries": 12,
       "candidate_hit": 11,
       "top1_useful": 5,
-      "packed_navigation_hit": 8,
+      "packed_navigation_hit": 7,
       "selected_hit_at_8": 10,
       "unanswerable_with_hits": 0
     },
@@ -357,8 +357,8 @@
       "queries": 12,
       "candidate_hit": 5,
       "top1_useful": 1,
-      "packed_navigation_hit": 3,
-      "useful_cited_seed_ids": 3,
+      "packed_navigation_hit": 1,
+      "useful_cited_seed_ids": 1,
       "useful_cited_expansion_ids": 0,
       "prepack_relevant_ids": 3,
       "prepack_expansion_ids": 0,
@@ -453,8 +453,8 @@
       "queries": 12,
       "candidate_hit": 5,
       "top1_useful": 1,
-      "packed_navigation_hit": 3,
-      "useful_cited_seed_ids": 3,
+      "packed_navigation_hit": 1,
+      "useful_cited_seed_ids": 1,
       "useful_cited_expansion_ids": 0,
       "prepack_relevant_ids": 8,
       "prepack_expansion_ids": 7,
@@ -501,8 +501,8 @@
       "queries": 12,
       "candidate_hit": 5,
       "top1_useful": 0,
-      "packed_navigation_hit": 1,
-      "useful_cited_seed_ids": 1,
+      "packed_navigation_hit": 0,
+      "useful_cited_seed_ids": 0,
       "useful_cited_expansion_ids": 0,
       "prepack_relevant_ids": 1,
       "prepack_expansion_ids": 0,
@@ -516,7 +516,7 @@
       "category": "control",
       "queries": 4,
       "candidate_hit": 4,
-      "top1_useful": 2,
+      "top1_useful": 3,
       "packed_navigation_hit": 3,
       "useful_cited_seed_ids": 3,
       "useful_cited_expansion_ids": 0,
@@ -564,7 +564,7 @@
       "category": "control",
       "queries": 4,
       "candidate_hit": 4,
-      "top1_useful": 2,
+      "top1_useful": 3,
       "packed_navigation_hit": 4,
       "useful_cited_seed_ids": 4,
       "useful_cited_expansion_ids": 0,
@@ -612,7 +612,7 @@
       "category": "control",
       "queries": 4,
       "candidate_hit": 4,
-      "top1_useful": 2,
+      "top1_useful": 3,
       "packed_navigation_hit": 3,
       "useful_cited_seed_ids": 3,
       "useful_cited_expansion_ids": 0,
@@ -660,7 +660,7 @@
       "category": "control",
       "queries": 4,
       "candidate_hit": 4,
-      "top1_useful": 2,
+      "top1_useful": 3,
       "packed_navigation_hit": 4,
       "useful_cited_seed_ids": 4,
       "useful_cited_expansion_ids": 0,
@@ -715,25 +715,6 @@
       "budget": 4000,
       "candidate_hit": true,
       "top1_useful": false,
-      "packed_navigation_hit": true,
-      "selected_first_useful": 7,
-      "has_hits": true,
-      "code_navigation": {
-        "candidate_hit": true,
-        "top1_useful": false,
-        "packed_navigation_hit": true,
-        "selected_first_useful": 7
-      }
-    },
-    {
-      "scope": "code",
-      "case": "recovery-natural",
-      "category": "natural",
-      "batch": "original",
-      "hops": 1,
-      "budget": 2000,
-      "candidate_hit": true,
-      "top1_useful": false,
       "packed_navigation_hit": false,
       "selected_first_useful": 7,
       "has_hits": true,
@@ -750,16 +731,35 @@
       "category": "natural",
       "batch": "original",
       "hops": 1,
-      "budget": 4000,
+      "budget": 2000,
       "candidate_hit": true,
       "top1_useful": false,
-      "packed_navigation_hit": true,
+      "packed_navigation_hit": false,
       "selected_first_useful": 7,
       "has_hits": true,
       "code_navigation": {
         "candidate_hit": true,
         "top1_useful": false,
-        "packed_navigation_hit": true,
+        "packed_navigation_hit": false,
+        "selected_first_useful": 7
+      }
+    },
+    {
+      "scope": "code",
+      "case": "recovery-natural",
+      "category": "natural",
+      "batch": "original",
+      "hops": 1,
+      "budget": 4000,
+      "candidate_hit": true,
+      "top1_useful": false,
+      "packed_navigation_hit": false,
+      "selected_first_useful": 7,
+      "has_hits": true,
+      "code_navigation": {
+        "candidate_hit": true,
+        "top1_useful": false,
+        "packed_navigation_hit": false,
         "selected_first_useful": 7
       }
     },
@@ -1247,25 +1247,6 @@
       "budget": 4000,
       "candidate_hit": true,
       "top1_useful": false,
-      "packed_navigation_hit": true,
-      "selected_first_useful": 8,
-      "has_hits": true,
-      "code_navigation": {
-        "candidate_hit": true,
-        "top1_useful": false,
-        "packed_navigation_hit": true,
-        "selected_first_useful": 8
-      }
-    },
-    {
-      "scope": "code",
-      "case": "context-budget",
-      "category": "natural",
-      "batch": "original",
-      "hops": 1,
-      "budget": 2000,
-      "candidate_hit": true,
-      "top1_useful": false,
       "packed_navigation_hit": false,
       "selected_first_useful": 8,
       "has_hits": true,
@@ -1282,16 +1263,35 @@
       "category": "natural",
       "batch": "original",
       "hops": 1,
-      "budget": 4000,
+      "budget": 2000,
       "candidate_hit": true,
       "top1_useful": false,
-      "packed_navigation_hit": true,
+      "packed_navigation_hit": false,
       "selected_first_useful": 8,
       "has_hits": true,
       "code_navigation": {
         "candidate_hit": true,
         "top1_useful": false,
-        "packed_navigation_hit": true,
+        "packed_navigation_hit": false,
+        "selected_first_useful": 8
+      }
+    },
+    {
+      "scope": "code",
+      "case": "context-budget",
+      "category": "natural",
+      "batch": "original",
+      "hops": 1,
+      "budget": 4000,
+      "candidate_hit": true,
+      "top1_useful": false,
+      "packed_navigation_hit": false,
+      "selected_first_useful": 8,
+      "has_hits": true,
+      "code_navigation": {
+        "candidate_hit": true,
+        "top1_useful": false,
+        "packed_navigation_hit": false,
         "selected_first_useful": 8
       }
     },
@@ -2221,9 +2221,9 @@
       "has_hits": true,
       "code_navigation": {
         "candidate_hit": true,
-        "top1_useful": false,
+        "top1_useful": true,
         "packed_navigation_hit": true,
-        "selected_first_useful": 2
+        "selected_first_useful": 1
       }
     },
     {
@@ -2240,9 +2240,9 @@
       "has_hits": true,
       "code_navigation": {
         "candidate_hit": true,
-        "top1_useful": false,
+        "top1_useful": true,
         "packed_navigation_hit": true,
-        "selected_first_useful": 2
+        "selected_first_useful": 1
       }
     },
     {
@@ -2259,9 +2259,9 @@
       "has_hits": true,
       "code_navigation": {
         "candidate_hit": true,
-        "top1_useful": false,
+        "top1_useful": true,
         "packed_navigation_hit": true,
-        "selected_first_useful": 2
+        "selected_first_useful": 1
       }
     },
     {
@@ -2278,9 +2278,9 @@
       "has_hits": true,
       "code_navigation": {
         "candidate_hit": true,
-        "top1_useful": false,
+        "top1_useful": true,
         "packed_navigation_hit": true,
-        "selected_first_useful": 2
+        "selected_first_useful": 1
       }
     },
     {
@@ -2678,7 +2678,7 @@
       "code_navigation": {
         "candidate_hit": true,
         "top1_useful": false,
-        "packed_navigation_hit": true,
+        "packed_navigation_hit": false,
         "selected_first_useful": 3
       }
     },
@@ -2786,7 +2786,7 @@
       "budget": 2000,
       "candidate_hit": true,
       "top1_useful": false,
-      "packed_navigation_hit": true,
+      "packed_navigation_hit": false,
       "selected_first_useful": 2,
       "has_hits": true,
       "code_navigation": {

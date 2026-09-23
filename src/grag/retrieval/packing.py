@@ -49,6 +49,29 @@ def _qualify(subgraph: Subgraph) -> Subgraph:
         nodes.append(node.model_copy(update={"properties": {**node.properties, "_evidence_visibility": reason}}) if reason else node)
     return Subgraph(nodes=nodes, edges=subgraph.edges)
 
+
+def _with_revisions(subgraph: Subgraph) -> Subgraph:
+    """Attach the guard token to every packed node, so an ordinary read is
+    sufficient for a guarded correction without a Cypher detour.
+
+    The token reconstructs the guard's input exactly: content_revision excludes
+    storage internals (_ID), vectors and nulls, so hashing the exposed
+    properties plus the label matches the raw stored row. Derived qualifiers
+    added later (_evidence_visibility, _history_revision) are not hashed.
+    """
+    from grag.core.revisions import content_revision
+
+    return Subgraph(
+        nodes=[
+            node.model_copy(update={"properties": {
+                **node.properties,
+                "_revision": content_revision({"_LABEL": node.label, **node.properties}),
+            }})
+            for node in subgraph.nodes
+        ],
+        edges=subgraph.edges,
+    )
+
 _WORDS = re.compile(r"[^\W_]+", re.UNICODE)
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n")
 _QUERY_FILLER = frozenset(["a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from", "how", "i", "in", "is", "it", "of", "on", "or", "should", "that", "the", "this", "to", "was", "what", "when", "where", "which", "who", "why", "will", "with"])
