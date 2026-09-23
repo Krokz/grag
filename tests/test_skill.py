@@ -216,3 +216,21 @@ def test_skill_frontmatter_valid_for_all_harnesses():
         )
     # description present and non-trivial (drives skill discovery/triggering).
     assert len(fm["description"]) > 20
+
+
+def test_capture_step_guidance_is_consistent_across_surfaces(tmp_path):
+    """The one-search/one-guarded-write capture step must agree wherever agents read it."""
+    from grag.mcp_server.server import _INSTRUCTIONS
+    from grag.project import _claude_md_block
+
+    surfaces = {
+        "skill": PACKAGED_TEMPLATE.read_text(encoding="utf-8"),
+        "memory reference": (PACKAGED_TEMPLATE.parent / "references" / "memory.md").read_text(encoding="utf-8"),
+        "project block": _claude_md_block(tmp_path / "x.lbdb"),
+        "mcp instructions": _INSTRUCTIONS,
+    }
+    for name, text in surfaces.items():
+        assert "label_hits" in text, name
+        assert "Capture step" in text or "capture step" in text.lower(), name
+        assert "read-only" in text, name
+    assert '"expected_revision":"absent"' in surfaces["memory reference"]

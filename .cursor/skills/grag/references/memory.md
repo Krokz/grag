@@ -45,6 +45,61 @@ If a finding changes, reconcile and replace its current summary with a revision
 guard; history retains the earlier wording. Skip duplicate static facts and routine
 progress. Do not manufacture a memory just to finish a turn.
 
+## Capture step: one search, one guarded write
+
+Trigger: the user states an agreement or decision, or the session establishes a
+reusable finding about the project, and the request is not read-only. Run it before
+the final answer; `/grag capture` or a handoff request runs it on demand.
+
+1. One `search_knowledge` with the memory labels the schema lists (for example
+   `labels=["Decision","Insight","Task"]`, `top_k=4`, `hops=0`). The footer's
+   `label_hits` counts distinct candidates per requested label, zeros listed first
+   and at most eight labels (`label_hits_omitted` counts the rest). An explicit zero
+   for every memory label means no eligible candidate matched. If `excluded_evidence`
+   is above zero, check `evidence:"all"` before saving, even when the reply contains
+   unrelated records: a disputed record may already exist. Zero exclusions cannot
+   rule out vector-only hidden matches or matches beyond the lexical shortlist.
+   A label in `unknown_labels` does not exist in this graph: check the name or
+   the database instead of repeating. An omitted label is unknown, not zero: request the memory labels explicitly. A code-only hit list is not a
+   reason for another search.
+2. Found a matching record: read it whole with `get_context` (every packed node
+   carries its `_revision`; no Cypher detour needed), reconcile, and upsert the
+   same key with that `_revision` as `expected_revision`. Include `evidence`
+   (even `{}` with a `reason`) so the prior body is retained, and check the
+   response's `history`: `recorded` means the prior version is recoverable,
+   `not_recorded` means it was overwritten without history — a guard alone
+   does not retain it.
+3. Nothing matched: create with a scalar `key`, `expected_revision:"absent"` and
+   `evidence:{}`. Put the decision text, scope, the qualification that bounds it, the
+   unchosen proposal and the next step in the body, and cite both the discussion and
+   the inspected file in `source`. Use only properties the schema declares for the
+   label (compact `describe_schema` lists them); narrative clauses — claim, scope,
+   qualification, observed — belong in `body` unless the schema explicitly provides
+   separate fields, and `source` is a top-level write field, never inside
+   `properties`. Undeclared properties are skipped with a warning and cost a repair
+   write. Use only relationship types `describe_schema` lists;
+   when none fits or schema changes are not permitted, omit `edges` and name the related
+   record in the body instead of defining a type.
+
+```json
+{"nodes":[{"label":"Decision","key":"usage-logical-input-cache-buckets",
+  "source":"discussion 2026-09-17 usage brief; dragon_dome_core/usage.py#normalize_token_usage",
+  "expected_revision":"absent","evidence":{},
+  "properties":{"title":"Logical input includes cache buckets",
+   "status":"adopted",
+   "body":"Decision (user, 2026-09-17): input_tokens = uncached + cache reads + cache writes; each bucket stays reported separately. Scope: dragon_dome_core usage accounting. Observed: normalize_token_usage sums the three buckets at usage.py:80-85 (checked 2026-09-17). Qualification: merged totals can still change in later checks. Unchosen proposal: provider-pricing adapter. Next: none."}}]}
+```
+
+Correcting that record later keeps the same key, passes the current `_revision`,
+adds `evidence:{"reason":"usage.py:80 now counts uncached input only (2026-09-18)"}`
+and rewrites only the observation clause; the decision clause and qualification stay,
+and history retains the previous body. Write the current version only: history already
+retains the prior body, so never copy the old text into the new one. Preserving a
+qualification verbatim is not enough if the updated claim contradicts it — "this
+branch no longer rejects a missing skill" must not become "the whole operation now
+always succeeds". A `key` that is an object or null is rejected;
+the primary key is the scalar value alone.
+
 ## Let a memory replace repeated work
 
 For prior rationale, constraints or a continuation, start with a focused topic
@@ -77,7 +132,9 @@ Read the whole current entity and reconcile the affected claim. Preserve the agr
 choice, its discussion source, unrelated fields and unresolved work. Describe the
 current observation and its code source separately. Apply the correction to the same
 record with `expected_revision` and `evidence: {}` (or an evidence patch with a reason)
-so history retains the prior value. Do not promote review status without review.
+so history retains the prior value. Write only the current version — history already
+retains the prior body, so do not copy it into the new one — and keep the updated
+claim within the retained qualifications. Do not promote review status without review.
 Inspect skipped-property warnings; on a revision conflict, reread and reconcile.
 If evidence or scope remains uncertain, report the discrepancy without presenting a
 replacement as established. Exact lost-response retries follow the rules below.
@@ -88,7 +145,7 @@ replacement as established. Exact lost-response retries follow the rules below.
 |---|---|
 | Remember | Reuse a stable record ID with `upsert_nodes`, a supporting `source`, and related `edges` when the schema provides them. `evidence: {}` starts history. |
 | Recall | Use `search_knowledge` for discovery, `get_context` for known IDs and needed neighbors. Default evidence is current. |
-| Correct | Read the whole entity with `cypher_query`, reconcile its content, then upsert with its `_revision` as `expected_revision`. Replace outdated summaries; history retains prior text. |
+| Correct | Read the whole entity with `get_context` (it carries `_revision`), reconcile, then upsert with that `_revision` as `expected_revision` and `evidence` set so the prior body is retained (`history` must say `recorded`). Replace outdated summaries. |
 | Retire from current answers | Guard an evidence patch with `state="retracted"`, `superseded_by=null` and a reason. Preserve content and relationships. |
 
 Confirm the selected database and declared project membership; a source path is
@@ -151,7 +208,9 @@ Search/context `current` excludes explicitly superseded/retracted/expired/disput
 and retained obsolete source/document nodes. `all` includes their qualifiers.
 Legacy statuses superseded/retracted/expired are recognized; ordinary Task open/done
 statuses are unaffected. Current eligibility never independently verifies a claim.
-`excluded_evidence` counts encountered exclusions, not every filtered database row.
+`excluded_evidence` counts distinct encountered exclusions, including hidden lexical
+matches from a bounded FTS recount. It can miss vector-only hidden matches and
+matches beyond the lexical shortlist; zero does not prove absence.
 
 ## Resume work
 

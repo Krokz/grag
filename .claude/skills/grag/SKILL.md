@@ -16,9 +16,9 @@ Prefer configured grag MCP tools for graph reads, writes and ingestion. Discover
 Do not substitute equivalent CLI commands or Python/HTTP scripts while MCP is available.
 
 Use the CLI for setup/server management, diagnostics, backup/recovery, explicit user
-requests, or unavailable/failed MCP connections. Briefly state the fallback reason
+requests, or unavailable/failed MCP connections. State the fallback reason
 and keep the same database/server. Validation errors and empty results do not warrant
-switching. Return to MCP when available, including after CLI setup.
+switching. Return to MCP when available.
 
 ## First invocation in a checkout
 
@@ -37,7 +37,7 @@ precedence; merely loading this skill during other work does not request a full 
    and explicit `--db` overrides it.
 2. Use source search for straightforward code navigation. Use grag for saved
    decisions/history and structural relationships such as callers or cross-file
-   impact. A graph lookup is useful when it supplies evidence the task needs.
+   impact.
 3. For graph topic search, use a focused `search_knowledge` query with known
    labels; try `top_k=4, hops=0` for an initial lead. No schema preflight is needed.
    A repository name in query text is not a scope filter.
@@ -49,7 +49,8 @@ precedence; merely loading this skill during other work does not request a full 
    source and qualifications. Read again for a specific gap: missing text or
    neighbors, conflicting evidence, current-code verification or an edit guard.
    Off-topic hits call for source inspection or corrected scope. Empty results
-   do not prove absence.
+   do not prove absence: `excluded_evidence` above zero means lifecycle-hidden
+   matches — retry `evidence="all"`.
 
 After checking schema (filter by known source root in shared graphs):
 
@@ -79,28 +80,34 @@ Return endpoints with relationships for canonical IDs; native `_ID`, `_SRC` and
   Search is limited by requested labels, candidates and hops even without truncation.
 - For a long STRING, use one ID and `get_context(text_property=...)`; continue
   with `text_offset=next_offset` and `text_sha256=sha256` until null. If changed,
-  discard old slices and restart at zero. A final suffix may still be truncated.
+  discard old slices and restart at zero.
 - `token_budget` is a UTF-8/4 estimate (256–32768, default 2000), not a model
   tokenizer count. Narrow results or page text instead of repeatedly enlarging them.
 
 ## Reuse investigations across sessions
 
-Before finishing a useful investigation or handoff, preserve explicit user decisions,
-reasons and reusable findings with scope, sources, limits and next steps. Cite the
-discussion for choices and source inspection for observations; keep unchosen proposals
-distinct. Reuse existing records/fields; skip routine reads and ingested facts.
-Load [memory](references/memory.md) for capture, correction, retirement or resumption.
+Capture step (also on `/grag capture` or a handoff request): when the user states a
+decision or you establish a reusable finding, save it before the final answer unless the
+request is read-only. Search once with explicit memory labels (`top_k=4, hops=0`); an
+explicit zero in `label_hits` for each means no match, so stop searching unless
+`excluded_evidence` is above zero (lifecycle-hidden matches). A label in
+`unknown_labels` does not exist in this graph. Update a found record with its
+`_revision` as `expected_revision`; otherwise create with a scalar `key`,
+`expected_revision:"absent"`, `evidence:{}`, a discussion-plus-code `source` and a body
+with claim, scope, qualifications, unchosen proposal and next step. Use only listed
+relationship types or omit edges. Load [memory](references/memory.md) for the payload
+example, correction, retirement or resumption.
 
 For prior findings, use a focused lookup or `get_context` for a known ID. Reuse
-sufficient evidence for recall; verify relevant current source for implementation
-claims. Within an authorized memory workflow, correct verified stale findings with
-revision guards and history without asking again. Preserve the user's decision when
-implementation diverges. Respect read-only scope; report unresolved discrepancies.
+sufficient evidence for recall; verify current source for implementation claims. Within
+an authorized memory workflow, correct verified stale findings with revision guards and
+history without asking again. Preserve the user's decision when implementation diverges.
+Respect read-only scope; report unresolved discrepancies.
 
 For resume, use the selected task or exact unfinished status and the project's
 priority/scope convention; scores and mission numbers are not priority. Fetch its
 acceptance, next step and linked decisions/questions. Current evidence can include
-done tasks. Missing scope or priority remains uncertain; see the memory reference.
+done tasks. Missing scope or priority remains uncertain.
 
 Link relevant code/tasks where relationships exist. Keep summaries current and
 completion distinct from release status; preserve prior text in history.
@@ -110,11 +117,9 @@ completion distinct from release status; preserve prior text in history.
 Limits: 1000 total nodes/edges and 2 MiB. For uncertain completion, use the original
 operation ID and check stored state (operations reference).
 
-Read a whole entity before editing and pass its `_revision` as `expected_revision`;
-use `"absent"` for create-only. Add `evidence: {}` to start correction history.
-Retry a lost response with the exact payload and `operation_id`; read again before
-another edit. Conflict, review, lifecycle and history procedures are in the memory
-reference; never treat a retry receipt as the latest revision.
+Read a whole entity before editing. Retry a lost response with the exact payload and
+`operation_id`, then read again before another edit. Conflict, review, lifecycle and
+history procedures are in the memory reference; a retry receipt is not the latest revision.
 
 ## Load detail only when needed
 
