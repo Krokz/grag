@@ -60,7 +60,7 @@ def test_global_skill_install_preview_repeat_and_remove(tmp_path, monkeypatch, c
     assert main(args) == 0
     target = home / directory / "skills/grag"
     for source in PACKAGED_TEMPLATE.parent.rglob("*.md"):
-        assert (target / source.relative_to(PACKAGED_TEMPLATE.parent)).read_text() == source.read_text()
+        assert (target / source.relative_to(PACKAGED_TEMPLATE.parent)).read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
     before = {p: p.stat().st_mtime_ns for p in target.rglob("*.md")}
     assert main(args) == 0
     assert {p: p.stat().st_mtime_ns for p in before} == before
@@ -144,7 +144,7 @@ def test_skill_copies_exist_and_stay_in_sync():
 
 
 def test_main_skill_stays_small_and_reference_links_are_packaged():
-    text = PACKAGED_TEMPLATE.read_text()
+    text = PACKAGED_TEMPLATE.read_text(encoding="utf-8")
     assert len(text.encode()) < 8_000  # previously 38,589 bytes on every activation
     links = re.findall(r"\]\((references/[^)]+)\)", text)
     assert links
@@ -152,7 +152,7 @@ def test_main_skill_stays_small_and_reference_links_are_packaged():
 
 
 def test_discovery_description_is_complete_for_single_line_frontmatter_readers():
-    text = PACKAGED_TEMPLATE.read_text()
+    text = PACKAGED_TEMPLATE.read_text(encoding="utf-8")
     # Cursor Agent 2026.01.28's discovery reads only the scalar's first line.
     # Preserve the full description in that interface, not a YAML folding marker.
     line = next(line for line in text.splitlines() if line.startswith("description:"))
@@ -205,7 +205,7 @@ def test_removal_preserves_modified_reference_and_custom_entrypoint(tmp_path, mo
 
 
 def test_skill_frontmatter_valid_for_all_harnesses():
-    text = SKILL_PATHS[0].read_text()
+    text = SKILL_PATHS[0].read_text(encoding="utf-8")
     fm = _frontmatter(text)
     # name: kebab-case, matches the directory, required by all three harnesses.
     assert re.fullmatch(r"[a-z0-9-]+", fm["name"]), "name must be kebab-case"
