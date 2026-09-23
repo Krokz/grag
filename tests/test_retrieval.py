@@ -322,3 +322,208 @@ def test_search_and_context_via_service(tmp_path, monkeypatch):
         assert "Doc:doc-2" in {n.id for n in ctx.subgraph.nodes}
     finally:
         svc.close()
+
+
+# --- per-label candidate counts (one-lookup stop rule for memory capture) ----------
+
+
+def test_search_reports_label_hits_and_footer(docs_engine):
+    from grag.retrieval.packing import mcp_retrieval_text
+
+    resp = search_knowledge(
+        docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0)
+    )
+    assert resp.label_hits.get("Doc", 0) >= 1
+    assert all(isinstance(v, int) and v >= 0 for v in resp.label_hits.values())
+    assert '"label_hits":{' in mcp_retrieval_text(resp)
+
+
+def test_search_label_hits_requested_labels_report_zero(docs_engine):
+    # Requested labels are always listed, zeros included, so one lookup can
+    # establish that no memory record matched.
+    resp = search_knowledge(
+        docs_engine, docs_engine.config, SearchRequest(query="zzzzqqqq", hops=0, labels=["Doc"])
+    )
+    assert resp.label_hits == {"Doc": 0}
+    # An unrestricted search lists only labels with hits, bounded to eight entries.
+    resp = search_knowledge(docs_engine, docs_engine.config, SearchRequest(query="zzzzqqqq", hops=0))
+    assert resp.label_hits == {}
+
+
+def test_search_unknown_requested_labels_are_explicit(docs_engine):
+    from grag.retrieval.packing import mcp_retrieval_text
+
+    # A requested label with no table is reported distinctly from a zero match:
+    # the scope itself is wrong (typo or wrong database), so do not repeat it.
+    resp = search_knowledge(
+        docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0, labels=["Doc", "Nope"])
+    )
+    assert resp.unknown_labels == ["Nope"]
+    assert "Nope" not in resp.label_hits
+    assert resp.label_hits.get("Doc", 0) >= 1
+    assert '"unknown_labels":["Nope"]' in mcp_retrieval_text(resp)
+
+
+def test_search_unknown_only_labels_return_empty_with_status(docs_engine):
+    from grag.retrieval.packing import mcp_retrieval_text
+
+    resp = search_knowledge(
+        docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0, labels=["Nope"])
+    )
+    assert resp.unknown_labels == ["Nope"]
+    assert resp.label_hits == {} and resp.seeds == []
+    assert resp.response_token_estimate <= 8192
+    assert "unknown_labels" in mcp_retrieval_text(resp)
+    # An unrestricted search never reports unknown labels.
+    resp = search_knowledge(docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0))
+    assert resp.unknown_labels == []
+    assert "unknown_labels" not in mcp_retrieval_text(resp)
+
+
+def test_search_unknown_labels_are_budget_trimmed_with_explicit_status(docs_engine):
+    from grag.retrieval.packing import mcp_retrieval_text
+
+    # Eight 128-character unknown labels must not break a 256-token budget;
+    # the wrong-scope signal survives as an explicit omitted count.
+    labels = [f"L{i}" + "x" * 126 for i in range(8)]
+    resp = search_knowledge(
+        docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0, labels=labels, token_budget=256)
+    )
+    assert resp.response_token_estimate <= 256
+    assert len(mcp_retrieval_text(resp).encode()) <= 1024
+    assert len(resp.model_dump_json().encode()) <= 1024
+    assert len(resp.unknown_labels) + resp.unknown_labels_omitted == 8
+    assert resp.unknown_labels_omitted >= 1
+    assert "unknown_labels" in mcp_retrieval_text(resp)  # names or their count
+
+
+def test_search_unknown_labels_fit_default_budget_at_max_request(docs_engine):
+    labels = [f"L{i:02d}" + "x" * 124 for i in range(64)]  # 64 unknown 128-char labels
+    resp = search_knowledge(
+        docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0, labels=labels)
+    )
+    assert resp.response_token_estimate <= 2000  # default budget
+    assert len(resp.unknown_labels) + resp.unknown_labels_omitted == 64
+
+
+def test_search_unknown_labels_never_displace_evidence(docs_engine):
+    # Evidence is packed against the metadata-free floor; unknown labels only
+    # use leftover space, like label counts.
+    base = search_knowledge(
+        docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0, labels=["Doc"], token_budget=512)
+    )
+    with_unknown = search_knowledge(
+        docs_engine, docs_engine.config,
+        SearchRequest(query="graph relationships", hops=0, labels=["Doc", *[f"U{i}" + "x" * 126 for i in range(8)]], token_budget=512),
+    )
+    assert with_unknown.included_node_ids == base.included_node_ids
+    assert with_unknown.truncated == base.truncated
+    assert with_unknown.unknown_labels or with_unknown.unknown_labels_omitted
+
+
+# --- guard revisions in ordinary reads (September 2026 longitudinal audit) -------
+
+
+def test_surface_threads_through_search_and_context(docs_engine):
+    from grag.retrieval.context import get_context
+    from grag.retrieval.packing import estimate_tokens, mcp_retrieval_text
+
+    search_req = SearchRequest(query="graph relationships", hops=1, token_budget=4096)
+    rest = search_knowledge(docs_engine, docs_engine.config, search_req)
+    mcp = search_knowledge(docs_engine, docs_engine.config, search_req, surface="mcp")
+    assert rest.response_token_estimate == max(
+        estimate_tokens(rest.model_dump_json()), estimate_tokens(mcp_retrieval_text(rest))
+    )
+    assert mcp.response_token_estimate == estimate_tokens(mcp_retrieval_text(mcp))
+
+    ctx_req = ContextRequest(node_ids=["Doc:doc-0"], hops=1, token_budget=4096)
+    rest = get_context(docs_engine, docs_engine.config, ctx_req)
+    mcp = get_context(docs_engine, docs_engine.config, ctx_req, surface="mcp")
+    assert rest.response_token_estimate == max(
+        estimate_tokens(rest.model_dump_json()), estimate_tokens(mcp_retrieval_text(rest))
+    )
+    assert mcp.response_token_estimate == estimate_tokens(mcp_retrieval_text(mcp))
+
+
+def test_search_label_hits_are_distinct_nodes_across_modalities(docs_engine, hybrid_config):
+    resp = search_knowledge(docs_engine, hybrid_config, SearchRequest(query="graph relationships", hops=0))
+    matches = {s.match for s in resp.seeds}
+    assert resp.label_hits.get("Doc", 0) <= 3  # three stored docs; FTS and vector hits are not summed
+    assert resp.label_hits["Doc"] >= len({s.node.id for s in resp.seeds})
+    assert matches  # hybrid search ran
+
+
+def test_search_label_hits_bounded_for_unrestricted_search(docs_engine, monkeypatch):
+    from grag.retrieval import search as search_module
+
+    monkeypatch.setattr(search_module, "LABEL_HITS_LIMIT", 0)
+    resp = search_knowledge(docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0))
+    assert resp.seeds and resp.label_hits == {} and resp.label_hits_omitted == 1
+
+
+def test_search_label_hits_explicit_labels_are_bounded_with_zeros_first(docs_engine):
+    from grag.retrieval.packing import mcp_retrieval_text
+
+    for i in range(10):
+        docs_engine.execute_write(f"CREATE NODE TABLE Extra{i}(id STRING PRIMARY KEY, text STRING)")
+    docs_engine.execute_write("CREATE (n:Extra3 {id: 'x', text: 'graph relationships here'})")
+    labels = ["Doc", *[f"Extra{i}" for i in range(10)]]
+    resp = search_knowledge(
+        docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0, labels=labels, token_budget=256)
+    )
+    # Eleven requested labels: as many listed as leftover space allows after
+    # evidence, zeros first, the rest counted as omitted.
+    assert len(resp.label_hits) == 8 and resp.label_hits_omitted == 3
+    values = list(resp.label_hits.values())
+    assert values == sorted(values, key=lambda v: (v != 0, -v))
+    footer = mcp_retrieval_text(resp).split("\n---\n")[-1]
+    assert '"label_hits_omitted":3' in footer
+    assert resp.response_token_estimate <= 256
+
+
+def test_search_label_hits_are_trimmed_before_the_budget_is_exceeded(docs_engine):
+    from grag.retrieval.packing import mcp_retrieval_text
+
+    labels = []
+    for i in range(8):
+        name = f"L{i}" + "x" * 126  # eight valid 128-character labels
+        labels.append(name)
+        docs_engine.execute_write(f"CREATE NODE TABLE {name}(id STRING PRIMARY KEY, text STRING)")
+        docs_engine.execute_write(f"CREATE (n:{name} {{id: 'x', text: 'graph relationships'}})")
+    resp = search_knowledge(
+        docs_engine, docs_engine.config, SearchRequest(query="graph relationships", hops=0, labels=labels, token_budget=256)
+    )
+    # Counts are optional: they are dropped, each counted as omitted, so the
+    # complete response respects the budget and the 1,024-byte ceiling it implies.
+    assert resp.response_token_estimate <= 256
+    assert len(mcp_retrieval_text(resp).encode()) <= 1024
+    assert len(resp.model_dump_json().encode()) <= 1024
+    assert len(resp.label_hits) + resp.label_hits_omitted == 8
+    assert resp.label_hits_omitted >= 1
+
+
+def test_search_label_hits_never_displace_evidence(docs_engine, monkeypatch):
+    """Evidence is packed against the count-free floor; counts only use leftover space."""
+    from grag.retrieval import search as search_module
+
+    for i in range(3):
+        docs_engine.execute_write(f"CREATE NODE TABLE Extra{i}(id STRING PRIMARY KEY, text STRING)")
+        docs_engine.execute_write(f"CREATE (n:Extra{i} {{id: 'x{i}', text: 'graph relationships note {i}'}})")
+    req = {"query": "graph relationships", "hops": 0, "top_k": 8}
+    roomy = search_knowledge(docs_engine, docs_engine.config, SearchRequest(**req, token_budget=8192))
+    assert len(roomy.included_node_ids) >= 4 and len(roomy.label_hits) == 4
+    # The same reply with every count dropped fixes the budget at exactly its size.
+    monkeypatch.setattr(search_module, "LABEL_HITS_LIMIT", 0)
+    floor = search_knowledge(docs_engine, docs_engine.config, SearchRequest(**req, token_budget=8192))
+    monkeypatch.setattr(search_module, "LABEL_HITS_LIMIT", 8)
+    budget = floor.response_token_estimate
+    tight = search_knowledge(docs_engine, docs_engine.config, SearchRequest(**req, token_budget=budget))
+    assert tight.response_token_estimate <= budget
+    # All evidence that fit without counts still fits; counts gave way instead.
+    assert tight.included_node_ids == floor.included_node_ids
+    assert tight.truncated == floor.truncated
+    assert len(tight.label_hits) + tight.label_hits_omitted == 4
+    assert tight.label_hits_omitted >= 1
+
+
+# --- exact identifier promotion (frozen rule, September 2026) ----------------------

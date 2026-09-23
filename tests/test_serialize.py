@@ -271,3 +271,85 @@ def test_engine_roundtrip_with_citation(graph: Engine):
     assert lines[0].endswith("[source: notes.md]")
     assert lines[1].startswith("Doc:doc-1")
     assert "[source:" not in lines[1]
+
+
+def test_search_counts_never_change_partial_packing_of_evidence():
+    """Two-node partial-packing case from the September 2026 review.
+
+    The first body exceeds what fits whole, so packing stops inside the graph.
+    Optional label counts must not move that stopping point: the counted reply
+    keeps identical nodes, properties, seeds, excerpts, included IDs and
+    truncation state, and counts are attached only from leftover space. The
+    former count-aware measurement dropped the second decision here.
+    """
+    from grag.core.types import NodeRecord, ScoredNode
+    from grag.retrieval.packing import pack_search_response
+
+    nodes = [
+        NodeRecord(id=f"Decision:choice{i}", label="Decision", properties={"body": f"Decision {i}: " + "x" * size})
+        for i, size in enumerate([600, 300])
+    ]
+    seeds = [ScoredNode(node=n, score=0.1, match="fts") for n in nodes]
+    graph = Subgraph(nodes=nodes)
+    hits = {"Insight": 0, "Session": 0, "Decision": 2}
+    # Was 794 in the September case; the unknown_labels schema fields grew the
+    # always-serialized REST envelope by a constant, moving the same packing
+    # boundary to 806. The case itself is unchanged.
+    budget = 806
+
+    without_counts = pack_search_response(graph, seeds, budget, label_hits_omitted=3)
+    with_counts = pack_search_response(graph, seeds, budget, label_hits=hits)
+
+    assert without_counts.included_node_ids == ["Decision:choice0", "Decision:choice1"]
+    assert without_counts.truncated  # the packer stopped inside the graph
+    assert with_counts.subgraph == without_counts.subgraph
+    assert with_counts.seeds == without_counts.seeds
+    assert with_counts.text_excerpts == without_counts.text_excerpts
+    assert with_counts.included_node_ids == without_counts.included_node_ids
+    assert with_counts.truncated == without_counts.truncated
+    assert with_counts.omitted_properties == without_counts.omitted_properties
+    assert with_counts.response_token_estimate <= budget
+    assert with_counts.label_hits == hits and with_counts.label_hits_omitted == 0
+
+
+def test_mcp_surface_packs_against_the_text_the_agent_sees():
+    """Transport-aware budgeting, from the September 2026 budget review.
+
+    REST keeps the historical contract: the budget bounds the larger of the
+    compact JSON payload and the MCP text. MCP callers never receive that JSON,
+    so their replies are measured on the text alone and pack more evidence at
+    the same budget.
+    """
+    from grag.core.types import NodeRecord, ScoredNode
+    from grag.retrieval.packing import (
+        estimate_tokens,
+        mcp_retrieval_text,
+        pack_search_response,
+    )
+
+    nodes = [
+        NodeRecord(id=f"Decision:choice{i}", label="Decision",
+                   properties={"body": f"Decision {i}: " + "x" * 400, "_source": "s.md"})
+        for i in range(4)
+    ]
+    seeds = [ScoredNode(node=n, score=0.1, match="fts") for n in nodes]
+    graph = Subgraph(nodes=nodes)
+    budget = 600
+
+    rest = pack_search_response(graph, seeds, budget)
+    mcp = pack_search_response(graph, seeds, budget, surface="mcp")
+
+    # REST: the larger of compact JSON and MCP text, unchanged.
+    assert rest.response_token_estimate == max(
+        estimate_tokens(rest.model_dump_json()), estimate_tokens(mcp_retrieval_text(rest))
+    )
+    assert rest.response_token_estimate <= budget
+    # MCP: exactly the text its caller receives — never the JSON envelope.
+    assert mcp.response_token_estimate == estimate_tokens(mcp_retrieval_text(mcp))
+    assert mcp.response_token_estimate <= budget
+    # The JSON serialization of the MCP reply may exceed the budget; the caller
+    # never receives it, and the delivered text carries the extra evidence.
+    assert estimate_tokens(mcp.model_dump_json()) > budget
+    assert len(mcp.included_node_ids) > len(rest.included_node_ids)
+    # Default surface is "rest": identical result without the argument.
+    assert pack_search_response(graph, seeds, budget).subgraph == rest.subgraph

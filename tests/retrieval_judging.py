@@ -196,7 +196,7 @@ def validate_targets(corpus, topics):
                 assert set(target["sections"]) <= headings, target
 
 
-def evaluate(corpus: Path, directory: Path, *, budgets=(2000, 4000), hops=(0, 1), variant="baseline", embeddings=False, vector_only=False):
+def evaluate(corpus: Path, directory: Path, *, budgets=(2000, 4000), hops=(0, 1), variant="baseline", embeddings=False, vector_only=False, surface="rest"):
     corpus = corpus.resolve()
     manifest = json.loads(JUDGMENTS.read_text(encoding="utf-8"))
     validate_targets(corpus, manifest["topics"])
@@ -209,6 +209,8 @@ def evaluate(corpus: Path, directory: Path, *, budgets=(2000, 4000), hops=(0, 1)
         "corpus_commit": manifest["corpus_commit"], "source_policy": manifest["source_policy"],
         "variant": variant, "embeddings": embeddings,
         "vector_only": vector_only,
+        # Diagnostic only: the committed baseline gate always packs for "rest".
+        "surface": surface,
         "corpus_sha256": hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest(),
         "judgments_sha256": hashlib.sha256(JUDGMENTS.read_bytes()).hexdigest(),
         "code_gold_sha256": hashlib.sha256(json.dumps(fixed_code_gold, sort_keys=True).encode()).hexdigest(),
@@ -289,7 +291,7 @@ def evaluate(corpus: Path, directory: Path, *, budgets=(2000, 4000), hops=(0, 1)
                             patch.object(search, "pack_search_response", wraps=search.pack_search_response) as packing,
                             patch.object(search, "_fts_seeds", return_value=[]) if vector_only else nullcontext(),
                         ):
-                            response = service.search_knowledge(SearchRequest(query=case["query"], top_k=8, hops=hop, token_budget=budget))
+                            response = service.search_knowledge(SearchRequest(query=case["query"], top_k=8, hops=hop, token_budget=budget), surface=surface)
                         if embeddings:
                             assert response.vector_status is None and response.pending_embeddings == 0, response
                         candidates = ranking.call_args.args[1]
@@ -382,6 +384,8 @@ if __name__ == "__main__":
     parser.add_argument("--hops", type=int, nargs="+", choices=(0, 1, 2), default=[0, 1], help="Evaluation hop counts; 2 diagnoses chunk-to-section-to-code expansion")
     parser.add_argument("--embeddings", action="store_true", help="Use cached BGE-small offline; no downloads")
     parser.add_argument("--vector-only", action="store_true", help="With --embeddings, omit FTS to diagnose vector recall")
+    parser.add_argument("--surface", choices=("rest", "mcp"), default="rest",
+                        help="Transport the response is packed for; the baseline gate uses the default rest contract")
     parser.add_argument("--write-baseline", type=Path, help="Explicitly write a reviewed per-case baseline")
     parser.add_argument("--check-baseline", action="store_true")
     args = parser.parse_args()
@@ -391,7 +395,7 @@ if __name__ == "__main__":
         parser.error("Baseline refresh and regression checking must be separate runs")
     with tempfile.TemporaryDirectory(prefix="grag-judging-") as work:
         corpus = args.corpus or archive_corpus(Path(__file__).resolve().parents[1], Path(work), json.loads(JUDGMENTS.read_text())["corpus_commit"])
-        result = evaluate(corpus, Path(work), variant=args.variant, embeddings=args.embeddings, vector_only=args.vector_only, hops=tuple(args.hops))
+        result = evaluate(corpus, Path(work), variant=args.variant, embeddings=args.embeddings, vector_only=args.vector_only, hops=tuple(args.hops), surface=args.surface)
     args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({"mixed_gold": result["summary"], "code_gold": result["code_summary"]}, indent=2))
     if args.write_baseline:

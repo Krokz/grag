@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-from typing import Any
+from typing import Any, Literal
 
 from grag.config import GragConfig
 from grag.core.engine import Engine, node_record_from_value
@@ -35,7 +35,8 @@ from grag.retrieval.vectors import (
 
 
 def _projected_text_page(engine: Engine, label: str, key: str, pk: dict[str, str],
-                         req: ContextRequest, budget: int, freshness: FreshnessReport | None) -> ContextResponse:
+                         req: ContextRequest, budget: int, freshness: FreshnessReport | None,
+                         surface: Literal["rest", "mcp"] = "rest") -> ContextResponse:
     """Hash in bounded projections and fetch only the requested text window.
 
     Serialize with managed writes for a consistent value while hashing. Native
@@ -80,7 +81,8 @@ def _projected_text_page(engine: Engine, label: str, key: str, pk: dict[str, str
                               {"key": key, "start": req.text_offset + 1, "length": min(4 * budget, total - req.text_offset)}).rows[0][0]
         node.properties[prop] = text
         return pack_text_page(node, req, budget, freshness=freshness,
-                              page_origin=req.text_offset, page_total=total, page_digest=digest.hexdigest())
+                              page_origin=req.text_offset, page_total=total, page_digest=digest.hexdigest(),
+                              surface=surface)
 
 
 def _resolve_bare_key(
@@ -113,6 +115,7 @@ def _resolve_bare_key(
 @bounded_work
 def get_context(
     engine: Engine, config: GragConfig, req: ContextRequest, *, freshness: FreshnessReport | None = None,
+    surface: Literal["rest", "mcp"] = "rest",
 ) -> ContextResponse:
     """Look up req.node_ids ('Label:key'), expand k hops, and pack the result
     into a token budget. Node ids that don't resolve are excluded; unknown
@@ -153,17 +156,17 @@ def get_context(
         label, key = normalized[0]
         identity = make_node_id(label, key)
         if req.history:
-            return read_history(engine, identity, req, budget, freshness)
+            return read_history(engine, identity, req, budget, freshness, surface)
         if req.revision is None:
             raise SchemaError("A historical snapshot requires revision.")
         historical = read_revision(engine, identity, req.revision, pk)
         if req.text_property is not None:
-            return pack_text_page(historical, req, budget, freshness=freshness)
+            return pack_text_page(historical, req, budget, freshness=freshness, surface=surface)
         return pack_context_response(Subgraph(nodes=[historical]), budget, [historical.id],
-                                     freshness=freshness, evidence_policy="all")
+                                     freshness=freshness, evidence_policy="all", surface=surface)
     if req.text_property is not None:
         label, key = normalized[0]
-        return _projected_text_page(engine, label, key, pk, req, budget, freshness)
+        return _projected_text_page(engine, label, key, pk, req, budget, freshness, surface)
 
     found: dict[tuple[str, str], tuple[NodeRecord, Any]] = {}
     for label, keys in groups.items():
@@ -202,7 +205,7 @@ def get_context(
                 "Node not found or excluded by the evidence policy for text paging.",
                 hint="Use a current canonical id, or evidence='all' to inspect obsolete/disputed evidence.",
             )
-        return pack_text_page(seeds[0], req, budget, freshness=freshness)
+        return pack_text_page(seeds[0], req, budget, freshness=freshness, surface=surface)
 
     expanded, expansion_limited = _expand_neighborhood(engine, refs, hops, pk,
         excluded=excluded if req.evidence == "current" else None, now=now)
@@ -215,4 +218,5 @@ def get_context(
         freshness=freshness,
         evidence_policy="all" if req.revision is not None else req.evidence,
         excluded_evidence=len(excluded),
+        surface=surface,
     )

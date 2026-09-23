@@ -47,6 +47,9 @@ _RRF_K = 60
 _MAX_EXPANSION_PATHS = 512  # per seed; bounds path enumeration on dense graphs
 
 
+LABEL_HITS_LIMIT = 8  # label_hits entries per response; the rest are counted as omitted
+
+
 @bounded_work
 def search_knowledge(
     engine: Engine,
@@ -55,6 +58,7 @@ def search_knowledge(
     *,
     index_status: Literal["refreshing"] | None = None,
     freshness: FreshnessReport | None = None,
+    surface: Literal["rest", "mcp"] = "rest",
 ) -> SearchResponse:
     top_k = max(1, req.top_k)
     now = dt.datetime.now(dt.timezone.utc)
@@ -69,6 +73,9 @@ def search_knowledge(
     budget = retrieval_budget(req.token_budget, config.default_token_budget)
     pk = pk_map_with_fallback(engine)
     tables = candidate_tables(engine, config, req.labels)
+    # A requested label with no table is reported explicitly: it means the scope
+    # is wrong (typo or wrong database), not that the label matched nothing.
+    unknown_labels = sorted(set(req.labels or ()) - set(tables))
     # Oversample each label so fusion/diversity can select beyond a modality's
     # first top_k. A bounded shortlist is not an exhaustive graph-wide ranking.
     candidate_k = candidate_quota(tables, max(32, 4 * top_k))
@@ -110,6 +117,22 @@ def search_knowledge(
                 log.warning("Vector search skipped, degrading to FTS-only: %s", exc)
                 vector_status = "error"
 
+    # Distinct candidate nodes per label across modalities. At most eight labels
+    # are reported so the footer cannot crowd out deliverable evidence: requested
+    # labels list their zeros first, an unrestricted search lists labels with hits,
+    # and label_hits_omitted counts the rest. An omitted label is unknown, not
+    # zero; a requested label with no table appears in unknown_labels instead.
+    seen: dict[str, set[str]] = {table: set() for table in tables}
+    for scored in (*fts_list, *vec_list):
+        seen.setdefault(scored.node.label, set()).add(scored.node.id)
+    counts = (
+        {table: len(seen.get(table, ())) for table in tables}
+        if req.labels
+        else {table: len(ids) for table, ids in seen.items() if ids}
+    )
+    ordered = sorted(counts.items(), key=lambda item: (item[1] != 0, -item[1], item[0]))
+    label_hits = dict(ordered[:LABEL_HITS_LIMIT])
+    label_hits_omitted = len(ordered) - len(label_hits)
     fused = _rrf_fuse({"fts": fts_list, "vector": vec_list})
     seeds = _diversify(fused, top_k, config.search_label_cap)
     expanded, expansion_limited = _expand_neighborhood(
@@ -129,6 +152,10 @@ def search_knowledge(
         query=req.query,
         evidence_policy=req.evidence,
         excluded_evidence=len(excluded),
+        label_hits=label_hits,
+        label_hits_omitted=label_hits_omitted,
+        unknown_labels=unknown_labels,
+        surface=surface,
     )
 
 

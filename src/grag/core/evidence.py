@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from typing import Any
+from typing import Any, Literal
 
 from grag.core.engine import Engine, node_record_from_value
 from grag.core.errors import ConfigurationError, NotFoundError, SchemaError
@@ -220,7 +220,8 @@ def read_revision(engine: Engine, identity: str, sequence: int, pk: dict[str, st
 
 
 def read_history(engine: Engine, identity: str, req: ContextRequest, budget: int,
-                 freshness: FreshnessReport | None) -> ContextResponse:
+                 freshness: FreshnessReport | None,
+                 surface: Literal["rest", "mcp"] = "rest") -> ContextResponse:
     from grag.retrieval.packing import measure_response
 
     rows = []
@@ -236,7 +237,7 @@ def read_history(engine: Engine, identity: str, req: ContextRequest, budget: int
         more = len(page) < len(entries)
         resp = measure_response(ContextResponse(context="", freshness=freshness or FreshnessReport(),
             history=EvidenceHistory(node_id=identity, entries=page, next_before=page[-1].sequence if more and page else None),
-            truncated=more))
+            truncated=more), surface)
         if resp.response_token_estimate <= budget:
             if entries and not page:
                 break

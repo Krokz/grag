@@ -355,7 +355,9 @@ class TextExcerpt(BaseModel):
 
 class RetrievalMetadata(BaseModel):
     token_estimate: int = 0  # context text only, ceil(UTF-8 bytes / 4)
-    response_token_estimate: int = 0  # larger of compact JSON and MCP text
+    # Measured on the serving transport: REST/Python bound the larger of compact
+    # JSON and MCP text; MCP bounds only the text its caller receives.
+    response_token_estimate: int = 0
     included_node_ids: list[str] = Field(default_factory=list)
     truncated: bool = False
     omitted_nodes: int = 0
@@ -387,6 +389,20 @@ class SearchResponse(RetrievalMetadata):
     # changed (new commit, edited files) and queued an incremental re-ingest;
     # this answer came from the graph as it was, the next one sees the update.
     index_status: Literal["refreshing"] | None = None
+    # Distinct eligible candidate nodes per label before fusion, at most eight
+    # labels: requested labels with their zeros first, otherwise labels with hits.
+    # label_hits_omitted counts labels not listed; an omitted label is unknown, not
+    # zero. Only an explicit zero says no record of that label matched, and that
+    # never proves the label is empty or certifies a claim.
+    label_hits: dict[str, int] = Field(default_factory=dict)
+    label_hits_omitted: int = 0
+    # Requested labels with no table in this graph, sorted. Distinct from a zero
+    # in label_hits: a zero means the label exists but nothing matched, while an
+    # unknown label means the scope itself is wrong (typo or wrong database).
+    # Budget-trimmed from the end like label_hits; unknown_labels_omitted counts
+    # the dropped entries, so the wrong-scope signal survives as a count.
+    unknown_labels: list[str] = Field(default_factory=list)
+    unknown_labels_omitted: int = 0
 
 
 class ContextRequest(ReadPolicy):

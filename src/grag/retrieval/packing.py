@@ -32,6 +32,12 @@ from grag.core.types import (
 
 Response = TypeVar("Response", SearchResponse, ContextResponse)
 
+# The transport a response is packed for. "rest" preserves the historical
+# contract (budget bounds the larger of the JSON payload and the MCP text);
+# "mcp" measures only the text the MCP caller actually receives, so evidence
+# is packed against the size the agent will see.
+Surface = Literal["rest", "mcp"]
+
 
 def _qualify(subgraph: Subgraph) -> Subgraph:
     from grag.core.evidence import exclusion_reason
@@ -201,6 +207,21 @@ def mcp_retrieval_text(resp: SearchResponse | ContextResponse) -> str:
             {"id": s.node.id, "score": round(s.score, 6), "match": s.match}
             for s in resp.seeds
         ]
+        if resp.label_hits or resp.label_hits_omitted:
+            # Distinct candidates per label, at most eight (requested labels list
+            # zeros first). An explicit zero for a memory label means no matching
+            # record entered this search; an omitted label is unknown.
+            payload["label_hits"] = resp.label_hits
+            if resp.label_hits_omitted:
+                payload["label_hits_omitted"] = resp.label_hits_omitted
+        if resp.unknown_labels:
+            # Requested labels with no table in this graph: the scope is wrong
+            # (typo or wrong database), not merely unmatched. Do not repeat.
+            payload["unknown_labels"] = resp.unknown_labels
+        if resp.unknown_labels_omitted:
+            # Budget-trimmed unknown labels keep an explicit count, so the
+            # wrong-scope signal survives even when no label name fits.
+            payload["unknown_labels_omitted"] = resp.unknown_labels_omitted
         if resp.pending_embeddings:
             payload["pending_embeddings"] = resp.pending_embeddings
         if resp.vector_status:
@@ -213,14 +234,13 @@ def mcp_retrieval_text(resp: SearchResponse | ContextResponse) -> str:
     return f"{resp.context}\n\n---\n{footer}" if resp.context else footer
 
 
-def measure_response(resp: Response) -> Response:
+def measure_response(resp: Response, surface: Surface = "rest") -> Response:
     # The estimate counts its own digits; converge before testing the budget.
     resp.response_token_estimate = 0
     while True:
-        measured = max(
-            estimate_tokens(resp.model_dump_json()),
-            estimate_tokens(mcp_retrieval_text(resp)),
-        )
+        measured = estimate_tokens(mcp_retrieval_text(resp))
+        if surface == "rest":
+            measured = max(measured, estimate_tokens(resp.model_dump_json()))
         if measured == resp.response_token_estimate:
             return resp
         resp.response_token_estimate = measured
@@ -257,12 +277,19 @@ def pack_search_response(
     query: str = "",
     evidence_policy: EvidenceMode | None = None,
     excluded_evidence: int = 0,
+    label_hits: dict[str, int] | None = None,
+    label_hits_omitted: int = 0,
+    unknown_labels: list[str] | None = None,
+    surface: Surface = "rest",
 ) -> SearchResponse:
     if evidence_policy == "all":
         subgraph = _qualify(subgraph)
     subgraph = _order_expansion(subgraph, seeds, query)
 
-    def response(packed: PackedContext) -> SearchResponse:
+    def response(
+        packed: PackedContext, hits: dict[str, int], omitted: int,
+        unknowns: tuple[str, ...], unknown_omitted: int,
+    ) -> SearchResponse:
         nodes = packed.subgraph.node_map()
         return measure_response(
             SearchResponse(
@@ -277,17 +304,49 @@ def pack_search_response(
                 index_status=index_status,
                 evidence_policy=evidence_policy,
                 excluded_evidence=excluded_evidence,
-            )
+                label_hits=hits,
+                label_hits_omitted=omitted,
+                unknown_labels=list(unknowns),
+                unknown_labels_omitted=unknown_omitted,
+            ),
+            surface,
         )
 
+    counts = dict(label_hits or {})
+    floor_omitted = label_hits_omitted + len(counts)
+    requested_unknown = tuple(unknown_labels or ())
+
+    def attach_metadata(packed: PackedContext) -> SearchResponse:
+        # Evidence was packed against the metadata-free floor; now add optional
+        # footer metadata only while the complete measured response still fits.
+        # Counts yield first: a wrong-scope signal is more actionable than
+        # per-label candidate counts. Dropped entries keep an explicit count.
+        hits = dict(counts)
+        omitted = label_hits_omitted
+        unknowns = requested_unknown
+        unknown_omitted = 0
+        resp = response(packed, hits, omitted, unknowns, unknown_omitted)
+        while resp.response_token_estimate > budget and hits:
+            hits.popitem()
+            omitted += 1
+            resp = response(packed, hits, omitted, unknowns, unknown_omitted)
+        while resp.response_token_estimate > budget and unknowns:
+            unknowns = unknowns[:-1]
+            unknown_omitted += 1
+            resp = response(packed, hits, omitted, unknowns, unknown_omitted)
+        return resp
+
+    # Pack evidence first, measured with every count and unknown label omitted
+    # (the smallest footer the metadata can leave behind), so optional footer
+    # metadata never decides which evidence survives the packer's limits.
     packed = pack_context(
         subgraph,
         budget,
         [s.node.id for s in seeds],
-        measure=lambda p: response(p).response_token_estimate,
+        measure=lambda p: response(p, {}, floor_omitted, (), len(requested_unknown)).response_token_estimate,
         excerpts=_text_excerpts(subgraph, query),
     )
-    return response(packed)
+    return attach_metadata(packed)
 
 
 def pack_context_response(
@@ -299,12 +358,14 @@ def pack_context_response(
     freshness: FreshnessReport | None = None,
     evidence_policy: EvidenceMode | None = None,
     excluded_evidence: int = 0,
+    surface: Surface = "rest",
 ) -> ContextResponse:
     if evidence_policy == "all":
         subgraph = _qualify(subgraph)
     def response(packed: PackedContext) -> ContextResponse:
         return measure_response(ContextResponse(**_fields(packed, expansion_limited, freshness),
-                                               evidence_policy=evidence_policy, excluded_evidence=excluded_evidence))
+                                               evidence_policy=evidence_policy, excluded_evidence=excluded_evidence),
+                                surface)
 
     packed = pack_context(
         subgraph,
@@ -318,6 +379,7 @@ def pack_context_response(
 def pack_text_page(
     node: NodeRecord, req: ContextRequest, budget: int, *, freshness: FreshnessReport | None = None,
     page_origin: int = 0, page_total: int | None = None, page_digest: str | None = None,
+    surface: Surface = "rest",
 ) -> ContextResponse:
     if req.evidence == "all" or req.revision is not None:
         node = _qualify(Subgraph(nodes=[node])).nodes[0]
@@ -369,7 +431,8 @@ def pack_text_page(
                     sha256=digest,
                 ),
                 evidence_policy="all" if req.revision is not None else req.evidence,
-            )
+            ),
+            surface,
         )
 
     # One estimated token can cover at most four UTF-8 bytes here. Never

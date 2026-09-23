@@ -384,7 +384,7 @@ def search_knowledge(
     complete evidence. Empty/complete output never proves exhaustive graph coverage.
     BM25 works without an embedder; vector="off" is expected then. vector="error" means
     configured embeddings failed; pending_embeddings reports unfinished embedding work.
-    Budgets are UTF-8/4 estimates (256..32768), not tokenizer counts.
+    Budgets are UTF-8/4 estimates (256..32768) bounding this text reply, not tokenizer counts.
     """
     resp = service.search_knowledge(
         SearchRequest(
@@ -395,7 +395,8 @@ def search_knowledge(
             token_budget=token_budget,
             freshness=freshness, freshness_timeout_ms=freshness_timeout_ms,
             evidence=evidence,
-        )
+        ),
+        surface="mcp",
     )
     from grag.retrieval.packing import mcp_retrieval_text
 
@@ -428,7 +429,7 @@ def get_context(
     For tracked memory, history=true lists up to 20 revisions; continue using history_before.
     revision=<sequence> retrieves one saved snapshot and can combine with text_property.
     History needs one ID, starts at adoption, and does not reconstruct past relationships.
-    Budgets are UTF-8/4 estimates (256..32768); use Cypher for exact structured projections.
+    Budgets are UTF-8/4 estimates (256..32768) bounding this text reply; use Cypher for exact structured projections.
     """
     resp = service.get_context(
         ContextRequest(
@@ -436,7 +437,8 @@ def get_context(
             text_property=text_property, text_offset=text_offset, text_sha256=text_sha256,
             freshness=freshness, freshness_timeout_ms=freshness_timeout_ms,
             evidence=evidence, history=history, history_before=history_before, revision=revision,
-        )
+        ),
+        surface="mcp",
     )
     from grag.retrieval.packing import mcp_retrieval_text
 

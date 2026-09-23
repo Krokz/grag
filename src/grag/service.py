@@ -15,7 +15,7 @@ import re
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Concatenate, Literal, ParamSpec, TypeVar
 
 from pydantic import BaseModel
 
@@ -419,7 +419,7 @@ class GragService:
     # -- retrieval -----------------------------------------------------------------
 
     @_operation
-    def search_knowledge(self, req: SearchRequest) -> SearchResponse:
+    def search_knowledge(self, req: SearchRequest, *, surface: Literal["rest", "mcp"] = "rest") -> SearchResponse:
         try:
             from grag.retrieval.search import search_knowledge
         except ImportError:
@@ -429,17 +429,18 @@ class GragService:
         return search_knowledge(
             self.engine, self.config, req, freshness=freshness,
             index_status="refreshing" if freshness.status == "refreshing" else None,
+            surface=surface,
         )
 
     @_operation
-    def get_context(self, req: ContextRequest) -> ContextResponse:
+    def get_context(self, req: ContextRequest, *, surface: Literal["rest", "mcp"] = "rest") -> ContextResponse:
         try:
             from grag.retrieval.context import get_context
         except ImportError:
             raise _not_implemented("grag.retrieval.context") from None
         req.hops = max(0, min(req.hops, self.config.max_hops))
         freshness = self.read_freshness(req)
-        return get_context(self.engine, self.config, req, freshness=freshness)
+        return get_context(self.engine, self.config, req, freshness=freshness, surface=surface)
 
     # -- ingestion --------------------------------------------------------------------
 
