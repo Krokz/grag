@@ -196,9 +196,10 @@ def validate_targets(corpus, topics):
                 assert set(target["sections"]) <= headings, target
 
 
-def evaluate(corpus: Path, directory: Path, *, budgets=(2000, 4000), hops=(0, 1), variant="baseline", embeddings=False, vector_only=False, surface="rest"):
+def evaluate(corpus: Path, directory: Path, *, budgets=(2000, 4000), hops=(0, 1), variant="baseline", embeddings=False, vector_only=False, surface="rest",
+             judgments: Path = JUDGMENTS):
     corpus = corpus.resolve()
-    manifest = json.loads(JUDGMENTS.read_text(encoding="utf-8"))
+    manifest = json.loads(judgments.read_text(encoding="utf-8"))
     validate_targets(corpus, manifest["topics"])
     fixed_code_gold = {name: code_targets(topic["targets"]) for name, topic in manifest["topics"].items()}
     assert all(fixed_code_gold[q["topic"]] for q in manifest["queries"] if q["category"] != "unsupported")
@@ -212,7 +213,7 @@ def evaluate(corpus: Path, directory: Path, *, budgets=(2000, 4000), hops=(0, 1)
         # Diagnostic only: the committed baseline gate always packs for "rest".
         "surface": surface,
         "corpus_sha256": hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest(),
-        "judgments_sha256": hashlib.sha256(JUDGMENTS.read_bytes()).hexdigest(),
+        "judgments_sha256": hashlib.sha256(judgments.read_bytes()).hexdigest(),
         "code_gold_sha256": hashlib.sha256(json.dumps(fixed_code_gold, sort_keys=True).encode()).hexdigest(),
         "code_gold": fixed_code_gold,
         "runtime": {"python": platform.python_version(), "ladybug": importlib.metadata.version("ladybug")},
@@ -386,16 +387,20 @@ if __name__ == "__main__":
     parser.add_argument("--vector-only", action="store_true", help="With --embeddings, omit FTS to diagnose vector recall")
     parser.add_argument("--surface", choices=("rest", "mcp"), default="rest",
                         help="Transport the response is packed for; the baseline gate uses the default rest contract")
+    parser.add_argument("--judgments", type=Path, default=JUDGMENTS,
+                        help="Judgments manifest; the baseline gate uses the default pinned set")
     parser.add_argument("--write-baseline", type=Path, help="Explicitly write a reviewed per-case baseline")
     parser.add_argument("--check-baseline", action="store_true")
     args = parser.parse_args()
     if args.vector_only and not args.embeddings:
         parser.error("--vector-only requires --embeddings")
+    if (args.write_baseline or args.check_baseline) and args.judgments.resolve() != JUDGMENTS.resolve():
+        parser.error("The per-case baseline belongs to the pinned judgments; use the default set")
     if args.write_baseline and args.check_baseline:
         parser.error("Baseline refresh and regression checking must be separate runs")
     with tempfile.TemporaryDirectory(prefix="grag-judging-") as work:
-        corpus = args.corpus or archive_corpus(Path(__file__).resolve().parents[1], Path(work), json.loads(JUDGMENTS.read_text())["corpus_commit"])
-        result = evaluate(corpus, Path(work), variant=args.variant, embeddings=args.embeddings, vector_only=args.vector_only, hops=tuple(args.hops), surface=args.surface)
+        corpus = args.corpus or archive_corpus(Path(__file__).resolve().parents[1], Path(work), json.loads(args.judgments.read_text())["corpus_commit"])
+        result = evaluate(corpus, Path(work), variant=args.variant, embeddings=args.embeddings, vector_only=args.vector_only, hops=tuple(args.hops), surface=args.surface, judgments=args.judgments)
     args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({"mixed_gold": result["summary"], "code_gold": result["code_summary"]}, indent=2))
     if args.write_baseline:

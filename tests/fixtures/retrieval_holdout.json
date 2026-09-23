@@ -1,0 +1,315 @@
+{
+ "version": 2,
+ "scope": "Development navigation judgments, grouped by natural language, controls and unsupported questions. Five added cases derive from existing source contracts before experiment outcomes; no independent human or held-out accuracy claim.",
+ "topics": {
+  "config_env_overrides": {
+   "criterion": "Must find the config classmethod that reads prefixed environment variables into the runtime config; CLI flag handling and the doctor report's environment listing are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/config.py",
+     "symbols": [
+      "GragConfig.from_env"
+     ]
+    }
+   ]
+  },
+  "ingest_ignore_policy": {
+   "criterion": "Must find the source-selection policy that loads ignore files and decides per path whether it is skipped; size-based exclusions and parser selection are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/ingest/selection.py",
+     "symbols": [
+      "Selection.reason",
+      "Selection._rules"
+     ]
+    }
+   ]
+  },
+  "embed_worker_retry_backoff": {
+   "criterion": "Must find the background embedding worker loop with capped exponential backoff after failures and the batched drain pass; inline embed-on-search and vector math are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/embedworker.py",
+     "symbols": [
+      "EmbedWorker._run",
+      "EmbedWorker.drain_once"
+     ]
+    }
+   ]
+  },
+  "request_body_size_limit": {
+   "criterion": "Must find the ASGI wrapper that caps accumulated HTTP body chunks with a 413 before parsing; post-parse validation and response budgets are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/request_limits.py",
+     "symbols": [
+      "RequestLimitMiddleware.__call__"
+     ]
+    }
+   ]
+  },
+  "backup_export_publish": {
+   "criterion": "Must find the export publication that stages, verifies, fsyncs and renames, plus the guard rejecting database or sidecar destinations; restore and recovery snapshots are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/transfer_io.py",
+     "symbols": [
+      "atomic_output",
+      "_safe_output"
+     ]
+    }
+   ]
+  },
+  "schema_identifier_rules": {
+   "criterion": "Must find the check enforcing the naming pattern and rejecting reserved Cypher keywords for interpolated names; schema DDL and schema description rendering are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/core/ident.py",
+     "symbols": [
+      "validate_identifier"
+     ]
+    }
+   ]
+  },
+  "server_stop_graceful": {
+   "criterion": "Must find the admin logic that stops a registered daemon: pidfile validation, stale cleanup, graceful endpoint, then signal fallback; the server-side shutdown handler is irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/admin.py",
+     "symbols": [
+      "_stop_registration",
+      "_stop_server"
+     ]
+    }
+   ]
+  },
+  "init_client_detection": {
+   "criterion": "Must find the function that checks config directories for Claude, Cursor, Windsurf and Zed with a Claude fallback; per-editor config writes are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/project.py",
+     "symbols": [
+      "detect_clients"
+     ]
+    }
+   ]
+  },
+  "source_scope_fingerprint": {
+   "criterion": "Must find the function that hashes each parseable file and folds version, parser revision, options and size exclusions into the tree digest; the refresher and ingest verification are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/code_state.py",
+     "symbols": [
+      "scan_sources"
+     ]
+    }
+   ]
+  },
+  "search_label_cap": {
+   "criterion": "Must find the post-fusion step limiting how many seeds one label may occupy, with backfill; config declaration, RRF and FTS retrieval are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/retrieval/search.py",
+     "symbols": [
+      "_diversify"
+     ]
+    }
+   ]
+  },
+  "cross_label_bm25": {
+   "criterion": "Must find the reranker that recomputes BM25 over a multi-label candidate pool with shared statistics, plus its word splitter; native FTS querying and RRF are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/retrieval/lexical.py",
+     "symbols": [
+      "rank_lexical",
+      "_tokens"
+     ]
+    }
+   ]
+  },
+  "multi_db_name_resolution": {
+   "criterion": "Must find the registry method mapping a short database name to a file in the database directory, rejecting traversal; header routing and service caching are irrelevant.",
+   "targets": [
+    {
+     "source": "src/grag/registry.py",
+     "symbols": [
+      "ServiceRegistry._resolve"
+     ]
+    }
+   ]
+  }
+ },
+ "queries": [
+  {
+   "id": "config_env_overrides-natural",
+   "topic": "config_env_overrides",
+   "query": "How do I change settings like the database location or the default answer token budget using environment variables rather than command-line flags?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "config_env_overrides-keywords",
+   "topic": "config_env_overrides",
+   "query": "environment variable overrides runtime configuration prefix settings",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "ingest_ignore_policy-natural",
+   "topic": "ingest_ignore_policy",
+   "query": "What happens to files matched by my project's ignore patterns, or sitting inside dependency folders and virtual environments, when I index a repository?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "ingest_ignore_policy-keywords",
+   "topic": "ingest_ignore_policy",
+   "query": "skip ignored files git ignore patterns generated directories symlink nested repository indexing policy",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "embed_worker_retry_backoff-natural",
+   "topic": "embed_worker_retry_backoff",
+   "query": "If computing vectors in the background keeps failing, does the worker give up, or does it retry and wait longer between attempts?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "embed_worker_retry_backoff-keywords",
+   "topic": "embed_worker_retry_backoff",
+   "query": "background embedding worker failure retry exponential backoff pending vectors batches",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "request_body_size_limit-natural",
+   "topic": "request_body_size_limit",
+   "query": "I want to make sure a client can't send a huge upload to the HTTP server; where are incoming bodies capped before they get parsed, even when they arrive in chunks?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "request_body_size_limit-keywords",
+   "topic": "request_body_size_limit",
+   "query": "HTTP request body size limit 413 chunked payload too large",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "backup_export_publish-natural",
+   "topic": "backup_export_publish",
+   "query": "When exporting a backup to a file, how does it avoid leaving a half-written file behind or accidentally overwriting the live database and its log files?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "backup_export_publish-keywords",
+   "topic": "backup_export_publish",
+   "query": "backup export staged temporary file verify rename refuse overwrite database sidecar",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "schema_identifier_rules-natural",
+   "topic": "schema_identifier_rules",
+   "query": "Why would defining a table or property called order or group be rejected, and what naming rules apply to labels in the schema?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "schema_identifier_rules-keywords",
+   "topic": "schema_identifier_rules",
+   "query": "schema name rules reserved Cypher keywords allowed characters table property names",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "server_stop_graceful-natural",
+   "topic": "server_stop_graceful",
+   "query": "What happens when I shut down the background daemon for my project: does it first ask for a clean exit, and when would it resort to signalling or killing the process instead?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "server_stop_graceful-keywords",
+   "topic": "server_stop_graceful",
+   "query": "stop server daemon graceful shutdown pidfile terminate signal fallback force verified",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "init_client_detection-natural",
+   "topic": "init_client_detection",
+   "query": "During project setup, how does the tool figure out which AI coding editors I use so it knows whose config files to write?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "init_client_detection-keywords",
+   "topic": "init_client_detection",
+   "query": "project init editor config directories Claude Cursor Windsurf Zed fallback MCP registration",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "source_scope_fingerprint-natural",
+   "topic": "source_scope_fingerprint",
+   "query": "What ends up in the digest that identifies one state of my indexed code: just each file's contents, or also the tool version, parser revision, saved options and files skipped for size?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "source_scope_fingerprint-keywords",
+   "topic": "source_scope_fingerprint",
+   "query": "code index fingerprint file content hashes parser revision version options size exclusions digest",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "search_label_cap-natural",
+   "topic": "search_label_cap",
+   "query": "How does search keep one large category of results, like code functions, from taking every top slot?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "search_label_cap-keywords",
+   "topic": "search_label_cap",
+   "query": "per label diversity cap top results crowding hold pool backfill fused ranking",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "cross_label_bm25-natural",
+   "topic": "cross_label_bm25",
+   "query": "I want keyword relevance scores to be comparable when matches come from several different node types; where are hits rescored with shared term statistics, and how is the text split into words?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "cross_label_bm25-keywords",
+   "topic": "cross_label_bm25",
+   "query": "BM25 rerank shared document frequency candidate pool tokenization casefold stemming across labels",
+   "category": "control",
+   "batch": "holdout"
+  },
+  {
+   "id": "multi_db_name_resolution-natural",
+   "topic": "multi_db_name_resolution",
+   "query": "When one server hosts a folder of several databases, how is a short database name turned into an actual file, and what stops someone from escaping the folder with a path?",
+   "category": "natural",
+   "batch": "holdout"
+  },
+  {
+   "id": "multi_db_name_resolution-keywords",
+   "topic": "multi_db_name_resolution",
+   "query": "multi database directory name lookup case insensitive default database path traversal rejection",
+   "category": "control",
+   "batch": "holdout"
+  }
+ ],
+ "corpus_commit": "205b38e9074cb4a2d92302c724c2e1947482a8ab",
+ "source_policy": "Fresh independent graphs per scope, canonical fixture://grag/ provenance, deterministic repo identity and fixed ingestion timestamps; all variants ingest the same git archive. No gold or audit files are indexed."
+}
