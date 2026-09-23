@@ -63,6 +63,10 @@ the opposite selector inherited from the environment, so `--db` overrides
 
 ### Optional embeddings
 
+For the high-level explanation, FastEmbed setup, everyday searches, readiness
+checks and storage details, see [Embeddings and semantic search](../guides/embeddings.md).
+This table is the setting-by-setting reference.
+
 | Variable | Accepted values | Default | What it affects |
 |---|---|---|---|
 | `GRAG_VECTOR_CODEC` | `fp32`, `int8`, `binary`, `polar` | `fp32` | Storage/candidate-generation codec. `fp32` uses exact cosine scanning; compressed codecs scan compact codes and exactly rescore shortlisted fp32 vectors. Changes make existing vectors pending for automatic rebuilding. |

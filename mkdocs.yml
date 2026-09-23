@@ -84,8 +84,8 @@ nav:
       - Review memory in the UI: guides/ui.md
       - Resume work: guides/resume.md
       - Retrieve context: guides/retrieval.md
+      - Embeddings and semantic search: guides/embeddings.md
       - Code freshness: guides/freshness.md
-      - Optional embeddings: guides/embeddings.md
       - Projects and relocation: guides/projects.md
   - Operate:
       - operations/index.md

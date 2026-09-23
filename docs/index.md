@@ -60,8 +60,11 @@ Keep code, documents and decisions in a local graph your agent can use across se
 
 ## A small local setup
 
-Start with one database per checkout and BM25 full-text search. Multiple agent
-clients share one owning server. Embeddings and remote serving are optional.
+Use one database per checkout, with multiple agent clients sharing one owning
+server. BM25 full-text search works without an embedding model; add
+[FastEmbed for hybrid semantic search](guides/embeddings.md) to retrieve related
+descriptions across code, documents and saved memory. Embeddings and remote
+serving are optional.
 
 <span id="one-graph-three-useful-kinds-of-context"></span>
 

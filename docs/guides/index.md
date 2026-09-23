@@ -30,6 +30,12 @@ to the detailed contracts when they matter.
 
     [Projects and relocation →](projects.md)
 
+-   **Search by meaning**
+
+    Set up FastEmbed, understand hybrid retrieval and verify embedding readiness.
+
+    [Embeddings and semantic search →](embeddings.md)
+
 </div>
 
 ## Find a specific workflow
@@ -42,6 +48,6 @@ to the detailed contracts when they matter.
 | Browse and correct memories in the browser | [Review memory in the UI](ui.md) |
 | Find the next unfinished task | [Resume work](resume.md) |
 | Verify a code citation is current | [Code freshness](freshness.md) |
-| Add semantic search | [Optional embeddings](embeddings.md) |
+| Configure and understand semantic search | [Embeddings and semantic search](embeddings.md) |
 
 New to grag? Begin with [your first session](../getting-started.md).

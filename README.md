@@ -89,6 +89,7 @@ The optional remote provider sends embedding input to its configured endpoint.
 | Install and verify a first session | [Getting started](https://krokz.github.io/grag/getting-started/) |
 | Index code or documents | [Code](https://krokz.github.io/grag/guides/code/) · [Documents](https://krokz.github.io/grag/guides/documents/) |
 | Save, revise and retrieve evidence | [Memory](https://krokz.github.io/grag/guides/memory/) · [Retrieval](https://krokz.github.io/grag/guides/retrieval/) |
+| Set up FastEmbed and understand hybrid search | [Embeddings and semantic search](https://krokz.github.io/grag/guides/embeddings/) |
 | Connect multiple clients or move a checkout | [Servers](https://krokz.github.io/grag/operations/server/) · [Projects](https://krokz.github.io/grag/guides/projects/) |
 | Diagnose startup, locks or recovery | [Troubleshooting](https://krokz.github.io/grag/operations/troubleshooting/) · [Recovery](https://krokz.github.io/grag/operations/recovery/) |
 | Configure tools and resource limits | [MCP](https://krokz.github.io/grag/reference/mcp/) · [Configuration](https://krokz.github.io/grag/reference/configuration/) · [Limits](https://krokz.github.io/grag/reference/limits/) |

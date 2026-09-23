@@ -14,8 +14,11 @@ cd your-project
 ```
 
 You can also use `uv tool install` or `pip install`. Python-only indexing works
-with plain `gragdb`. Start without embeddings; add them after checking that this
-workflow helps. [Installation](installation.md) covers Windows native libraries,
+with plain `gragdb`. For local semantic search alongside BM25, install
+`gragdb[code,embed-local]` instead. The
+[embeddings guide](guides/embeddings.md) covers FastEmbed setup, model preparation
+and verifying that your agent's server uses it.
+[Installation](installation.md) covers Windows native libraries,
 first-use downloads and offline preparation.
 
 ## 2. Connect an agent
