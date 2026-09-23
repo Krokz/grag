@@ -14,7 +14,7 @@ are conventions, not a required schema.
 |---|---|
 | Save a memory | `upsert_nodes`, optionally with related `edges` in the same atomic request; `evidence: {}` opts into history. |
 | Recall it | `search_knowledge` for discovery; `get_context` for known IDs and relevant neighbors. |
-| Correct it | Read the whole entity with `cypher_query`, reconcile its content, then `upsert_nodes` with its `_revision` as `expected_revision`. |
+| Correct it | Read the whole current entity with `get_context`, reconcile, then `upsert_nodes` with its `_revision` as `expected_revision` and `evidence` set. Check that `history` says `recorded`. |
 | Retire it from current answers | A guarded `upsert_nodes` evidence patch with `state="retracted"` and `superseded_by=null`; content, links and history remain. |
 
 Keep the canonical `Label:key` from results; keys may contain additional colons.
@@ -49,6 +49,37 @@ retain the relevant statement faithfully; do not invent a link. The existing
 An agent's inference is not an accepted decision. Successful storage does not mean
 review; preserve review state and attribution honestly. Replace changed summaries
 with revision guards and retain history, instead of appending an endless diary.
+
+### The capture step
+
+The packaged guidance now names the moment and the mechanics: when the user states
+an agreement or decision, or a session establishes a reusable finding, the agent
+saves it before the final answer unless the request is read-only (`/grag capture`
+or a handoff request runs the same step on demand).
+
+1. One `search_knowledge` with explicit memory labels (`top_k=4, hops=0`). An
+   explicit zero in `label_hits` for each means no eligible candidate matched.
+   If `excluded_evidence` is above zero, check `evidence="all"` before saving;
+   this also applies when the reply contains unrelated records. Zero exclusions
+   cannot rule out vector-only hidden matches or matches beyond the lexical
+   shortlist. A label in `unknown_labels` does not exist in this graph; check
+   the name or the database rather than repeating.
+2. A matching record is read whole (`get_context`; every packed node carries
+   its `_revision`) and updated under that token as `expected_revision`, with
+   `evidence` (even `{}`) so the prior body is retained. The response's
+   `history` map reports per node: `created`, `recorded` (prior version
+   recoverable), or `not_recorded` (overwritten without history — a guard
+   alone does not retain it).
+3. Otherwise `upsert_nodes` creates the record with a scalar `key`,
+   `expected_revision: "absent"`, `evidence: {}`, a `source` naming both the
+   discussion and the inspected file, and a body holding the claim, scope,
+   qualification, unchosen proposal and next step. Only relationship types the
+   schema lists are used; when none fits, the related record is named in the body.
+
+The memory reference in the packaged skill carries a complete valid payload.
+Write errors now say how to repair the two mistakes seen in evaluation: a `key`
+given as an object instead of the scalar value, and an edge whose relationship
+type is not defined when schema changes are not permitted.
 
 ## Reuse it without repeating the investigation
 

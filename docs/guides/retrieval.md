@@ -14,6 +14,10 @@ Choose a read based on what you already know, then inspect its sources and limit
 There is no required query sequence. Fetch more only when the evidence you have
 is insufficient.
 
+`search_knowledge` combines lexical and vector retrieval when an embedder is
+configured. See [Embeddings and semantic search](embeddings.md) for FastEmbed
+setup, the retrieval pipeline, indexing progress and model configuration.
+
 Use the graph when saved knowledge or relationships help with the task. Ordinary
 code navigation can start with the harness's source search; having grag connected
 does not require a graph lookup before each source read. Graph code search remains
@@ -82,6 +86,34 @@ counts describe packing; `expansion_limited` separately reports a neighborhood
 that exceeded 512 paths per seed. These fields do not claim exhaustive search
 recall beyond the requested seeds, hops, and candidate limits.
 
+When a query contains a code identifier (a word with an underscore, or CamelCase
+with at least two humps), `search_knowledge` moves candidates whose `name` equals
+that identifier to the front of the fused candidate list before diversity and
+packing, keeping their fused order among themselves. Only the first 64 fused
+candidates are inspected; capitalized ordinary words never count; and promotion
+does not guarantee delivery within the budget. Several nodes with the same name
+are all promoted in fused order.
+
+`search_knowledge` also reports `label_hits`: distinct eligible candidate nodes per
+label before fusion, for at most eight labels. Requested labels are listed with
+their zeros first; an unrestricted search lists labels that had hits; and
+`label_hits_omitted` counts labels left out. An omitted label is unknown, not zero.
+A requested label that has no table in this graph is instead listed in
+`unknown_labels`: that means the scope itself is wrong (a typo, or a different
+database than intended), not that the label matched nothing — check the name or
+the database rather than repeating the search. Like `label_hits`, the list is
+trimmed from the end when a reply would otherwise exceed its budget;
+`unknown_labels_omitted` counts any dropped names, so the wrong-scope signal
+survives as a count even when no label name fits.
+Counts are bounded by the per-label candidate shortlist, and they are the first
+thing dropped (each counted as omitted) when a reply would otherwise exceed its
+budget. An explicit zero for a memory label such as `Decision` means no eligible
+candidate of that label matched this bounded search. If `excluded_evidence` is
+above zero, inspect `evidence="all"` before saving a new record. See
+[current and retained evidence](#current-and-retained-evidence) for the count's
+limits: zero does not prove the label is empty or that another record is absent.
+Counts never certify a claim.
+
 Development: the MCP `search_knowledge` footer omits the duplicate
 `included_node_ids` list. Context lines retain canonical node IDs, and `seeds`
 retains canonical IDs, scores and match types for follow-up `get_context` calls.
@@ -89,16 +121,20 @@ MCP `get_context` still reports `included_node_ids` for requested-ID eligibility
 checks, history and paging. REST, CLI JSON and Python responses retain the list
 on both calls. Consumers of MCP search metadata should use the seed IDs for
 follow-ups or the REST/Python response for a structured list of all included nodes.
-The budget still bounds the larger of the full JSON response and MCP text;
-smaller MCP metadata does not promise additional evidence at a fixed budget.
+REST and Python budgeting bounds the larger of the full JSON response and text.
+MCP budgeting measures the text actually sent to the agent; see
+[what the budget counts](#what-the-budget-counts).
 
 Property values have no fixed character cutoff. When everything fits, long
 strings and relationship properties are returned in full. Under a tight budget,
 packing selects seed identities and connecting edges first, then adds complete
-property values, with citations before other node properties. Omission counts
-make missing records and properties explicit. Returned edges always have both
-endpoints in the returned graph. Vector payloads and null properties are omitted
-by design and do not count as lost evidence.
+property values, with citations before other node properties. Every packed node
+also carries its `_revision` guard token as a citation-class property, so an
+ordinary read is sufficient for a guarded correction; the token is the last
+thing budget pressure strips. Omission counts make missing records and
+properties explicit. Returned edges always have both endpoints in the returned
+graph. Vector payloads and null properties are omitted by design and do not
+count as lost evidence.
 
 Development: under budget pressure, additional selected code results can keep
 their source, line range and lifecycle qualifiers while omitting their docstrings.
@@ -108,10 +144,14 @@ Expanded neighbors and authored memory prose keep their existing packing policy.
 
 ### What the budget counts
 
-`token_budget` covers the **complete compact response**: the larger of the
-REST/Python JSON payload (including `seeds`, `subgraph`, context, and metadata)
-and the MCP text (including its footer). `response_token_estimate` reports that
-size; `token_estimate` measures only `context`. Both use `ceil(UTF-8 bytes / 4)`,
+`token_budget` covers the **complete compact response on the serving
+transport**. REST and Python calls bound the larger of the JSON payload
+(including `seeds`, `subgraph`, context, and metadata) and the MCP text
+(including its footer). MCP calls bound only the text the caller actually
+receives (context plus footer); because the JSON serialization is typically
+larger, an MCP reply at the same budget usually packs more evidence.
+`response_token_estimate` reports the measured size on that transport;
+`token_estimate` measures only `context`. Both use `ceil(UTF-8 bytes / 4)`,
 a deterministic estimate rather than a model-specific tokenizer count. HTTP/MCP
 protocol envelopes, client-added formatting, and tool errors are outside this
 budget. The default remains 2000; supported budgets are **256–32,768**.
@@ -177,8 +217,12 @@ before ranking and expansion. Use `evidence="all"` to inspect them. Legacy
 `open`/`done` and other business statuses are unchanged. Unreviewed or legacy
 evidence stays eligible; this is a selection policy, not a truth guarantee.
 Cypher remains unfiltered. The footer names `evidence_policy`;
-`excluded_evidence` counts encountered post-shortlist/path exclusions only,
-not every row filtered within the database.
+`excluded_evidence` counts distinct exclusions encountered during retrieval and
+expansion, including hidden matches found by a bounded, unfiltered FTS recount.
+The recount covers lexical matches, not vector-only hidden matches or every
+record beyond the lexical shortlist. Zero therefore does not prove absence.
+If the seeds look wrong or empty and `excluded_evidence` is above zero, the
+record that mattered may be hidden: retry with `evidence='all'`.
 
 ### Whole-entity Cypher replies
 
