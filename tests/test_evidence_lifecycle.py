@@ -73,6 +73,45 @@ def test_adoption_correction_history_paging_and_replay(engine):
     assert node(engine,'policy')['_evidence_seq']==2  # no-op does not invent an edit
 
 
+def test_empty_reply_recounts_lifecycle_hidden_matches(engine):
+    """Zero seeds under evidence='current' must not masquerade as 'nothing
+    exists' when matches are hidden by the SQL lifecycle predicate (M24)."""
+    setup(engine)
+    upsert_nodes(engine, engine.config, UpsertNodesRequest(nodes=[
+        UpsertNode(label='Note', key='old-1', properties={'body': 'cache policy thirty minutes', 'status': 'superseded'}),
+        UpsertNode(label='Note', key='old-2', properties={'body': 'cache policy forty minutes', 'status': 'superseded'}),
+    ]))
+    # Hidden matches are counted even though the SQL predicate removed them
+    # before the Python-side exclusion pass ever saw them.
+    hidden = search_knowledge(engine, engine.config, SearchRequest(query='cache policy', hops=0))
+    assert not hidden.seeds and hidden.excluded_evidence == 2
+    # The same query under evidence='all' delivers them, with no recount.
+    shown = search_knowledge(engine, engine.config, SearchRequest(query='cache policy', hops=0, evidence='all'))
+    assert shown.seeds and shown.excluded_evidence == 0
+    # A query matching nothing at all still reports an honest zero.
+    absent = search_knowledge(engine, engine.config, SearchRequest(query='nonexistent zebra', hops=0))
+    assert not absent.seeds and absent.excluded_evidence == 0
+
+
+def test_nonempty_reply_still_counts_hidden_matches(engine):
+    """The M24 FastEmbed case: a reply with plausible but wrong seeds must still
+    report the lifecycle-hidden record that mattered; eligible records in the
+    re-probed pool are never misclassified as hidden."""
+    setup(engine)
+    upsert_nodes(engine, engine.config, UpsertNodesRequest(nodes=[
+        UpsertNode(label='Note', key='unrelated-1', properties={'body': 'repository mirror hosting'}),
+        UpsertNode(label='Note', key='unrelated-2', properties={'body': 'repository mirror backup'}),
+        UpsertNode(label='Note', key='missing', properties={'body': 'repository authorization', 'status': 'superseded'}),
+    ]))
+    resp = search_knowledge(engine, engine.config, SearchRequest(query='repository authorization', hops=0))
+    # The hidden record is counted although the SQL predicate removed it; the
+    # two eligible records in the same pool are not misreported.
+    assert resp.excluded_evidence == 1
+    assert 'Note:missing' not in [s.node.id for s in resp.seeds]
+    shown = search_knowledge(engine, engine.config, SearchRequest(query='repository authorization', hops=0, evidence='all'))
+    assert shown.seeds[0].node.id == 'Note:missing'
+
+
 def test_lifecycle_filters_seeds_paths_and_preserves_tasks(engine):
     setup(engine)
     upsert_nodes(engine,engine.config,UpsertNodesRequest(nodes=[

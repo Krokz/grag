@@ -367,7 +367,10 @@ class RetrievalMetadata(BaseModel):
     freshness: FreshnessReport = Field(default_factory=FreshnessReport)
     text_excerpts: list[TextExcerpt] = Field(default_factory=list)
     evidence_policy: EvidenceMode | None = None
-    excluded_evidence: int = 0  # encountered nodes excluded, not a graph-wide count
+    # Distinct encountered exclusions, including a bounded unfiltered FTS
+    # recount on search. Vector-only hidden matches and matches outside that
+    # lexical shortlist may be uncounted; zero is not proof of absence.
+    excluded_evidence: int = 0
 
 
 class SearchResponse(RetrievalMetadata):

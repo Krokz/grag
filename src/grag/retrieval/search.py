@@ -167,6 +167,24 @@ def search_knowledge(
     label_hits_omitted = len(ordered) - len(label_hits)
     fused = _promote_exact_identifiers(_rrf_fuse({"fts": fts_list, "vector": vec_list}), req.query)
     seeds = _diversify(fused, top_k, config.search_label_cap)
+    if req.evidence == "current" and req.query.strip():
+        # The SQL lifecycle predicate removes hidden rows before the
+        # Python-side exclusion count ever sees them, so any reply — even one
+        # with plausible seeds — can conceal the record that mattered. Re-probe
+        # the bounded candidate pool without the predicate and classify each
+        # hit directly, so eligible records are never misreported as hidden.
+        # FTS only: the vector path embeds pending nodes as a side effect,
+        # which would mutate the graph from a diagnostic, drift the pool
+        # between probes and stale the pending-embedding count. ResourceLimitError
+        # propagates like any primary-path probe; exhausted work is never
+        # concealed as an ordinary result.
+        for table in tables:
+            for scored in _fts_seeds(
+                engine, table, req.query, candidate_k, pk,
+                cols=text_properties[table], evidence_now=None,
+            ):
+                if exclusion_reason(scored.node, now):
+                    excluded.add(scored.node.id)
     expanded, expansion_limited = _expand_neighborhood(
         engine, _seed_refs(seeds, pk), hops, pk,
         excluded=excluded if req.evidence == "current" else None, now=now,

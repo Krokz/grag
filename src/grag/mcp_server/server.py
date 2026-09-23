@@ -379,6 +379,9 @@ def search_knowledge(
     Inspect the JSON footer: freshness, evidence_policy, truncated and omission counts.
     Current evidence excludes superseded/retracted/expired/disputed/obsolete nodes;
     evidence="all" includes them with qualifiers. Unreviewed evidence is not certified.
+    excluded_evidence counts hidden matches from a bounded lexical recount plus encountered
+    exclusions. It can miss vector-only hidden matches; zero does not prove absence.
+    If seeds look wrong or empty and the count is above zero, retry with evidence="all".
     Whole properties may be omitted to fit token_budget. text_excerpts are partial slices;
     follow their node/property/offset/sha256 using get_context paging before claiming
     complete evidence. Empty/complete output never proves exhaustive graph coverage.
