@@ -214,7 +214,7 @@ def _build_schema_document(engine: Engine, detail: SchemaDetail) -> SchemaDocume
         detail=detail,
     )
     encoded = json.dumps(
-        doc.model_dump(exclude={"freshness", "text", "schema_revision", "unchanged"}),
+        doc.model_dump(exclude={"freshness", "text", "schema_revision", "unchanged", "preset"}),
         sort_keys=True, ensure_ascii=False, separators=(",", ":"),
     )
     doc.schema_revision = hashlib.sha256(("grag-schema-v1:" + encoded).encode()).hexdigest()
@@ -223,10 +223,13 @@ def _build_schema_document(engine: Engine, detail: SchemaDetail) -> SchemaDocume
 
 def schema_text(doc: SchemaDocument) -> str:
     """Shared MCP and REST text presentation, including all control metadata."""
-    footer = json.dumps({
+    control: dict = {
         "schema_revision": doc.schema_revision, "detail": doc.detail,
         "unchanged": doc.unchanged, "freshness": doc.freshness.model_dump(),
-    }, separators=(",", ":"))
+    }
+    if doc.preset is not None:
+        control["preset"] = doc.preset.model_dump()
+    footer = json.dumps(control, separators=(",", ":"))
     return f"{doc.text}\n\n---\n{footer}" if doc.text else footer
 
 

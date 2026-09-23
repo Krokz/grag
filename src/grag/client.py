@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from grag.config import GragConfig
 from grag.core.errors import ConfigurationError, GragError
 from grag.core.limits import validate_request
-from grag.core.types import UpsertNodesRequest
+from grag.core.types import DefineSchemaRequest, UpsertNodesRequest
 
 _ROUTES = {
     "describe_schema": ("GET", "/api/schema"),
@@ -159,6 +159,12 @@ class GraphClient:
                 "The running owner does not support the current ingestion scope policy.",
                 hint="Restart that server with the updated grag installation, then retry. No ingestion request was sent.",
             )
+        preset = isinstance(req, DefineSchemaRequest) and req.preset is not None
+        if preset and self.capabilities.get("memory_preset", 0) < 1:
+            raise ConfigurationError(
+                "The running owner does not support schema presets.",
+                hint="Restart that server with the updated grag installation, then retry. No schema request was sent.",
+            )
         method, path = _ROUTES[operation]
         payload = req.model_dump(mode="json") if req is not None else {}
         if isinstance(req, UpsertNodesRequest):
@@ -168,11 +174,17 @@ class GraphClient:
             for node, item in zip(req.nodes, payload["nodes"], strict=True):
                 if node.evidence is not None:
                     item["evidence"] = node.evidence.model_dump(mode="json", exclude_unset=True)
-        return self._request(
+        result = self._request(
             method,
             path,
             **({"json": payload} if req is not None else {}),
         )
+        if preset and not result.get("preset"):
+            raise GragError(
+                "The server returned no preset report.",
+                hint="Inspect the schema with describe_schema before retrying; the server may predate presets.",
+            )
+        return result
 
     def __exit__(
         self,

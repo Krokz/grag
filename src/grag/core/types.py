@@ -175,6 +175,15 @@ class DefineSchemaRequest(BaseModel):
     # to reuse it — the main way agent-built graphs fragment. Set True to
     # create it anyway.
     allow_similar: bool = False
+    # Adopt a versioned built-in schema instead of listing tables (see
+    # grag.core.presets). Additive and idempotent; conflicts are reported.
+    preset: Literal["memory"] | None = None
+
+    @model_validator(mode="after")
+    def _preset_alone(self) -> DefineSchemaRequest:
+        if self.preset is not None and (self.node_tables or self.rel_tables):
+            raise ValueError("preset cannot be combined with node_tables or rel_tables; adopt it in a separate call")
+        return self
 
 
 class PropertyDoc(BaseModel):
@@ -219,6 +228,17 @@ class FreshnessReport(BaseModel):
 SchemaDetail = Literal["compact", "full"]
 
 
+class PresetReport(BaseModel):
+    """What one preset adoption did. Conflicts were reported, not changed."""
+
+    name: str
+    version: int
+    previous_version: int | None = None
+    created: list[str] = Field(default_factory=list)  # table names
+    added: list[str] = Field(default_factory=list)  # "Label.property"
+    conflicts: list[str] = Field(default_factory=list)
+
+
 class SchemaDocument(BaseModel):
     """Full schema introspection. `text` is the prompt-shaped rendering an LLM
     anchors on before writing Cypher — keep it compact."""
@@ -230,6 +250,7 @@ class SchemaDocument(BaseModel):
     schema_revision: str = ""
     unchanged: bool = False
     freshness: FreshnessReport = Field(default_factory=FreshnessReport)
+    preset: PresetReport | None = None  # only on define_schema with a preset
 
 
 # --- mutation -------------------------------------------------------------------

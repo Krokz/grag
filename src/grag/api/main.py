@@ -362,7 +362,7 @@ def create_app(config: GragConfig) -> FastAPI:
             "status": ("shutting_down" if registry.closing or (shutdown and shutdown["state"] != "open")
                        else "reopen_required" if runtime and runtime["writer_state"] != "ready" else "ok"),
             "version": grag.__version__,
-            "capabilities": {"ingestion_scope": 2, "snapshot_format": 2, "passive_diagnostics": 1},
+            "capabilities": {"ingestion_scope": 2, "snapshot_format": 2, "passive_diagnostics": 1, "memory_preset": 1},
             "database_id": identity,
             "server_id": database_identity(server_target),
             "pid": os.getpid(),

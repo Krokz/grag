@@ -290,6 +290,25 @@ def _ensure_fts_index(engine: Engine, table: str, index: str, cols: list[str]) -
     ensured.add(index)
 
 
+def refresh_fts_index(engine: Engine, table: str) -> None:
+    """Rebuild an existing FTS index whose columns no longer match the table's
+    STRING properties, e.g. after ALTER ADD. The DROP/CREATE procedures need
+    auto-transaction mode, so call this after the schema change commits. A
+    crash between them leaves no index, which the next search recreates."""
+    index = fts_index_name(table)
+    with engine.serialized_writes():
+        rows = engine.execute_write("CALL SHOW_INDEXES() RETURN *").rows
+        current = next((list(row[3]) for row in rows if row[0] == table and row[1] == index), None)
+        cols = string_props(engine, table)
+        if current is None or sorted(current) == sorted(cols):
+            return
+        _ensure_extension(engine, "FTS")
+        _FTS_INDEXES.setdefault(engine, set()).discard(index)
+        engine.execute_write(f"CALL DROP_FTS_INDEX('{_ident(table)}', '{index}')")
+        if cols:
+            _ensure_fts_index(engine, table, index, cols)
+
+
 # ---------------------------------------------------------------------------
 # reciprocal rank fusion
 # ---------------------------------------------------------------------------

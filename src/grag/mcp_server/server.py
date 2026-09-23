@@ -312,21 +312,24 @@ def describe_schema(
 @_return_errors
 def define_schema(
     service: GragService,
-    node_tables: Sequence[NodeTableSpec | dict],
-    rel_tables: Sequence[RelTableSpec | dict],
+    node_tables: Sequence[NodeTableSpec | dict] = (),
+    rel_tables: Sequence[RelTableSpec | dict] = (),
     if_not_exists: bool = True,
     allow_similar: bool = False,
+    preset: Literal["memory"] | None = None,
 ) -> str:
     """Create/reuse node and directed relationship tables; inspect existing schema first. Node
     keys default to STRING id. Declare property types and relationship endpoints. Names must
     be unquoted ASCII identifiers; near-duplicates require allow_similar=true. if_not_exists
-    preserves existing tables. Returns compact schema.
+    preserves existing tables. preset="memory" alone adds Decision/Insight/Task/Question
+    additively and reports conflicts. Returns compact schema.
     """
     req = DefineSchemaRequest(
         node_tables=[NodeTableSpec.model_validate(t) for t in node_tables],
         rel_tables=[RelTableSpec.model_validate(t) for t in rel_tables],
         if_not_exists=if_not_exists,
         allow_similar=allow_similar,
+        preset=preset,
     )
     doc = service.define_schema(req, detail="compact")
     return schema_text(doc)
@@ -611,10 +614,11 @@ def create_server(
     @server.tool(name="define_schema", structured_output=False, description=_doc(define_schema))
     @_mcp_result
     def define_schema_tool(
-        node_tables: list[NodeTableSpec],
-        rel_tables: list[RelTableSpec],
+        node_tables: list[NodeTableSpec] = [],  # noqa: B006 - schema default, never mutated
+        rel_tables: list[RelTableSpec] = [],  # noqa: B006
         if_not_exists: bool = True,
         allow_similar: bool = False,
+        preset: Literal["memory"] | None = None,
         ctx: Context | None = None,
     ) -> str:
         return define_schema(
@@ -623,6 +627,7 @@ def create_server(
             rel_tables,
             if_not_exists,
             allow_similar,
+            preset,
         )
 
     @server.tool(name="upsert_nodes", structured_output=False, description=_doc(upsert_nodes))

@@ -274,6 +274,14 @@ def _similar_error(name: str, existing: str, kind: str) -> SchemaError:
 def define_schema(
     engine: Engine, config: GragConfig, req: DefineSchemaRequest, *, detail: SchemaDetail = "full",
 ) -> SchemaDocument:
+    if req.preset is not None:
+        from grag.core.presets import adopt_preset
+        from grag.core.schema import build_schema_document
+
+        report = adopt_preset(engine, req.preset, allow_similar=req.allow_similar)
+        doc = build_schema_document(engine, config, detail=detail)
+        doc.preset = report
+        return doc
     # Validate every name before the first DDL, and publish tables + registry
     # together. Joining an ingest transaction does not imply a savepoint.
     with engine.atomic_writes():
