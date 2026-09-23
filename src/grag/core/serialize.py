@@ -30,9 +30,11 @@ from grag.core.types import (
 
 # Kept here without importing evidence.py, which depends on the engine.
 _SAFETY_PROPS = {"_evidence_state", "_review_state", "_expires_at", "_superseded_by",
-                 "_evidence_seq", "_document_state", "_source_state", "_history_revision", "_evidence_visibility", "status"}
+                 "_evidence_seq", "_document_state", "_source_state", "_history_revision", "_evidence_visibility", "_source_changed", "status"}
 # The citation bundle also carries the guard token: an ordinary read must be
 # sufficient for a guarded correction, so budget pressure never strips it.
+# Stored anchors are machinery for the derived _source_changed qualifier, not evidence.
+_HIDDEN_PROPS = {"_source_files"}
 _CITATION_PROPS = {PROVENANCE_SOURCE, "line_start", "line_end", "status", "_revision", *_SAFETY_PROPS}
 
 
@@ -73,7 +75,7 @@ def _render_props(props: dict[str, Any], skip: set[str]) -> str:
     parts = [
         f"{k}: {_render_value(v)}"
         for k, v in props.items()
-        if k not in skip and k not in VECTOR_PROPS and v is not None
+        if k not in skip and k not in VECTOR_PROPS and k not in _HIDDEN_PROPS and v is not None
     ]
     return "{" + ", ".join(parts) + "}" if parts else ""
 
@@ -290,7 +292,7 @@ def pack_context(
             ((record, key, value)
              for record in records
              for key, value in (originals[record.id] if isinstance(record, NodeRecord) else original_edges[record.id]).items()
-             if (key.startswith("_") or key in secondary) == metadata),
+             if key not in _HIDDEN_PROPS and (key.startswith("_") or key in secondary) == metadata),
             key=lambda item: priority.get(item[1], 10),
         )
         for record, key, value in fields:

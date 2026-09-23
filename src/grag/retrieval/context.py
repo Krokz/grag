@@ -22,6 +22,7 @@ from grag.core.types import (
 )
 from grag.retrieval.packing import (
     _with_revisions,
+    _with_source_changes,
     pack_context_response,
     pack_text_page,
     retrieval_budget,
@@ -214,7 +215,7 @@ def get_context(
     # Ordinary reads carry the guard token, so correction needs no Cypher detour.
     # Historical reads (above) deliberately do not: their token would be stale.
     return pack_context_response(
-        _with_revisions(subgraph),
+        _with_source_changes(_with_revisions(subgraph)),
         budget,
         [n.id for n in seeds],
         expansion_limited=expansion_limited,

@@ -72,6 +72,26 @@ def _with_revisions(subgraph: Subgraph) -> Subgraph:
         edges=subgraph.edges,
     )
 
+def _with_source_changes(subgraph: Subgraph) -> Subgraph:
+    """Report cited files that changed since a tracked record was written.
+
+    Apply after _with_revisions: the derived qualifier is never part of the guard
+    token. Only files named in the record's source are checked, so an absent
+    qualifier never proves the claim is current. The stored anchors are dropped.
+    """
+    from grag.core.source_anchors import ANCHOR_PROP, CHANGED_PROP, changed_sources
+
+    nodes = []
+    for node in subgraph.nodes:
+        if ANCHOR_PROP not in node.properties:
+            nodes.append(node)
+            continue
+        props = {k: v for k, v in node.properties.items() if k != ANCHOR_PROP}
+        if changed := changed_sources(node.properties[ANCHOR_PROP]):
+            props[CHANGED_PROP] = changed
+        nodes.append(node.model_copy(update={"properties": props}))
+    return Subgraph(nodes=nodes, edges=subgraph.edges)
+
 _WORDS = re.compile(r"[^\W_]+", re.UNICODE)
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n")
 _QUERY_FILLER = frozenset(["a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from", "how", "i", "in", "is", "it", "of", "on", "or", "should", "that", "the", "this", "to", "was", "what", "when", "where", "which", "who", "why", "will", "with"])

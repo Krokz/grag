@@ -390,6 +390,8 @@ def search_knowledge(
     excluded_evidence counts hidden matches from a bounded lexical recount plus encountered
     exclusions. It can miss vector-only hidden matches; zero does not prove absence.
     If seeds look wrong or empty and the count is above zero, retry with evidence="all".
+    _source_changed lists files a tracked record cites that changed since it was saved;
+    only cited files are checked.
     Whole properties may be omitted to fit token_budget. text_excerpts are partial slices;
     follow their node/property/offset/sha256 using get_context paging before claiming
     complete evidence. Empty/complete output never proves exhaustive graph coverage.
@@ -441,7 +443,7 @@ def get_context(
     revision=<sequence> retrieves one saved snapshot and can combine with text_property.
     History needs one ID, starts at adoption, and does not reconstruct past relationships.
     Packed nodes carry their _revision guard token; pass it as expected_revision to correct
-    a record. Page mode (text_property) does not project _revision; read without it first.
+    a record. _source_changed lists cited files changed since a tracked record was saved. Page mode (text_property) does not project _revision; read without it first.
     Budgets are UTF-8/4 estimates (256..32768) bounding this text reply; use Cypher for exact structured projections.
     """
     resp = service.get_context(
