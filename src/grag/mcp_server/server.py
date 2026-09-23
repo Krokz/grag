@@ -29,6 +29,7 @@ from typing import Annotated, Any, Literal, TypeVar
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, InputRequiredResult, TextContent
+from mcp.types import Tool as MCPTool
 from pydantic import Field, ValidationError
 from starlette.responses import JSONResponse
 
@@ -222,7 +223,30 @@ def _mcp_result(fn: _F) -> Callable[..., CallToolResult]:
     return wrapped
 
 
+def _strip_schema_titles(schema: Any) -> Any:
+    """Drop JSON Schema ``title`` annotations generated from parameter names.
+
+    They restate the property name ("top_k" -> "Top K") and are repeated in every
+    tool listing an agent loads. Property maps keep their keys, so a property that
+    is itself named ``title`` survives. Argument validation is unaffected.
+    """
+    if isinstance(schema, dict):
+        return {
+            key: ({name: _strip_schema_titles(sub) for name, sub in value.items()}
+                  if key == "properties" and isinstance(value, dict) else _strip_schema_titles(value))
+            for key, value in schema.items()
+            if not (key == "title" and isinstance(value, str))
+        }
+    if isinstance(schema, list):
+        return [_strip_schema_titles(item) for item in schema]
+    return schema
+
+
 class _GragMCPServer(MCPServer):
+    async def list_tools(self) -> list[MCPTool]:
+        return [tool.model_copy(update={"input_schema": _strip_schema_titles(tool.input_schema)})
+                for tool in await super().list_tools()]
+
     async def call_tool(
         self, name: str, arguments: dict[str, Any], context: Context | None = None,
     ) -> CallToolResult | InputRequiredResult:

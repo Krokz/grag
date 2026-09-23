@@ -100,3 +100,21 @@ def test_total_mcp_discovery_budget(tmp_path):
         assert asyncio.run(sizes()) + len(mcp._INSTRUCTIONS.encode()) < 24_000
     finally:
         server.grag_service.close()
+
+
+def test_advertised_schemas_drop_generated_titles_but_keep_title_properties(tmp_path):
+    assert mcp._strip_schema_titles({
+        "title": "Args", "type": "object",
+        "properties": {"title": {"title": "Title", "type": "string"}, "top_k": {"title": "Top K", "type": "integer"}},
+        "$defs": {"Node": {"title": "Node", "anyOf": [{"type": "string", "title": "S"}]}},
+    }) == {
+        "type": "object",
+        "properties": {"title": {"type": "string"}, "top_k": {"type": "integer"}},
+        "$defs": {"Node": {"anyOf": [{"type": "string"}]}},
+    }
+    server = mcp.create_server(GragConfig(db_path=tmp_path / "titles.lbdb"))
+    try:
+        tools = asyncio.run(server.list_tools())
+        assert not any('"title"' in json.dumps(tool.input_schema) for tool in tools)
+    finally:
+        server.grag_service.close()
