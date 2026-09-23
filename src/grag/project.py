@@ -523,36 +523,23 @@ def plan_global_skill_ops(client: str = "auto", *, remove: bool = False) -> list
 # ---------------------------------------------------------------------------
 
 _MCP_GUIDANCE = (
-    "Prefer the registered grag MCP tools for graph reads, writes and ingestion; "
-    "discover deferred tools before falling back. Do not substitute equivalent CLI "
-    "commands or Python/HTTP scripts when MCP is available for this graph. "
-    "Use the CLI for setup/operations, an explicit user request, or unavailable/failed "
-    "MCP connections; state the fallback reason and keep the same database/server. "
-    "Validation errors and empty results are not connection failures. Return to MCP "
-    "when available.\n\n"
+    "Use the registered grag MCP tools for graph reads, writes and ingestion (discover "
+    "deferred tools first). Fall back to the CLI only for setup, an explicit request or a "
+    "failed connection, and say why; empty results and validation errors are not "
+    "connection failures.\n\n"
 )
 
+# Condensed on purpose: Claude Code also receives the MCP server instructions, so the
+# full rules live there and in the skill; this block keeps the triggers for any client.
 _LOOKUP_GUIDANCE = (
-    "Use source search for code navigation; grag for saved decisions/findings and relationships. "
-    "Focused `search_knowledge` needs no schema preflight; `get_context` serves known IDs. "
-    "Stop recall when claim, scope, source and qualifications suffice. Read again for missing "
-    "evidence, current-code verification or an edit guard. Off-topic hits need corrected scope "
-    "or source inspection; repo names in search text are not scope filters. Use projected "
-    "`cypher_query` with familiar schema and `freshness=\"require\"` for current indexed code.\n\n"
-    "Capture step: when the user states an agreement or decision, or you establish a reusable "
-    "finding about this project, save it before the final answer unless the request is read-only. "
-    "One `search_knowledge` with the memory labels (for example Decision, Insight, Task; "
-    "`top_k=4, hops=0`) finds an existing record; an explicit zero in the footer's `label_hits` for "
-    "each of those labels means none matched, so do not search again — unless the footer's "
-    "`excluded_evidence` is above zero, which means lifecycle-hidden matches: check "
-    "`evidence=\"all\"` before saving. A label in `unknown_labels` does not exist in this graph. Update a found record with its `_revision` as "
-    "`expected_revision`; otherwise `upsert_nodes` with a scalar `key`, `expected_revision:\"absent\"`, "
-    "`evidence:{}`, a `source` naming the discussion and the inspected file, and a body holding the "
-    "claim, scope, qualifications, the unchosen proposal and next step. Use only relationship types "
-    "the schema lists; otherwise name the related record in the body. Cite discussions for choices "
-    "and code for observations. Within authorized memory work, correct verified stale findings with "
-    "the guard and history without asking again; preserve user decisions and read-only scope. "
-    "See the grag skill's memory reference.  \n"
+    "Use source search for code navigation and grag for saved decisions, findings and "
+    "relationships; focused `search_knowledge` needs no schema preflight.\n\n"
+    "Capture step: when the user states a decision or you establish a reusable finding, save "
+    "it before the final answer unless the request is read-only. One `search_knowledge` with "
+    "the memory labels (an explicit zero in `label_hits` means none matched), then a guarded "
+    "`upsert_nodes`: a found record's `_revision` as `expected_revision`, or `\"absent\"` to "
+    "create. The MCP server instructions and the grag skill's memory reference give the full "
+    "rules.  \n"
 )
 
 

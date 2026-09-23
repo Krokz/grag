@@ -234,3 +234,6 @@ def test_capture_step_guidance_is_consistent_across_surfaces(tmp_path):
         assert "Capture step" in text or "capture step" in text.lower(), name
         assert "read-only" in text, name
     assert '"expected_revision":"absent"' in surfaces["memory reference"]
+    # The project block is condensed and must point to where the full rules live.
+    assert "memory reference" in surfaces["project block"]
+    assert "MCP server instructions" in surfaces["project block"]
