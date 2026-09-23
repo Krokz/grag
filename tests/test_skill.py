@@ -113,7 +113,7 @@ def test_global_collision_preserves_entire_existing_bundle(tmp_path, monkeypatch
     assert reference.read_text() == "My own memory procedures\n"
 
 
-@pytest.mark.parametrize("extra", [["--ingest-if-empty"], ["--no-mcp"], ["--server-url", "http://127.0.0.1:1234"]])
+@pytest.mark.parametrize("extra", [["--ingest-if-empty"], ["--memory-preset"], ["--no-mcp"], ["--server-url", "http://127.0.0.1:1234"]])
 def test_global_mode_refuses_project_flags(tmp_path, monkeypatch, extra):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     assert main(["init", "--global-skill", *extra]) == 1

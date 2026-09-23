@@ -83,6 +83,21 @@ def _print_mutation(result: dict, client: GraphClient, args: argparse.Namespace,
         print(f"Warning: {warning}")
 
 
+def preset_lines(report: dict, target: str) -> list[str]:
+    """Human summary of one preset adoption."""
+    before = report.get("previous_version")
+    lines = [f"Memory preset v{report['version']} in {target}"
+             + (f" (was v{before})." if before not in (None, report["version"]) else ".")]
+    if report.get("created"):
+        lines.append(f"Created: {', '.join(report['created'])}")
+    if report.get("added"):
+        lines.append(f"Added properties: {', '.join(report['added'])}")
+    if not report.get("created") and not report.get("added"):
+        lines.append("No changes needed.")
+    lines.extend(f"Conflict (unchanged): {conflict}" for conflict in report.get("conflicts", []))
+    return lines
+
+
 def graph_command(args: argparse.Namespace, cfg: GragConfig) -> int:
     if args.cmd == "ingest":
         from grag.ingest.loaders import ingest_paths
@@ -114,6 +129,12 @@ def graph_command(args: argparse.Namespace, cfg: GragConfig) -> int:
     with GraphClient(cfg) as client:
         if args.cmd == "inspect":
             print(json.dumps(_inspect(client, args), ensure_ascii=False, indent=None if args.json else 2))
+        elif args.cmd == "memory":
+            result = client.call("define_schema", DefineSchemaRequest(preset="memory", allow_similar=args.allow_similar))
+            if args.json:
+                print(json.dumps(result["preset"], ensure_ascii=False))
+            else:
+                print("\n".join(preset_lines(result["preset"], client.target)))
         elif args.cmd == "retire":
             label, key, _ = _node_schema(client, args.node_id)
             result = client.call("upsert_nodes", UpsertNodesRequest(nodes=[UpsertNode(

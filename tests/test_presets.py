@@ -1,13 +1,20 @@
 """M18: the opt-in memory preset is versioned, additive and reports conflicts."""
 from __future__ import annotations
 
+import json
+
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from grag import cli
+from grag.admin import ServerInfo
+from grag.api.main import create_app
+from grag.client import GraphClient
 from grag.config import GragConfig
 from grag.core import presets
 from grag.core.engine import Engine
-from grag.core.errors import SchemaError
+from grag.core.errors import ConfigurationError, SchemaError
 from grag.core.mutate import define_schema, upsert_nodes
 from grag.core.schema import build_schema_document, schema_text
 from grag.core.types import (
@@ -137,3 +144,67 @@ def test_mcp_preset_needs_no_table_lists(tmp_path):
     finally:
         svc.close()
 
+
+@pytest.fixture()
+def run(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GRAG_EMBED_PROVIDER", "")
+    monkeypatch.setenv("GRAG_AUTO_REFRESH_CODE", "0")
+    monkeypatch.setattr("grag.admin.find_server", lambda db: None)
+    config = GragConfig(db_path=tmp_path / "memory.lbdb", buffer_pool_size=128 * 1024**2)
+
+    def run(*args, success=True):
+        status = cli.main(["--db", str(config.db_path), *args])
+        output = capsys.readouterr()
+        assert status == (0 if success else 1), output
+        return json.loads(output.out) if success and "--json" in args else output
+
+    run.config = config
+    return run
+
+
+def test_cli_adopt_json_and_human_output(run):
+    assert run("memory", "adopt", "--json")["created"] == ["Decision", "Insight", "Task", "Question"]
+    out = run("memory", "adopt").out
+    assert "Memory preset v1" in out and "No changes needed." in out
+
+
+def test_client_refuses_an_owner_without_preset_support(run, monkeypatch):
+    with TestClient(create_app(run.config)) as http:
+        monkeypatch.setattr("grag.admin.find_server", lambda db: ServerInfo(8471, "0.12.0", True, None))
+
+        class OldOwner:
+            def request(self, method, path, **kwargs):
+                response = http.request(method, path, **kwargs)
+                if path == "/api/health":
+                    body = response.json()
+                    body["capabilities"].pop("memory_preset")
+                    return type("Health", (), {"status_code": 200, "json": lambda self: body})()
+                if path == "/api/schema/define":
+                    pytest.fail("sent a preset request to an owner without support")
+                return response
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("grag.client.httpx2.Client", lambda **kw: OldOwner())
+        with GraphClient(run.config) as client, pytest.raises(ConfigurationError, match="schema presets"):
+            client.call("define_schema", PRESET)
+
+
+def test_init_adopts_the_preset_and_dry_run_opens_no_database(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "project"
+    (root / ".git").mkdir(parents=True)
+    for key in ("GRAG_DB_PATH", "GRAG_DB_DIR", "GRAG_SERVER_URL", "GRAG_EMBED_PROVIDER"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("GRAG_AUTO_REFRESH_CODE", "0")
+    monkeypatch.setenv("GRAG_BUFFER_POOL_MB", "128")
+    monkeypatch.setattr("grag.admin.find_server", lambda db: None)
+    monkeypatch.chdir(root)
+    db = tmp_path / "project.lbdb"
+    args = ["--db", str(db), "init", "--client", "claude", "--no-verify", "--memory-preset"]
+    assert cli.main([*args, "--dry-run"]) == 0
+    assert "Would adopt the memory preset" in capsys.readouterr().out and not db.exists()
+    assert cli.main(args) == 0
+    assert "Created: Decision, Insight, Task, Question" in capsys.readouterr().out
+    assert cli.main([*args[:3], "--remove", "--memory-preset"]) == 1

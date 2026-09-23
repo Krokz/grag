@@ -249,6 +249,15 @@ def main(argv: list[str] | None = None) -> int:
     retire.add_argument("--reason", help="reason for retiring this memory")
     retire.add_argument("--operation-id", help="durable retry ID for this exact retirement")
     retire.add_argument("--json", action="store_true")
+    memory = sub.add_parser("memory", help="manage the optional, versioned memory schema preset")
+    memory_sub = memory.add_subparsers(dest="memory_cmd", required=True)
+    adopt = memory_sub.add_parser(
+        "adopt",
+        help="add the memory preset (Decision/Insight/Task/Question with title, body, status, scope); "
+        "additive and repeatable: existing tables are never dropped or retyped, conflicts are reported",
+    )
+    adopt.add_argument("--allow-similar", action="store_true", help="create preset tables even when a near-duplicate table exists")
+    adopt.add_argument("--json", action="store_true")
     search = sub.add_parser("search", help="retrieve knowledge from the selected graph")
     search.add_argument("query")
     search.add_argument("--label", action="append", dest="labels")
@@ -428,6 +437,10 @@ def main(argv: list[str] | None = None) -> int:
     init_ingest.add_argument(
         "--ingest-if-empty", action="store_true",
         help="index the checkout only when its graph is empty or contains only the init verification record",
+    )
+    init.add_argument(
+        "--memory-preset", action="store_true",
+        help="also adopt the optional memory schema preset (same as 'grag memory adopt')",
     )
     init.add_argument(
         "--global-skill", action="store_true",
@@ -645,7 +658,7 @@ def main(argv: list[str] | None = None) -> int:
             except GragError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
-    elif args.cmd in ("ingest", "ingest-code", "remember", "inspect", "retire", "search", "context"):
+    elif args.cmd in ("ingest", "ingest-code", "remember", "inspect", "retire", "memory", "search", "context"):
         from pydantic import ValidationError
 
         from grag.cli_graph import graph_command
@@ -838,6 +851,8 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
     project_root = find_root()
     if args.ingest_if_empty and (args.server_url or cfg.server_url or args.remove):
         raise ProjectConfigError("--ingest-if-empty needs a local checkout database and cannot be combined with --remove or a remote server.")
+    if args.memory_preset and (args.server_url or cfg.server_url or args.remove):
+        raise ProjectConfigError("--memory-preset needs a local checkout database and cannot be combined with --remove or a remote server; use 'grag --server-url <url> memory adopt' for a remote graph.")
     if args.client == "codex" and not args.no_mcp and not args.remove:
         raise ProjectConfigError("Codex MCP registration is not managed by init. Use --client codex --no-mcp for local setup/CLI access, or --global-skill for the skill alone.")
     clients = (
@@ -944,6 +959,8 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
 
     if args.dry_run:
         preview_ops(ops)
+        if args.memory_preset:
+            print(f"Would adopt the memory preset in {db_path}")
         return 0
 
     if args.ingest_if_empty:
@@ -967,6 +984,16 @@ def _init_command(args: argparse.Namespace, cfg: GragConfig) -> int:
             print(f"Verified MCP write/read: {report['registration']}\n  Runtime: {report['runtime']} ({report['tools']} tools)")
     elif mcp_ops:
         print("Client connection unverified (--no-verify). Rerun init to verify it.")
+
+    if args.memory_preset:
+        from grag.cli_graph import preset_lines
+        from grag.client import GraphClient
+        from grag.core.types import DefineSchemaRequest
+
+        cfg.db_path = db_path
+        with GraphClient(cfg) as client:
+            result = client.call("define_schema", DefineSchemaRequest(preset="memory"))
+            print("\n" + "\n".join(preset_lines(result["preset"], client.target)))
 
     if args.ingest_if_empty:
         import json
@@ -1015,7 +1042,7 @@ def _global_skill_command(args: argparse.Namespace) -> int:
     from grag.project import apply_ops, plan_global_skill_ops, preview_ops
     from grag.project_files import ProjectConfigError
 
-    if any((args.db, args.db_dir, args.port, args.ingest, args.ingest_if_empty,
+    if any((args.db, args.db_dir, args.port, args.ingest, args.ingest_if_empty, args.memory_preset,
             args.server_url, args.server_db, args.url, args.no_mcp,
             args.no_claude_md, args.no_skill, args.no_verify)):
         raise ProjectConfigError("--global-skill supports --client, --dry-run and --remove only; it does not configure a project or database.")
