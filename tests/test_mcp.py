@@ -170,7 +170,9 @@ def test_full_llm_workflow(service: GragService):
 
     # 4. upserts report counts as compact JSON
     nodes_out = json.loads(mcp_server.upsert_nodes(service, PERSONS + DOCS))
-    assert nodes_out == {"nodes": 4, "edges": 0, "warnings": []}
+    assert nodes_out == {"nodes": 4, "edges": 0, "warnings": [],
+                         "history": {"Person:ada": "created", "Person:edsger": "created",
+                                     "Person:grace": "created", "Doc:doc-1": "created"}}
     edges_out = json.loads(mcp_server.upsert_edges(service, EDGES))
     assert edges_out == {"nodes": 0, "edges": 2, "warnings": []}
 

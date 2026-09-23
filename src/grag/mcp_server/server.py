@@ -257,11 +257,13 @@ def _return_errors(fn: _F) -> _F:
 
 
 def _summary_json(summary: MutationSummary) -> str:
-    payload = summary.model_dump(exclude={"operation_id", "replayed", "revisions"})
+    payload = summary.model_dump(exclude={"operation_id", "replayed", "revisions", "history"})
     if summary.operation_id is not None:
         payload.update(operation_id=summary.operation_id, replayed=summary.replayed)
     if summary.revisions:
         payload["revisions"] = summary.revisions
+    if summary.history:
+        payload["history"] = summary.history
     return json.dumps(payload, ensure_ascii=False, separators=_COMPACT)
 
 
@@ -314,7 +316,9 @@ def upsert_nodes(service: GragService, nodes: Sequence[UpsertNode | dict], edges
     whole-entity read (search_knowledge and get_context return it as _revision), or 'absent' for
     create-only. Lost response: retry exact payload/operation_id.
     evidence={} starts history; adopting existing nodes needs a guard. Caller review is not
-    verification. Returns counts, warnings and revisions; see the skill's memory reference.
+    verification. Returns counts, warnings, revisions and a per-node history disposition:
+    created, recorded (prior version retained), or not_recorded (overwritten without history —
+    a guard alone does not retain the prior body). See the skill's memory reference.
     """
     req = UpsertNodesRequest(nodes=[UpsertNode.model_validate(n) for n in nodes], edges=[UpsertEdge.model_validate(e) for e in edges or []], operation_id=operation_id)
     return _summary_json(service.upsert_nodes(req))

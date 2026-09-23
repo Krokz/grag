@@ -300,6 +300,11 @@ class MutationSummary(BaseModel):
     operation_id: str | None = None
     replayed: bool = False
     revisions: dict[str, str] = Field(default_factory=dict)
+    # Per-node history disposition: "created" (no prior version existed),
+    # "recorded" (a prior version is retained in history), or "not_recorded"
+    # (a prior version was overwritten without retention — a successful guard
+    # does not imply history; include evidence to retain it).
+    history: dict[str, str] = Field(default_factory=dict)
 
 
 # --- query ----------------------------------------------------------------------

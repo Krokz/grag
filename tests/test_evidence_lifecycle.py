@@ -73,6 +73,37 @@ def test_adoption_correction_history_paging_and_replay(engine):
     assert node(engine,'policy')['_evidence_seq']==2  # no-op does not invent an edit
 
 
+def test_history_disposition_distinguishes_retention(engine):
+    """The write response states whether a prior body was actually retained —
+    a successful revision guard alone does not imply history (M24 audit)."""
+    setup(engine)
+    # Create without evidence: no prior version existed.
+    first = write(engine, 'policy', 'v1')
+    assert first.history == {'Note:policy': 'created'}
+    # Unguarded, evidence-less overwrite of an untracked node: prior body lost.
+    second = write(engine, 'policy', 'v2')
+    assert second.history == {'Note:policy': 'not_recorded'}
+    assert not context(engine, 'policy', history=True).history.entries  # nothing retained
+    # Guarded correction with evidence adopts history; the guard token comes
+    # from an ordinary read (no Cypher detour).
+    token = context(engine, 'policy').subgraph.nodes[0].properties['_revision']
+    req = UpsertNodesRequest(operation_id='correction-2', nodes=[UpsertNode(
+        label='Note', key='policy', properties={'body': 'v3'},
+        expected_revision=token, evidence=EvidenceUpdate(reason='correction'))])
+    third = upsert_nodes(engine, engine.config, req)
+    assert third.history == {'Note:policy': 'recorded'}
+    entries = context(engine, 'policy', history=True, token_budget=3000).history.entries
+    assert any(e.baseline for e in entries)  # the pre-adoption body was retained
+    # A replayed receipt reports the original disposition.
+    assert upsert_nodes(engine, engine.config, req).history == third.history
+    # Plain upserts on a now-tracked node keep recording, even without evidence.
+    fourth = write(engine, 'policy', 'v4')
+    assert fourth.history == {'Note:policy': 'recorded'}
+    # Edges-only requests carry no history map.
+    assert upsert_nodes(engine, engine.config, UpsertNodesRequest(nodes=[
+        UpsertNode(label='Note', key='fresh', properties={})])).history == {'Note:fresh': 'created'}
+
+
 def test_empty_reply_recounts_lifecycle_hidden_matches(engine):
     """Zero seeds under evidence='current' must not masquerade as 'nothing
     exists' when matches are hidden by the SQL lifecycle predicate (M24)."""
@@ -110,6 +141,35 @@ def test_nonempty_reply_still_counts_hidden_matches(engine):
     assert 'Note:missing' not in [s.node.id for s in resp.seeds]
     shown = search_knowledge(engine, engine.config, SearchRequest(query='repository authorization', hops=0, evidence='all'))
     assert shown.seeds[0].node.id == 'Note:missing'
+
+
+def test_old_body_duplication_warns_only_when_retained(engine):
+    """Advisory warning: a materially changed body that embeds the substantial
+    prior body verbatim duplicates storage — but only when history actually
+    retained that prior body (M24 v2: agents insured against loss by hand)."""
+    setup(engine)
+    old_body = 'cache policy thirty minutes. ' * 20  # substantial
+    write(engine, 'policy', old_body)
+    # Untracked overwrite: no retention, so no warning.
+    untracked = write(engine, 'policy', old_body + ' New clause.')
+    assert not any('verbatim' in w for w in untracked.warnings)
+    # Adopt history, then a correction that embeds the retained body: warn.
+    token = context(engine, 'policy').subgraph.nodes[0].properties['_revision']
+    upsert_nodes(engine, engine.config, UpsertNodesRequest(nodes=[UpsertNode(
+        label='Note', key='policy', properties={'body': old_body + ' New clause.'},
+        expected_revision=token, evidence=EvidenceUpdate(reason='adopt'))]))
+    token = context(engine, 'policy').subgraph.nodes[0].properties['_revision']
+    duplicating = upsert_nodes(engine, engine.config, UpsertNodesRequest(nodes=[UpsertNode(
+        label='Note', key='policy',
+        properties={'body': old_body + ' New clause. Updated observation.'},
+        expected_revision=token, evidence=EvidenceUpdate(reason='correct'))]))
+    assert any('verbatim' in w and 'retained' in w for w in duplicating.warnings)
+    # A clean correction that rewrites the body does not warn.
+    token = context(engine, 'policy').subgraph.nodes[0].properties['_revision']
+    clean = upsert_nodes(engine, engine.config, UpsertNodesRequest(nodes=[UpsertNode(
+        label='Note', key='policy', properties={'body': 'cache policy fifteen seconds.'},
+        expected_revision=token, evidence=EvidenceUpdate(reason='correct'))]))
+    assert not any('verbatim' in w for w in clean.warnings)
 
 
 def test_lifecycle_filters_seeds_paths_and_preserves_tasks(engine):

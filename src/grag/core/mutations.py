@@ -33,6 +33,7 @@ from grag.core.revisions import (
     content_revision,
 )
 from grag.core.types import (
+    RESERVED_PREFIX,
     MutationSummary,
     UpsertEdge,
     UpsertEdgesRequest,
@@ -265,6 +266,20 @@ def apply_mutation(
             prepared = [before_update(engine, node, pks[node.label])
                         if node.evidence is not None or node.label in tracked_tables else None
                         for node in nodes]
+            # History disposition needs pre-write existence for nodes whose
+            # history is not engaged (prepared is None); one batched lookup
+            # per label, before any write.
+            untracked_exists: set[tuple[str, Any]] = set()
+            by_label: dict[str, list[Any]] = {}
+            for node, prior in zip(nodes, prepared, strict=True):
+                if prior is None:
+                    by_label.setdefault(node.label, []).append(node.key)
+            for label, keys in by_label.items():
+                rows = engine.execute(
+                    f"MATCH (n:{label}) WHERE n.{pks[label]} IN $keys RETURN n.{pks[label]}",
+                    {"keys": keys},
+                ).rows
+                untracked_exists.update((label, row[0]) for row in rows)
             if any(item is not None for item in prepared):
                 identities = [(node.label, str(node.key)) for node in nodes]
                 if len(set(identities)) != len(identities):
@@ -283,16 +298,42 @@ def apply_mutation(
             chain_steps: list[str] = []
             for node, prior in zip(nodes, prepared, strict=True):
                 finish_update(engine, node, pks[node.label], prior, chain_steps=chain_steps)
+            # Advisory only: when the prior body is retained in history and the
+            # new value still embeds it verbatim, flag the duplication. Content
+            # is never altered or removed — quotation can be intentional.
+            for node, prior in zip(nodes, prepared, strict=True):
+                if prior is None or prior["previous"] is None:
+                    continue
+                for prop, old in prior["previous"].items():
+                    if prop.startswith(RESERVED_PREFIX) or not isinstance(old, str):
+                        continue
+                    new = prior["current"].get(prop)
+                    if isinstance(new, str) and len(old) >= 200 and old != new and old in new:
+                        warnings.append(
+                            f"Node {make_node_id(node.label, node.key)}: the new '{prop}' value "
+                            "contains the prior value verbatim; that version is already retained "
+                            "in history. Embedding it duplicates storage and future read tokens."
+                        )
             edge_summary = (
                 _upsert_edges(engine, config, UpsertEdgesRequest(edges=edges))
                 if edges
                 else MutationSummary()
             )
+            history = {}
+            for node, prior in zip(nodes, prepared, strict=True):
+                identity = make_node_id(node.label, node.key)
+                if prior is not None:
+                    history[identity] = "created" if prior["previous"] is None else "recorded"
+                else:
+                    history[identity] = (
+                        "not_recorded" if (node.label, node.key) in untracked_exists else "created"
+                    )
             summary = MutationSummary(
                 nodes=len(nodes),
                 edges=len(edges),
                 warnings=warnings + node_summary.warnings + edge_summary.warnings,
                 operation_id=req.operation_id,
+                history=history,
             )
             if req.operation_id or any(
                 target.expected is not None for target in targets
