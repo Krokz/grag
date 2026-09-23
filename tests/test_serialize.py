@@ -86,6 +86,27 @@ def test_node_without_props():
     assert packed.text == "Doc:a"
 
 
+def test_duplicate_id_property_is_not_rendered():
+    # The canonical line id already renders as 'Label:key'; an id property
+    # repeating that exact key carries no information. Keys may contain colons.
+    sub = Subgraph(nodes=[_node("Function:repo:app.py#main", id="repo:app.py#main", name="main")])
+    packed = pack_context(sub, token_budget=10_000)
+    assert packed.text == 'Function:repo:app.py#main {name: "main"}'
+    # The property stays in the packed subgraph and is not counted as omitted.
+    assert packed.subgraph.nodes[0].properties["id"] == "repo:app.py#main"
+    assert packed.omitted_properties == 0
+
+
+def test_nonduplicate_id_property_is_kept():
+    # An id property that does not repeat the canonical key is real information.
+    sub = Subgraph(nodes=[_node("Doc:a", id="other", title="t")])
+    packed = pack_context(sub, token_budget=10_000)
+    assert packed.text == 'Doc:a {id: "other", title: "t"}'
+    # An id without a 'Label:' prefix cannot establish the duplicate.
+    sub = Subgraph(nodes=[_node("a", id="a")])
+    assert pack_context(sub, token_budget=10_000).text == 'a {id: "a"}'
+
+
 def test_edge_line_format(docs_graph: Subgraph):
     packed = pack_context(docs_graph, token_budget=10_000)
     edge_line = next(line for line in packed.text.splitlines() if "-[" in line)
@@ -245,7 +266,8 @@ def test_engine_roundtrip_with_citation(graph: Engine):
     sub = extract_subgraph(res, pk_by_label={"Doc": "id"})
     packed = pack_context(sub, token_budget=10_000, seed_ids=["Doc:doc-0"])
     lines = packed.text.splitlines()
-    assert lines[0].startswith('Doc:doc-0 {id: "doc-0", title: "graph databases"')
+    # The canonical id already carries the key; the duplicate id property is not rendered.
+    assert lines[0].startswith('Doc:doc-0 {title: "graph databases"')
     assert lines[0].endswith("[source: notes.md]")
     assert lines[1].startswith("Doc:doc-1")
     assert "[source:" not in lines[1]

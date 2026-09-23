@@ -78,7 +78,14 @@ def _render_props(props: dict[str, Any], skip: set[str]) -> str:
 
 def _node_line(node: NodeRecord) -> str:
     line = node.id
-    rendered = _render_props(node.properties, skip={PROVENANCE_SOURCE})
+    skip = {PROVENANCE_SOURCE}
+    # The line already opens with the canonical 'Label:key' id; a primary-key
+    # property repeating that exact key adds no information to the rendering.
+    # The property itself stays in the subgraph and omission counts.
+    _, _, key = node.id.partition(":")
+    if key and str(node.properties.get("id")) == key:
+        skip.add("id")
+    rendered = _render_props(node.properties, skip=skip)
     if rendered:
         line += f" {rendered}"
     source = node.properties.get(PROVENANCE_SOURCE)
