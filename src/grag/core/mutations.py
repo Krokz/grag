@@ -73,7 +73,9 @@ def _key(label: str, value: Any, pks: dict, columns: dict) -> Any:
     ok, coerced = _coerce_value(columns[pk], value)
     if value is None or not ok or isinstance(coerced, (list, dict, tuple, set)):
         raise SchemaError(
-            f"Invalid primary key for {label}.{pk}: expected non-null {columns[pk]}"
+            f"Invalid primary key for {label}.{pk}: expected non-null {columns[pk]}",
+            hint="Pass the scalar key value in 'key' (for example \"my-record\"), "
+            "not an object, list or null; keep other fields in 'properties'.",
         )
     return coerced
 
@@ -141,7 +143,9 @@ def _prepare(
         if edge.type not in rels:
             raise SchemaError(
                 f"Unknown rel type '{edge.type}'",
-                hint="Call define_schema for this relationship first.",
+                hint=f"Use an existing relationship type ({sorted(rels) or 'none defined'}) or call "
+                "define_schema first. When schema changes are not permitted, omit the edge and "
+                "state the relationship in the node body.",
             )
         if (edge.from_label, edge.to_label) != rels[edge.type]:
             raise SchemaError(

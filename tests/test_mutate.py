@@ -697,3 +697,30 @@ def test_write_after_search_fresh_engine(tmp_path):
         assert rows == [[2]]
     finally:
         eng2.close()
+
+
+def test_upsert_nodes_object_primary_key_hint(engine: Engine):
+    define_schema(engine, engine.config, DefineSchemaRequest(node_tables=[_doc_spec()]))
+    with pytest.raises(SchemaError) as exc:
+        upsert_nodes(
+            engine,
+            engine.config,
+            UpsertNodesRequest(nodes=[UpsertNode(label="Doc", key={"id": "d1"})]),
+        )
+    assert "Invalid primary key" in str(exc.value)
+    assert "scalar" in (exc.value.hint or "")
+
+
+def test_upsert_nodes_unknown_rel_type_hint_offers_omitting_edges(engine: Engine):
+    _people(engine)
+    with pytest.raises(SchemaError) as exc:
+        upsert_nodes(
+            engine,
+            engine.config,
+            UpsertNodesRequest(
+                nodes=[UpsertNode(label="Person", key="c")],
+                edges=[UpsertEdge(type="CONTRADICTS", from_label="Person", from_key="c", to_label="Person", to_key="a")],
+            ),
+        )
+    hint = exc.value.hint or ""
+    assert "KNOWS" in hint and "omit the edge" in hint

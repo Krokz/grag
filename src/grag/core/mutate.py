@@ -620,8 +620,9 @@ def _upsert_edges(
         if endpoints is None:
             raise SchemaError(
                 f"Unknown rel type '{edge.type}'.",
-                hint=f"Call define_schema with a RelTableSpec for '{edge.type}' first. "
-                f"Existing rel types: {sorted(rels)}.",
+                hint=f"Call define_schema with a RelTableSpec for '{edge.type}' first, or use an "
+                f"existing rel type: {sorted(rels)}. When schema changes are not permitted, omit "
+                f"the edge and state the relationship in the node body.",
             )
         if (edge.from_label, edge.to_label) != endpoints:
             raise SchemaError(
