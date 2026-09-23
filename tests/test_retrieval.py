@@ -527,3 +527,88 @@ def test_search_label_hits_never_displace_evidence(docs_engine, monkeypatch):
 
 
 # --- exact identifier promotion (frozen rule, September 2026) ----------------------
+
+
+def _scored(nid, name, label="Function"):
+    from grag.core.types import NodeRecord, ScoredNode
+
+    return ScoredNode(node=NodeRecord(id=nid, label=label, properties={"name": name}), score=0.01, match="fts")
+
+
+def test_identifier_tokens_recognition():
+    from grag.retrieval.search import identifier_tokens
+
+    assert identifier_tokens("what does stamp_message_id write into messages") == {"stamp_message_id"}
+    assert identifier_tokens("when is ScopeError raised by RepositoryScope") == {"ScopeError", "RepositoryScope"}
+    assert identifier_tokens("what does _now return") == {"_now"}
+    # Capitalized ordinary words, single-hump words and plain words never qualify.
+    assert identifier_tokens("Does Lumio Triage Retry Failed Attachment Downloads") == set()
+    assert identifier_tokens("how are ticket attachments cleaned up after triage") == set()
+    assert identifier_tokens("Xml") == set() and identifier_tokens("XmlParser") == {"XmlParser"}
+
+
+def test_exact_promotion_preserves_fused_order_and_leaves_others_in_place():
+    from grag.retrieval.search import _promote_exact_identifiers
+
+    fused = [_scored("F:a", "alpha"), _scored("F:b", "run_triage"), _scored("F:c", "gamma"), _scored("F:d", "run_triage"), _scored("F:e", "delta")]
+    out = _promote_exact_identifiers(fused, "how does run_triage build its response")
+    # Duplicate names are all promoted, in their fused order; the rest keep their order.
+    assert [s.node.id for s in out] == ["F:b", "F:d", "F:a", "F:c", "F:e"]
+    assert _promote_exact_identifiers(fused, "how does triage build its response") is fused
+    assert _promote_exact_identifiers(fused, "what does zeta_missing do") is fused
+
+
+def test_exact_promotion_window_boundary():
+    from grag.retrieval.search import EXACT_MATCH_WINDOW, _promote_exact_identifiers
+
+    filler = [_scored(f"F:{i}", f"node{i}") for i in range(EXACT_MATCH_WINDOW - 1)]
+    at_64 = _promote_exact_identifiers([*filler, _scored("F:x", "scrub_pii")], "what does scrub_pii remove")
+    assert at_64[0].node.id == "F:x"
+    at_65 = _promote_exact_identifiers([*filler, _scored("F:pad", "pad"), _scored("F:x", "scrub_pii")], "what does scrub_pii remove")
+    assert [s.node.id for s in at_65][-1] == "F:x" and at_65[0].node.id == "F:0"
+
+
+def test_exact_promotion_changes_ordering_before_diversity_and_packing(docs_engine, monkeypatch):
+    from grag.retrieval import search as search_module
+
+    docs_engine.execute_write("CREATE NODE TABLE Fn(id STRING PRIMARY KEY, name STRING, text STRING)")
+    for i in range(4):
+        docs_engine.execute_write(
+            f"CREATE (n:Fn {{id: 'fn{i}', name: 'helper{i}', "
+            f"text: 'build graph index relationships build graph index relationships helper {i}'}})"
+        )
+    docs_engine.execute_write("CREATE (n:Fn {id: 'target', name: 'build_graph_index', text: 'nothing here'})")
+    req = SearchRequest(query="build graph index relationships build_graph_index", hops=0, top_k=4)
+    promoted = search_knowledge(docs_engine, docs_engine.config, req)
+    monkeypatch.setattr(search_module, "_promote_exact_identifiers", lambda fused, query: fused)
+    plain = search_knowledge(docs_engine, docs_engine.config, req)
+    # Same query, same candidates: lexical order leaves the exact name out of the top seeds;
+    # promotion makes it the first seed, ahead of diversity and packing.
+    assert "Fn:target" not in [s.node.id for s in plain.seeds]
+    assert promoted.seeds[0].node.id == "Fn:target"
+    # Only the exact name moved: every other promoted seed was already a plain seed
+    # (diversity then re-applies its per-label cap to the shifted list).
+    assert {s.node.id for s in promoted.seeds[1:]} <= {s.node.id for s in plain.seeds}
+
+
+def test_exact_promotion_does_not_guarantee_delivery(docs_engine):
+    long_id = "target" + "y" * 1200
+    docs_engine.execute_write("CREATE NODE TABLE Fn(id STRING PRIMARY KEY, name STRING, text STRING)")
+    for i in range(4):
+        docs_engine.execute_write(f"CREATE (n:Fn {{id: 'fn{i}', name: 'helper{i}', text: 'graph relationships helper {i}'}})")
+    docs_engine.execute_write(f"CREATE (n:Fn {{id: '{long_id}', name: 'build_graph_index', text: 'graph'}})")
+    query = "graph relationships build_graph_index"
+    roomy = search_knowledge(docs_engine, docs_engine.config, SearchRequest(query=query, hops=0, top_k=4, token_budget=8192))
+    assert roomy.seeds[0].node.id == f"Fn:{long_id}"  # promoted to the front of the fused list
+    tight = search_knowledge(docs_engine, docs_engine.config, SearchRequest(query=query, hops=0, top_k=4, token_budget=256))
+    # The promoted record cannot fit the budget: it is omitted, not delivered, and the reply stays within budget.
+    assert f"Fn:{long_id}" not in tight.included_node_ids
+    assert tight.omitted_nodes >= 1 and tight.truncated
+    assert tight.response_token_estimate <= 256
+
+
+def test_exact_promotion_ignores_non_string_names(docs_engine):
+    docs_engine.execute_write("CREATE NODE TABLE Tagged(id STRING PRIMARY KEY, name STRING[], text STRING)")
+    docs_engine.execute_write("CREATE (n:Tagged {id: 't1', name: ['foo_bar', 'baz'], text: 'foo_bar text'})")
+    resp = search_knowledge(docs_engine, docs_engine.config, SearchRequest(query="foo_bar", hops=0, top_k=4))
+    assert [s.node.id for s in resp.seeds] == ["Tagged:t1"]  # returned normally, never promoted by a list name

@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import math
+import re
 import weakref
 from typing import Any, Literal
 
@@ -48,6 +49,37 @@ _MAX_EXPANSION_PATHS = 512  # per seed; bounds path enumeration on dense graphs
 
 
 LABEL_HITS_LIMIT = 8  # label_hits entries per response; the rest are counted as omitted
+EXACT_MATCH_WINDOW = 64  # fused candidates inspected for exact identifier names
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_CAMEL_CASE = re.compile(r"^[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+$")
+
+
+def identifier_tokens(query: str) -> set[str]:
+    """Query words that read as code identifiers: an underscore, or CamelCase with
+    at least two humps. Capitalized ordinary words never qualify."""
+    return {t for t in _IDENTIFIER.findall(query) if "_" in t or _CAMEL_CASE.match(t)}
+
+
+def _promote_exact_identifiers(fused: list[ScoredNode], query: str) -> list[ScoredNode]:
+    """Within the first EXACT_MATCH_WINDOW fused candidates, move nodes whose ``name``
+    equals an identifier token of the query to the front, keeping their fused order
+    among themselves and leaving every other candidate in place. Promotion happens
+    before diversity and packing and does not guarantee delivery; candidates beyond
+    the window are never promoted."""
+    tokens = identifier_tokens(query)
+    if not tokens:
+        return fused
+    head, tail = fused[:EXACT_MATCH_WINDOW], fused[EXACT_MATCH_WINDOW:]
+
+    def is_exact(scored: ScoredNode) -> bool:
+        name = scored.node.properties.get("name")
+        return isinstance(name, str) and name in tokens  # non-string names are left in place
+
+    exact = [s for s in head if is_exact(s)]
+    if not exact:
+        return fused
+    rest = [s for s in head if not is_exact(s)]
+    return [*exact, *rest, *tail]
 
 
 @bounded_work
@@ -133,7 +165,7 @@ def search_knowledge(
     ordered = sorted(counts.items(), key=lambda item: (item[1] != 0, -item[1], item[0]))
     label_hits = dict(ordered[:LABEL_HITS_LIMIT])
     label_hits_omitted = len(ordered) - len(label_hits)
-    fused = _rrf_fuse({"fts": fts_list, "vector": vec_list})
+    fused = _promote_exact_identifiers(_rrf_fuse({"fts": fts_list, "vector": vec_list}), req.query)
     seeds = _diversify(fused, top_k, config.search_label_cap)
     expanded, expansion_limited = _expand_neighborhood(
         engine, _seed_refs(seeds, pk), hops, pk,
