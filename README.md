@@ -53,11 +53,13 @@ that case, source builds and offline readiness checks.
 
 - **Find code structure:** definitions, signatures and line ranges, with supported
   import/call relationships. Source bodies stay in your files.
-- **Keep project memory:** agents save decisions, tasks and evidence, and can
-  preserve correction history when updating them.
+- **Keep project memory:** agents save decisions, tasks and evidence. Updates are
+  guarded by the `_revision` token that ordinary reads return, and each write reports
+  whether the prior version was kept in history.
 - **Connect documents and code:** index Markdown sections and link mentioned symbols.
-- **Retrieve focused context:** BM25 search, optional embeddings, graph expansion,
-  citations and explicit truncation. Budgets use a byte-based token estimate.
+- **Retrieve focused context:** BM25 search, optional local FastEmbed embeddings for
+  hybrid search, graph expansion, citations and explicit truncation. Budgets use a
+  byte-based token estimate.
 - **Share across harnesses:** Claude Code and Cursor can use one database through
   one owning server. New worktrees get separate databases by default.
 - **Preserve continuity:** consistent backups retain authored history and retry
@@ -66,8 +68,10 @@ that case, source builds and offline readiness checks.
 Code coverage varies. Python, JS/TS and Go support conservative static relationships;
 framework scripts and Java/C# overload identities also have explicit coverage.
 See [language coverage](https://krokz.github.io/grag/guides/code/#language-coverage). An absent edge does not prove no relationship
-exists. grag complements source search; useful answers and token savings depend on
-the question, graph and harness.
+exists. grag complements source search rather than replacing it. It does not
+guarantee lower token use: its tools and guidance add fixed context to each agent
+session ([tool loading](https://krokz.github.io/grag/reference/mcp/#tool-loading-in-agent-sessions)),
+and any saving depends on the question, the graph and the harness.
 
 ## Local by default
 
