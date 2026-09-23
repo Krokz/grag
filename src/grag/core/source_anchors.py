@@ -86,6 +86,22 @@ def anchor_sources(source: str | None, roots: list[str]) -> str | None:
     return json.dumps(anchors, ensure_ascii=False, separators=(",", ":")) if anchors else None
 
 
+def claim_changed(previous: dict | None, current: dict) -> bool:
+    """True when a write creates the record or changes its claim text or source.
+
+    Review, lifecycle and evidence-only updates, and identical re-saves, keep the
+    existing anchors: re-anchoring then would clear a pending change report without
+    anyone rechecking the claim.
+    """
+    if previous is None:
+        return True
+
+    def claim(row: dict) -> dict:
+        return {k: v for k, v in row.items() if (not k.startswith("_") or k == "_source") and v is not None}
+
+    return json.dumps(claim(previous), sort_keys=True, default=str) != json.dumps(claim(current), sort_keys=True, default=str)
+
+
 def changed_sources(encoded: Any) -> list[str]:
     """Cited tokens whose file content differs from its anchor, or is missing."""
     try:

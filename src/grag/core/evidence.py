@@ -150,13 +150,15 @@ def after_update(engine: Engine, node: UpsertNode, pk: str, prepared: dict | Non
                 if isinstance(value, dt.datetime):
                     value = value.astimezone(dt.timezone.utc).isoformat()
                 assignments[prop] = value
-    # Anchor the files the source cites at this write; reads report later changes.
+    # Anchor the files the source cites when the claim or source is written; reads
+    # report later changes. Other updates keep the anchors they had.
     from grag.code_state import index_records
-    from grag.core.source_anchors import ANCHOR_PROP, anchor_sources
+    from grag.core.source_anchors import ANCHOR_PROP, anchor_sources, claim_changed
 
-    anchors = anchor_sources(current.get("_source"), sorted(index_records(engine)))
-    if anchors != current.get(ANCHOR_PROP):
-        assignments[ANCHOR_PROP] = anchors
+    if claim_changed(prepared["previous"], current):
+        anchors = anchor_sources(current.get("_source"), sorted(index_records(engine)))
+        if anchors != current.get(ANCHOR_PROP):
+            assignments[ANCHOR_PROP] = anchors
     if assignments:
         engine.execute_write(
             f"MATCH (n:{node.label} {{{pk}:$key}}) SET " + ", ".join(f"n.{k}=${k}" for k in assignments),

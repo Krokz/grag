@@ -100,7 +100,9 @@ When a history-tracked record's `source` cites files (absolute paths, or paths
 under a registered code root), grag stores their content hashes at write time.
 Ordinary `search_knowledge` and `get_context` reads then add `_source_changed`,
 listing cited files whose content changed or went missing since the record was
-last written. Recheck those claims and correct the record, which re-anchors it.
+last written. Recheck those claims and correct the record: a write that changes the
+record's claim text or source re-anchors it, while review-only updates and identical
+re-saves keep the pending report.
 Only cited files are checked: a record without `_source_changed` may still be
 stale because of changes elsewhere. The stored anchors are not shown in replies
 and do not change the record's `_revision`.
