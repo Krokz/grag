@@ -154,8 +154,7 @@ _INSTRUCTIONS = (
     'Use focused search with known labels or context for known IDs. Stop recall when claim, '
     'scope, source and qualifications suffice; read again for a specific evidence gap, '
     'current-code check or edit guard. Off-topic hits need source inspection or corrected '
-    'scope. Search needs no schema preflight; '
-    'projected Cypher needs familiar schema. Repo names in query text are not scope filters. '
+    'scope. '
     'Capture step: when the user states a decision or you establish a reusable finding, save it '
     'before finishing unless the request is read-only. One search with explicit memory labels (an '
     'explicit zero in label_hits means no match, unless excluded_evidence is above zero — lifecycle-hidden matches; check evidence="all" before saving; a label in unknown_labels does not exist in this graph; do not repeat), then a guarded upsert_nodes with a scalar key, a source citing '
@@ -168,8 +167,7 @@ _INSTRUCTIONS = (
     'return unverified at its deadline. freshness_timeout_ms (0..60000, default 5000) bounds '
     'verification, not query execution. Legacy indexes need explicit ingest_code enrollment. '
     'Inspect evidence qualifiers, omissions and parser '
-    'coverage; absence is not completeness. Reuse records; retry lost writes with the exact '
-    'operation ID/payload. BM25 works without embeddings. Never delete WAL/shadow '
+    'coverage; absence is not completeness. Reuse records. Never delete WAL/shadow '
     'files to repair a database.'
 )
 
