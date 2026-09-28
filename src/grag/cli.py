@@ -276,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
 
     status = sub.add_parser("status", help="inspect database, server and client registrations without opening the graph")
     status.add_argument("--json", action="store_true", help="machine-readable installation and registration discovery")
+    status.add_argument("--verbose", "-v", action="store_true", help="show every server, full paths, runtime details and raw index state")
 
     start = sub.add_parser(
         "start",

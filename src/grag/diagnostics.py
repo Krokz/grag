@@ -221,6 +221,17 @@ def _owner(config: GragConfig) -> dict:
     target = admin.server_target(config)
     result: dict = {"status_lines": admin.status_lines(config), "log_path": str(admin.log_path(target)),
                     "registration_path": str(admin.pidfile_path(target)), "status": "not reachable"}
+    # Structured fields for the readable status view (no secrets such as shutdown tokens).
+    if str(target) != ":memory:":
+        resolved = target.resolve()
+        result["database_bytes"] = resolved.stat().st_size if resolved.is_file() else None
+        result["database_id8"] = admin._identity8(target)
+    result["embedder"] = ({"provider": config.embedder.provider, "model": config.embedder.model}
+                          if config.embedder is not None else None)
+    result["servers"] = [
+        {"pid": s.pid, "port": s.port, "host": s.host, "db": s.db, "is_db_dir": s.is_db_dir, "started_at": s.started_at,
+         "healthy": s.healthy, "verified": s.verified, "version": s.version, "current": s.is_current}
+        for s in admin.list_servers(current_db=target, cleanup=False)]
     info = admin.find_server(target)
     if info is None:
         return result
@@ -518,5 +529,12 @@ def run(args: argparse.Namespace) -> int:
             report["verification"] = verify(report, private, args.verify_client, args.timeout or 45)
             report["client_readiness"] = report["verification"]["status"]
             exit_ok = exit_ok and report["client_readiness"] == "verified"
-    print(json.dumps(report, ensure_ascii=True) if args.json else "\n".join(lines(report)))
+    if args.json:
+        print(json.dumps(report, ensure_ascii=True))
+    elif args.cmd == "status":
+        from grag.status_view import render, use_color
+
+        print("\n".join(render(report, color=use_color(sys.stdout), verbose=getattr(args, "verbose", False))))
+    else:
+        print("\n".join(lines(report)))
     return 0 if exit_ok else 1

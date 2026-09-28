@@ -115,7 +115,7 @@ corrections, retry semantics and the difference between retraction and deletion.
 | `restart --with-mcp` / `--no-mcp` | preserve current | Enables or disables mounted MCP while restarting. |
 | `restart --mcp-path PATH` | preserve current | Overrides the mounted MCP path while restarting. |
 | `restart --force` | off | Allows one-time migration of a live legacy registration after independently verifying its PID. |
-| `status` | `--json` (since 0.10.0) | Database/owner, runtime and saved-client discovery. Inspection preserves stale registrations and does not open graphs. |
+| `status` | `--json` (since 0.10.0), `--verbose` | Database/owner, runtime and saved-client discovery. Inspection preserves stale registrations and does not open graphs. The text view groups sections, flags problems with a fix command (for example an owner on an older grag, a registration selecting another database, outdated skills, a code root needing ingestion) and uses color on terminals (`NO_COLOR` disables it). `--verbose` adds every running server, full paths, runtime details and raw index state; `--json` is unchanged apart from added structured fields. |
 | `stop` | — | Gracefully stops the managed background server for the selected database. |
 | `stop -a` / `-all` / `--all` | off | Stops every safely verifiable managed grag server. Refuses unresolved legacy registrations instead of reporting false success. |
 | `stop --force` | off | Also permits signaling a live legacy/unverified registration; use only after independently verifying its recorded PID. |
