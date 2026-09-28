@@ -87,3 +87,10 @@ def test_color_follows_the_terminal_and_no_color(monkeypatch):
     assert not status_view.use_color(Tty())
     colored = "\n".join(status_view.render(report(), color=True))
     assert re.search(r"\033\[33m⚠ the server runs grag 0.10.1", colored)
+
+
+def test_sections_are_separated_by_blank_lines():
+    lines = status_view.render(report())
+    labelled = [i for i, line in enumerate(lines) if line[:1].isalpha() and not line.startswith(("grag ", "More detail"))
+                and line.split()[0] in {"Database", "Server", "Embedder", "Index", "Clients", "Skills", "Others"}]
+    assert len(labelled) == 7 and all(lines[i - 1] == "" for i in labelled)

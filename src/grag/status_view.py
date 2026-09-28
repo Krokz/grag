@@ -65,6 +65,8 @@ def render(report: dict, *, color: bool = False, verbose: bool = False) -> list[
     problems = 0
 
     def row(label: str, text: str) -> None:
+        if out and out[-1] != "":  # a blank line between sections
+            out.append("")
         out.append(st("bold", label.ljust(LABEL)) + text)
 
     def more(text: str) -> None:
